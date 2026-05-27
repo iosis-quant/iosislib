@@ -184,7 +184,7 @@ class Node:
         return hashlib.sha256(serialized_data.encode("utf-8")).hexdigest()
 
 
-class AbstractGraph:
+class Graph:
     def __init__(self, root_node: Node):
         self.root_node = root_node
         self.node_list = self.get_subgraph_execution_order(self.root_node)
