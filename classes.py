@@ -136,7 +136,6 @@ class Node:
         self._verify_schema_compatibility()
         self.ID = self._generate_persistent_id()
 
-
     def _verify_schema_compatibility(self):
         parent_output_map: dict[str, pa.DataType] = {}
         for parent in self.inputs:
