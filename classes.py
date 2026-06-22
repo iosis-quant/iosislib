@@ -2,7 +2,7 @@ from __future__ import annotations
 import abc
 import hashlib
 import json
-import pyarrow as pa
+import polars as pl
 import numpy as np
 from typing import Any, Type
 from dataclasses import dataclass, fields, MISSING
