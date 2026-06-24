@@ -12,8 +12,6 @@ import polars as pl
 
 @dataclass(frozen=True)
 class TSFNConfig(abc.ABC):
-    pass
-
     def __str__(self) -> str:
         def serializer(obj):
             if isinstance(obj, pl.DataType):
@@ -62,7 +60,7 @@ class TSFN(abc.ABC):
         return self.CONFIG_CLS(**params)
 
     @abc.abstractmethod
-    def type_signature(cls) -> tuple[
+    def type_signature(self) -> tuple[
         tuple[tuple[str, pl.DataType], ...],
         tuple[tuple[str, pl.DataType], ...],
     ]:
