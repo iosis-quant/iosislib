@@ -9,125 +9,108 @@ from typing import Any, Type
 import polars as pl
 import json
 
-
-class Schema:
-    def __init__(self, schema: pl.Schema):
-        self.schema = schema
-
-    def validate(self, lf: pl.LazyFrame) -> bool:
-        actual = lf.collect_schema()
-
-        for name, expected_dtype in self.schema.items():
-            if name not in actual:
-                raise ValueError(
-                    f"Schema violation! Missing required column '{name}'"
-                )
-
-            actual_dtype = actual[name]
-
-            if actual_dtype != expected_dtype:
-                raise TypeError(
-                    f"Type mismatch on '{name}': "
-                    f"expected {expected_dtype}, got {actual_dtype}"
-                )
-
-        return True
-
-    def serialize(self) -> str:
-        return json.dumps(
-            [(name, str(dtype)) for name, dtype in self.schema.items()]
-        )
-
-
 @dataclass(frozen=True)
 class TSFNConfig(abc.ABC):
     pass
 
-    def __str__(self):
-        sorted_fields = sorted(fields(self), key=lambda f: f.name)
-
-        canonical_map = {
-            f.name: (
-                {k: v for k, v in sorted(getattr(self, f.name).items())}
-                if isinstance(getattr(self, f.name), dict)
-                else getattr(self, f.name)
-            )
-            for f in sorted_fields
-        }
-
-        return str(canonical_map)
-
+    def __str__(self) -> str:
+        def serializer(obj):
+            if isinstance(obj, pl.DataType):
+                return str(obj)
+            raise TypeError(f"Type {type(obj)} not serializable")
+            
+        data = {f.name: getattr(self, f.name) for f in fields(self)}
+        return json.dumps(data, sort_keys=True, default=serializer)
 
 class TSFN(abc.ABC):
     CONFIG_CLS: Type[TSFNConfig] = TSFNConfig
 
     def __init__(
         self,
-        input_cols: list[tuple[str, pl.DataType]],
-        output_cols: list[tuple[str, pl.DataType]],
         parameters: dict[str, Any],
     ):
-        self.input_schema = Schema(input_cols)
-        self.output_schema = Schema(output_cols)
-
+        self.signature = self.type_signature()
         self.parameters = self._bind_and_validate_config(parameters)
 
-    def _bind_and_validate_config(
-        self, params: dict[str, Any]
-    ) -> TSFNConfig:
+    def _bind_and_validate_config(self, params: dict[str, Any]) -> TSFNConfig:
         config_fields = fields(self.CONFIG_CLS)
         allowed_fields = {f.name for f in config_fields}
 
+        # 1. Check for unexpected parameters (prevents silent typos)
+        extra_keys = params.keys() - allowed_fields
+        if extra_keys:
+            raise ValueError(
+                f"Unexpected parameters for {self.__class__.__name__}: {sorted(extra_keys)}"
+            )
+
+        # 2. Check for missing required parameters
         required_fields = {
-            f.name
-            for f in config_fields
+            f.name for f in config_fields
             if f.default is MISSING and f.default_factory is MISSING
         }
-
-        filtered_params = {
-            k: v for k, v in params.items() if k in allowed_fields
-        }
-
-        missing_keys = required_fields - filtered_params.keys()
+        missing_keys = required_fields - params.keys()
 
         if missing_keys:
             raise ValueError(
                 f"Parameter validation failed for {self.__class__.__name__}. "
-                f"Missing required parameters with no default values: "
-                f"{sorted(missing_keys)}. "
+                f"Missing required parameters: {sorted(missing_keys)}. "
                 f"Expected schema: {self.CONFIG_CLS.__annotations__}"
             )
 
-        return self.CONFIG_CLS(**filtered_params)
+        return self.CONFIG_CLS(**params)
 
-    def __str__(self) -> str:
-        return (
-            f"{self.__class__.__name__}"
-            f"(in:{self.input_schema.serialize()}, "
-            f"out:{self.output_schema.serialize()})"
-        )
-
-    def __call__(self, lf: pl.LazyFrame) -> pl.LazyFrame:
-        self.input_schema.validate(lf)
-
-        result = self.apply(lf)
-
-        self.output_schema.validate(result)
-
-        return result
-
+    @classmethod
     @abc.abstractmethod
-    def apply(self, df: pl.DataFrame) -> pl.DataFrame:
+    def type_signature(cls) -> tuple[
+        tuple[tuple[str, pl.DataType], ...],
+        tuple[tuple[str, pl.DataType], ...],
+    ]:
+        """Return ((input_col_specs, ...), (output_col_specs, ...))."""
         pass
 
+    def __str__(self) -> str:
+        input_sig, output_sig = self.signature
+        return (
+            f"{self.__class__.__name__}"
+            f"(in:{json.dumps([(n, str(d)) for n, d in input_sig])}, "
+            f"out:{json.dumps([(n, str(d)) for n, d in output_sig])})"
+        )
+
+    def validate_input_schema(self, lf: pl.LazyFrame) -> None:
+        """Validates that the incoming LazyFrame matches the expected input signature."""
+        # Uses cheap metadata schema collection!
+        current_schema = lf.collect_schema()
+        input_specs = self.signature[0]
+
+        for col_name, expected_type in input_specs:
+            if col_name not in current_schema:
+                raise ValueError(f"Missing required input column: '{col_name}'")
+            
+            actual_type = current_schema[col_name]
+            if actual_type != expected_type:
+                raise TypeError(
+                    f"Column '{col_name}' type mismatch. "
+                    f"Expected {expected_type}, got {actual_type}"
+                )
+
+    def __call__(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        # Validate schema instantly using Polars metadata before processing data
+        self.validate_input_schema(lf)
+        return self.apply(lf)
+
+    @abc.abstractmethod
+    def apply(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        """All transformations should be done lazily here."""
+        pass
 
 class Node:
     def __init__(
         self,
-        inputs: list["Node"],
         function_cls: type[TSFN],
-        input_cols: list[tuple[str, pl.DataType]],
-        output_cols: list[tuple[str, pl.DataType]],
+        bindings: dict[
+            str,
+            tuple[Node, str],
+        ],
         parameters: dict[str, Any] | None,
         name: str | None,
     ):
@@ -207,7 +190,6 @@ class Node:
         return hashlib.sha256(
             serialized_data.encode("utf-8")
         ).hexdigest()
-
 
 class Graph:
     def __init__(self, root_node: Node):
