@@ -31,8 +31,8 @@ class TSFN(abc.ABC):
         self,
         parameters: dict[str, Any],
     ):
-        self.signature = self.type_signature()
         self.parameters = self._bind_and_validate_config(parameters)
+        self.signature = self.type_signature()
 
     def _bind_and_validate_config(self, params: dict[str, Any]) -> TSFNConfig:
         config_fields = fields(self.CONFIG_CLS)
@@ -61,7 +61,6 @@ class TSFN(abc.ABC):
 
         return self.CONFIG_CLS(**params)
 
-    @classmethod
     @abc.abstractmethod
     def type_signature(cls) -> tuple[
         tuple[tuple[str, pl.DataType], ...],
