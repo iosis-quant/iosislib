@@ -1,2 +1,3 @@
 /dev/*
-/TODO.md
+.*_cache
+*.pyc
