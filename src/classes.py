@@ -42,23 +42,52 @@ class FrameSignature:
 
 
 def _dtype_matches(actual: pl.DataType, expected: pl.DataType) -> bool:
-    if actual == expected:
-        return True
-
     actual_is_class = _is_dtype_class(actual)
     expected_is_class = _is_dtype_class(expected)
 
-    if expected_is_class and not actual_is_class and isinstance(actual, expected):
-        return True
+    if actual_is_class or expected_is_class:
+        if actual_is_class and expected_is_class:
+            return actual is expected
 
-    if actual_is_class and not expected_is_class and isinstance(expected, actual):
-        return True
+        if expected_is_class:
+            return _matches_default_dtype_instance(actual, expected)
 
-    return False
+        return _matches_default_dtype_instance(expected, actual)
+
+    if _is_list_instance(actual) and _is_list_instance(expected):
+        return _dtype_matches(_list_inner_dtype(actual), _list_inner_dtype(expected))
+
+    return actual == expected
 
 
 def _is_dtype_class(dtype: pl.DataType) -> bool:
     return isinstance(dtype, type) and issubclass(dtype, pl.DataType)
+
+
+def _is_list_instance(dtype: pl.DataType) -> bool:
+    return not _is_dtype_class(dtype) and isinstance(dtype, pl.List)
+
+
+def _list_inner_dtype(dtype: pl.DataType) -> pl.DataType:
+    return dtype.inner
+
+
+def _matches_default_dtype_instance(
+    dtype_instance: pl.DataType,
+    dtype_cls: type[pl.DataType],
+) -> bool:
+    if dtype_cls is pl.List or _is_list_instance(dtype_instance):
+        return False
+
+    try:
+        default_instance = dtype_cls()
+    except TypeError:
+        return False
+
+    return (
+        type(dtype_instance) is type(default_instance)
+        and repr(dtype_instance) == repr(default_instance)
+    )
 
 
 def _format_frame_signature(signature: FrameSignature) -> dict[str, Any]:

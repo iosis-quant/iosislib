@@ -8,7 +8,6 @@ import pytest
 
 from src.classes import FrameSignature, Graph, Node, TSFN, TSFNConfig, TimeAxis
 
-
 VALUE_FRAME = FrameSignature(columns=(("value", pl.Int64),))
 COMBINED_FRAME = FrameSignature(columns=(("left", pl.Int64), ("right", pl.Int64)))
 
