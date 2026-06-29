@@ -2,23 +2,30 @@
 
 ## Project Structure & Module Organization
 
-This repository is intentionally compact. `classes.py` is the core Python module and currently defines the transformation function base classes (`TSFN`, `TSFNConfig`) plus `Node` and `Graph` orchestration. `TODO.md` records short design notes. `dev/` is ignored by Git and is for local experiments; `dev/synthetic.py` generates sample time-series data and plots it. Put production code in tracked modules, not under `dev/`. Add future tests under `tests/`.
+This repository is intentionally compact, but it has moved into a small package-style layout. `src/classes.py` is the core Python module and defines the transformation function base classes (`TSFN`, `TSFNConfig`), frame contracts (`TimeAxis`, `FrameSignature`), and `Node`/`Graph` orchestration. `tests/` contains the pytest suite for schema validation, identity, binding, and execution behavior. `TODO.md` records short design notes.
+
+Use `./temp/` for temporary work: researching approaches, assembling junk files, stringing together experiments, or sketching functionality before it belongs in tracked source. Treat it as the project's blank canvas. Do not put production code there, and do not rely on files in `temp/` for tests or library behavior.
 
 ## Build, Test, and Development Commands
 
-- `python -m py_compile classes.py`: checks the library module for syntax errors.
-- `python dev/synthetic.py`: runs the local synthetic-data example; it expects optional packages such as Polars, NumPy, and Matplotlib.
-- `python -m pytest`: expected test runner once a `tests/` suite exists.
+- `python -m py_compile src/classes.py`: checks the library module for syntax errors.
+- `python -m pytest`: runs the test suite.
 
-No package manifest is present yet, so install dependencies in your local environment as needed.
+`pyproject.toml` contains the minimal package/test configuration. Install runtime and test dependencies in your local environment as needed.
 
 ## Coding Style & Naming Conventions
 
-Use Python 3 style with type hints, dataclasses, abstract base classes, and Polars `LazyFrame` transformations. Prefer lazy operations inside `TSFN.apply()` and keep validation errors explicit. Use four-space indentation. Name classes with `PascalCase`, functions and variables with `snake_case`, and constants with uppercase names such as `START_DATE`. Keep node and graph identifiers deterministic by avoiding unordered data in ID inputs unless it is sorted first.
+Use modern Python 3 style with `from __future__ import annotations`, type hints, dataclasses, abstract base classes, and Polars `LazyFrame` transformations. Prefer frozen dataclasses for value objects and configs. Keep validation errors explicit and specific: use `ValueError` for invalid structure or missing fields and `TypeError` for dtype/timezone mismatches.
+
+Follow the existing style in `src/classes.py`: four-space indentation, `PascalCase` classes, `snake_case` functions and variables, uppercase class constants such as `VERSION`, and private helper functions prefixed with `_`. Use small helper functions when they make validation or formatting rules reusable.
+
+Model frame contracts with `FrameSignature` and `TimeAxis`. Store signature columns as tuples of `(name, dtype)` pairs, not lists. New `TSFN` subclasses must define a non-empty string `VERSION`, use a `TSFNConfig` dataclass through `CONFIG_CLS` when parameters are needed, return `(input_signature, output_signature)` from `type_signature()`, and keep transformations lazy inside `apply()`.
+
+Keep node and graph identifiers deterministic. If data contributes to persistent IDs, serialize it with sorted keys or sorted items, and avoid unordered inputs unless they are normalized first. Human-facing names should remain labels only; identity should come from function identity, version, signatures, parameters, outputs, and bindings.
 
 ## Testing Guidelines
 
-Use `pytest` for new tests. Place tests in `tests/` and name files `test_*.py`. Prioritize coverage for schema validation, graph binding validation, cycle detection, deterministic node and graph IDs, and execution behavior with small Polars `LazyFrame` fixtures. Include both success cases and clear failure expectations with `pytest.raises`.
+Use `pytest` for new tests. Place tests in `tests/` and name files `test_*.py`. Prioritize coverage for schema validation, frame signature invariants, graph binding validation, time-axis compatibility, cycle detection, deterministic node and graph IDs, TSFN version/config behavior, and execution behavior with small Polars `LazyFrame` fixtures. Include both success cases and clear failure expectations with `pytest.raises`.
 
 ## Commit & Pull Request Guidelines
 
@@ -26,4 +33,4 @@ Recent Git history uses very terse subjects, but new commits should be clearer a
 
 ## Security & Configuration Tips
 
-Do not commit generated data, plots, virtual environments, or local scratch files. Keep experimental scripts in ignored paths such as `dev/`, and avoid embedding secrets or machine-specific paths in tracked files.
+Do not commit generated data, plots, virtual environments, caches, or local scratch files. Keep throwaway research and experiments in ignored paths such as `temp/`, and avoid embedding secrets or machine-specific paths in tracked files.

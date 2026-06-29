@@ -1,3 +1,4 @@
-/temp/*
+temp
+.agents
 .*_cache
 *.pyc

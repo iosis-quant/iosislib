@@ -3,11 +3,17 @@ from __future__ import annotations
 import abc
 import hashlib
 import json
-from dataclasses import MISSING, dataclass, field, fields
-from typing import Any, Type
+from datetime import timedelta
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass
+from typing import Any, ClassVar, Type
 from collections import defaultdict
+from collections.abc import Mapping
+import inspect
+from types import MappingProxyType
 
 import polars as pl
+
+AsofTolerance = str | int | float | timedelta | None
 
 
 @dataclass(frozen=True)
@@ -24,12 +30,28 @@ class FrameSignature:
 
     @classmethod
     def empty(cls) -> FrameSignature:
+        """Return the explicit signature for a TSFN that consumes no input frame."""
         return cls(time=None, columns=())
 
     def __post_init__(self) -> None:
         if not isinstance(self.columns, tuple):
             raise TypeError("columns must be a tuple, not a list")
         columns = self.columns
+        for column in columns:
+            if (
+                not isinstance(column, tuple)
+                or len(column) != 2
+                or not isinstance(column[0], str)
+            ):
+                raise TypeError("columns must contain (name, dtype) tuples")
+
+        column_names = [name for name, _ in columns]
+        duplicate_names = sorted(
+            {name for name in column_names if column_names.count(name) > 1}
+        )
+        if duplicate_names:
+            raise ValueError(f"Duplicate value columns: {duplicate_names}")
+
         if self.time is None and columns:
             raise ValueError("Inputless frame signatures cannot declare value columns")
         if self.time is not None and any(name == self.time.column for name, _ in columns):
@@ -72,6 +94,12 @@ def _list_inner_dtype(dtype: pl.DataType) -> pl.DataType:
     return dtype.inner
 
 
+def _datetime_dtype_without_timezone(dtype: pl.DataType) -> pl.DataType:
+    if not _is_dtype_class(dtype) and isinstance(dtype, pl.Datetime):
+        return pl.Datetime(time_unit=dtype.time_unit)
+    return dtype
+
+
 def _matches_default_dtype_instance(
     dtype_instance: pl.DataType,
     dtype_cls: type[pl.DataType],
@@ -86,7 +114,7 @@ def _matches_default_dtype_instance(
 
     return (
         type(dtype_instance) is type(default_instance)
-        and repr(dtype_instance) == repr(default_instance)
+        and dtype_instance == default_instance
     )
 
 
@@ -105,6 +133,26 @@ def _format_frame_signature(signature: FrameSignature) -> dict[str, Any]:
     }
 
 
+def _format_tolerance(tolerance: AsofTolerance) -> dict[str, str] | None:
+    if tolerance is None:
+        return None
+    return {
+        "type": type(tolerance).__name__,
+        "value": str(tolerance),
+    }
+
+
+def _format_function_identity(function: TSFN) -> dict[str, Any]:
+    input_sig, output_sig = function.signature
+    return {
+        "module": function.__class__.__module__,
+        "qualname": function.__class__.__qualname__,
+        "version": function.version,
+        "input_signature": _format_frame_signature(input_sig),
+        "output_signature": _format_frame_signature(output_sig),
+    }
+
+
 @dataclass(frozen=True)
 class TSFNConfig(abc.ABC):
     def __str__(self) -> str:
@@ -118,12 +166,42 @@ class TSFNConfig(abc.ABC):
 
 
 class TSFN(abc.ABC):
-    CONFIG_CLS: Type[TSFNConfig] = TSFNConfig
+    CONFIG_CLS: ClassVar[Type[TSFNConfig]] = TSFNConfig
+    VERSION: ClassVar[str]
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        if not inspect.isabstract(cls):
+            cls._validate_config_cls()
+            cls._validate_version()
+
+    @classmethod
+    def _validate_version(cls) -> str:
+        if "VERSION" not in cls.__dict__:
+            raise TypeError(f"TSFN subclass '{cls.__name__}' must define VERSION")
+        if not isinstance(cls.VERSION, str):
+            raise TypeError(f"TSFN subclass '{cls.__name__}' VERSION must be a string")
+        if not cls.VERSION.strip():
+            raise ValueError(f"TSFN subclass '{cls.__name__}' VERSION must be non-empty")
+        return cls.VERSION
+
+    @classmethod
+    def _validate_config_cls(cls) -> type[TSFNConfig]:
+        config_cls = cls.CONFIG_CLS
+        if not isinstance(config_cls, type):
+            raise TypeError(f"{cls.__name__}.CONFIG_CLS must be a class")
+        if not is_dataclass(config_cls):
+            raise TypeError(f"{cls.__name__}.CONFIG_CLS must be a dataclass")
+        if not issubclass(config_cls, TSFNConfig):
+            raise TypeError(f"{cls.__name__}.CONFIG_CLS must inherit TSFNConfig")
+        return config_cls
 
     def __init__(
         self,
         parameters: dict[str, Any],
     ):
+        self._validate_config_cls()
+        self.version = self._validate_version()
         self.parameters = self._bind_and_validate_config(parameters)
         self.signature = self.type_signature()
 
@@ -165,7 +243,7 @@ class TSFN(abc.ABC):
     def __str__(self) -> str:
         input_sig, output_sig = self.signature
         return (
-            f"{self.__class__.__name__}"
+            f"{self.__class__.__module__}.{self.__class__.__qualname__}@{self.version}"
             f"(in:{json.dumps(_format_frame_signature(input_sig), sort_keys=True)}, "
             f"out:{json.dumps(_format_frame_signature(output_sig), sort_keys=True)})"
         )
@@ -202,7 +280,10 @@ class TSFN(abc.ABC):
             raise ValueError(f"Missing required {schema_name} time column: '{time_axis.column}'")
 
         actual_time_type = current_schema[time_axis.column]
-        if not _dtype_matches(actual_time_type, time_axis.dtype):
+        if not _dtype_matches(
+            _datetime_dtype_without_timezone(actual_time_type),
+            _datetime_dtype_without_timezone(time_axis.dtype),
+        ):
             raise TypeError(
                 f"Time column '{time_axis.column}' type mismatch. "
                 f"Expected {time_axis.dtype}, got {actual_time_type}"
@@ -245,12 +326,18 @@ class TSFN(abc.ABC):
 
 
 class Node:
+    def __setattr__(self, name: str, value: Any) -> None:
+        if object.__getattribute__(self, "__dict__").get("_frozen", False):
+            raise AttributeError("Node instances are immutable")
+        object.__setattr__(self, name, value)
+
     def __init__(
         self,
         function_cls: type[TSFN],
         bindings: dict[str, tuple[Node, str]] | None = None,
         parameters: dict[str, Any] | None = None,
         name: str | None = None,
+        tolerances: dict[str, AsofTolerance] | None = None,
     ):
         self.name = name
         self.function_cls = function_cls
@@ -258,37 +345,79 @@ class Node:
         self.parameters = self.function.parameters
         
         # bindings map TSFN semantic input names to (parent_node, parent_output_column)
-        self.bindings = bindings or {}
+        self.bindings = MappingProxyType(dict(bindings or {}))
+        self.tolerances = MappingProxyType(dict(tolerances or {}))
+        unexpected_tolerances = set(self.tolerances) - set(self.bindings)
+        if unexpected_tolerances:
+            raise ValueError(
+                f"Unexpected tolerances for unbound inputs: {sorted(unexpected_tolerances)}"
+            )
         
         # Deduplicate and extract unique parent Nodes preserving order
         self.inputs = tuple(dict.fromkeys(parent for parent, _ in self.bindings.values()))
         
         # Map exposed output names to their corresponding data types
-        self.outputs = {name: dtype for name, dtype in self.function.signature[1].columns}
+        self.outputs = MappingProxyType(
+            {name: dtype for name, dtype in self.function.signature[1].columns}
+        )
         
         self.ID = self._generate_persistent_id()
+        self._frozen = True
 
     def __getattr__(self, name: str) -> tuple[Node, str]:
         """Provides syntactical sugar to reference outputs (e.g., node.lagged)."""
-        if name in self.outputs:
+        attrs = object.__getattribute__(self, "__dict__")
+        outputs = attrs.get("outputs")
+        if isinstance(outputs, Mapping) and name in outputs:
             return (self, name)
+        function_cls = attrs.get("function_cls")
+        function_name = (
+            function_cls.__name__
+            if isinstance(function_cls, type)
+            else "<uninitialized>"
+        )
         raise AttributeError(
-            f"'{self.__class__.__name__}' or its configured TSFN '{self.function_cls.__name__}' "
+            f"'{self.__class__.__name__}' or its configured TSFN '{function_name}' "
             f"does not expose output: '{name}'"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Node) and self.ID == other.ID
+
+    def __hash__(self) -> int:
+        return hash(self.ID)
+
+    def __repr__(self) -> str:
+        attrs = object.__getattribute__(self, "__dict__")
+        node_id = attrs.get("ID", "<uninitialized>")
+        function_cls = attrs.get("function_cls")
+        function = attrs.get("function")
+        function_name = (
+            function_cls.__name__
+            if isinstance(function_cls, type)
+            else "<uninitialized>"
+        )
+        version = getattr(function, "version", "<uninitialized>")
+        return (
+            f"Node(name={attrs.get('name')!r}, id={str(node_id)[:8]!r}, "
+            f"fn={function_name}@{version})"
         )
 
     def _generate_persistent_id(self) -> str:
         # Serialize bindings deterministically by sorting semantic input keys
         serialized_bindings = {
-            input_name: [parent.ID, parent_col]
+            input_name: {
+                "parent_id": parent.ID,
+                "parent_output": parent_col,
+                "tolerance": _format_tolerance(self.tolerances.get(input_name)),
+            }
             for input_name, (parent, parent_col) in sorted(self.bindings.items())
         }
         
         node_definition = {
-            "name": self.name,
             "bindings": serialized_bindings,
-            "function": str(self.function),
-            "parameters": str(self.parameters),
+            "function": _format_function_identity(self.function),
+            "parameters": json.loads(str(self.parameters)),
             "outputs": sorted([(name, str(dtype)) for name, dtype in self.outputs.items()]),
         }
 
@@ -305,6 +434,12 @@ class Graph:
         self._validate_graph()
         
         self.ID = self._generate_persistent_id()
+
+    def __repr__(self) -> str:
+        return (
+            f"Graph(id={self.ID[:8]!r}, root={self.root_node.ID[:8]!r}, "
+            f"nodes={len(self.node_list)})"
+        )
 
     def get_subgraph_execution_order(self, target_node: Node) -> list[Node]:
         visited: set[str] = set()
@@ -333,15 +468,25 @@ class Graph:
 
     def _validate_graph(self) -> None:
         """Validates bindings, outputs, and type compatibility at construction."""
+        node_ids = {graph_node.ID for graph_node in self.node_list}
+
         for node in self.node_list:
             input_signature = node.function.signature[0]
             expected_inputs = {name for name, _ in input_signature.columns}
             bound_inputs = set(node.bindings.keys())
+            tolerance_inputs = set(node.tolerances.keys())
 
             if not node.bindings and not input_signature.is_empty():
                 raise ValueError(
                     f"Binding validation failed for node '{node.name or node.ID}'. "
                     "Nodes with no predecessors must declare an empty input signature."
+                )
+
+            extra_tolerances = tolerance_inputs - bound_inputs
+            if extra_tolerances:
+                raise ValueError(
+                    f"Binding validation failed for node '{node.name or node.ID}'. "
+                    f"Unexpected tolerances for unbound inputs: {sorted(extra_tolerances)}"
                 )
 
             # 1. Binding completeness
@@ -368,7 +513,7 @@ class Graph:
             # 2. Output existence & 3. Type compatibility
             input_types = dict(input_signature.columns)
             for input_name, (parent_node, parent_col) in node.bindings.items():
-                if parent_node not in self.node_list:
+                if parent_node.ID not in node_ids:
                     raise ValueError(
                         f"Node '{node.name or node.ID}' binds to parent "
                         f"'{parent_node.name or parent_node.ID}' which is not in this graph."
@@ -431,7 +576,7 @@ class Graph:
     def _generate_persistent_id(self) -> str:
         graph_definition = {
             "root_id": self.root_node.ID,
-            "nodes": [node.ID for node in self.node_list],
+            "nodes": sorted(node.ID for node in self.node_list),
         }
 
         serialized_data = json.dumps(graph_definition, sort_keys=True)
@@ -441,49 +586,66 @@ class Graph:
         results: dict[str, pl.LazyFrame] = {}
 
         for node in self.node_list:
-            if not node.bindings:
-                results[node.ID] = node.function()
-            else:
-                # Construct TSFN input dataframe by grouping projections per parent
-                parent_to_bindings = defaultdict(list)
-                for input_name, (parent_node, parent_col) in node.bindings.items():
-                    parent_to_bindings[parent_node].append((parent_col, input_name))
+            try:
+                if not node.bindings:
+                    results[node.ID] = node.function()
+                else:
+                    # Construct TSFN input dataframe by grouping projections per parent
+                    parent_to_bindings = defaultdict(list)
+                    for input_name, (parent_node, parent_col) in node.bindings.items():
+                        tolerance = node.tolerances.get(input_name)
+                        parent_to_bindings[(parent_node, tolerance)].append((parent_col, input_name))
 
-                input_time = node.function.signature[0].time
-                if input_time is None:
-                    raise ValueError(
-                        f"Bound node '{node.name or node.ID}' must declare an input time axis"
-                    )
-                time_col = input_time.column
-                parent_frames = []
-                for parent_node, binds in parent_to_bindings.items():
-                    parent_lf = results[parent_node.ID]
-                    parent_time = parent_node.function.signature[1].time
-                    if parent_time is None:
+                    input_time = node.function.signature[0].time
+                    if input_time is None:
                         raise ValueError(
-                            f"Parent node '{parent_node.name or parent_node.ID}' "
-                            "must declare an output time axis"
+                            f"Bound node '{node.name or node.ID}' must declare an input time axis"
                         )
-                    # Select expected columns and alias them directly to the TSFN's semantic input name.
-                    select_exprs = [pl.col(parent_time.column).alias(time_col)]
-                    select_exprs.extend(pl.col(p_col).alias(i_name) for p_col, i_name in binds)
-                    parent_frames.append(parent_lf.select(select_exprs).sort(time_col))
+                    time_col = input_time.column
+                    parent_frames = []
+                    for (parent_node, tolerance), binds in parent_to_bindings.items():
+                        parent_lf = results[parent_node.ID]
+                        parent_time = parent_node.function.signature[1].time
+                        if parent_time is None:
+                            raise ValueError(
+                                f"Parent node '{parent_node.name or parent_node.ID}' "
+                                "must declare an output time axis"
+                            )
+                        # Select expected columns and alias them directly to the TSFN's semantic input name.
+                        select_exprs = [pl.col(parent_time.column).alias(time_col)]
+                        select_exprs.extend(pl.col(p_col).alias(i_name) for p_col, i_name in binds)
+                        parent_frames.append(
+                            (parent_lf.select(select_exprs).sort(time_col), tolerance)
+                        )
 
-                # Preserve every parent timestamp, then align each parent without lookahead.
-                node_input_lf = (
-                    pl.concat(
-                        [parent_lf.select(time_col) for parent_lf in parent_frames],
-                        how="vertical",
+                    # Preserve every parent timestamp, then align each parent without lookahead.
+                    node_input_lf = (
+                        pl.concat(
+                            [parent_lf.select(time_col) for parent_lf, _ in parent_frames],
+                            how="vertical",
+                        )
+                        .unique()
+                        .sort(time_col)
                     )
-                    .unique()
-                    .sort(time_col)
-                )
-                for parent_lf in parent_frames:
-                    node_input_lf = node_input_lf.join_asof(
-                        parent_lf,
-                        on=time_col,
-                        strategy="backward",
-                    )
-                results[node.ID] = node.function(node_input_lf)
+                    for parent_lf, tolerance in parent_frames:
+                        node_input_lf = node_input_lf.join_asof(
+                            parent_lf,
+                            on=time_col,
+                            strategy="backward",
+                            tolerance=tolerance,
+                        )
+                    results[node.ID] = node.function(node_input_lf)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Execution failed at node '{node.name or node.ID[:8]}' "
+                    f"({node.function_cls.__name__}@{node.function.version}): {exc}"
+                ) from exc
 
-        return results[self.root_node.ID].collect()
+        try:
+            return results[self.root_node.ID].collect()
+        except Exception as exc:
+            node = self.root_node
+            raise RuntimeError(
+                f"Execution failed while collecting root node '{node.name or node.ID[:8]}' "
+                f"({node.function_cls.__name__}@{node.function.version}): {exc}"
+            ) from exc
