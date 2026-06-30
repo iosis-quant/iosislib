@@ -434,6 +434,7 @@ class Graph:
         self._validate_graph()
         
         self.ID = self._generate_persistent_id()
+        self._compiled_root_lf: pl.LazyFrame | None = None
 
     def __repr__(self) -> str:
         return (
@@ -582,7 +583,10 @@ class Graph:
         serialized_data = json.dumps(graph_definition, sort_keys=True)
         return hashlib.sha256(serialized_data.encode("utf-8")).hexdigest()
 
-    def execute(self) -> pl.DataFrame:
+    def compile(self) -> pl.LazyFrame:
+        if self._compiled_root_lf is not None:
+            return self._compiled_root_lf
+
         results: dict[str, pl.LazyFrame] = {}
 
         for node in self.node_list:
@@ -641,8 +645,16 @@ class Graph:
                     f"({node.function_cls.__name__}@{node.function.version}): {exc}"
                 ) from exc
 
+        self._compiled_root_lf = results[self.root_node.ID]
+        return self._compiled_root_lf
+
+    def execute(self) -> pl.DataFrame:
+        root_lf = self._compiled_root_lf
+        if root_lf is None:
+            root_lf = self.compile()
+
         try:
-            return results[self.root_node.ID].collect()
+            return root_lf.collect()
         except Exception as exc:
             node = self.root_node
             raise RuntimeError(

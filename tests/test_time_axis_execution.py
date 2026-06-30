@@ -150,6 +150,18 @@ def test_inputless_tsfn_apply_is_called_without_frame() -> None:
     assert result["value"].to_list() == [10, 20]
 
 
+def test_graph_compile_returns_and_caches_root_lazyframe() -> None:
+    source = source_node("source", (0, 1), (10, 20))
+    graph = Graph(source)
+
+    compiled = graph.compile()
+
+    assert isinstance(compiled, pl.LazyFrame)
+    assert graph.compile() is compiled
+    assert graph._compiled_root_lf is compiled
+    assert graph.execute()["value"].to_list() == [10, 20]
+
+
 def test_inputful_tsfn_receives_lazyframe() -> None:
     source = source_node("source", (0, 1), (10, 20))
     transform = Node(
