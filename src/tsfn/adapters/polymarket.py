@@ -42,6 +42,7 @@ class PolymarketPriceHistoryConfig(TSFNConfig):
     price_column: str = "price"
     alignment_tolerance: str | int | float | None = None
     market_column_names: tuple[str, ...] | list[str] | None = None
+    include_unpriced_markets: bool = False
 
     def __post_init__(self) -> None:
         if self.token_id is None and self.event_slug is None:
@@ -88,6 +89,8 @@ class PolymarketPriceHistoryConfig(TSFNConfig):
             raise ValueError("alignment_tolerance must be non-empty when provided")
         if isinstance(self.alignment_tolerance, Real) and self.alignment_tolerance < 0:
             raise ValueError("alignment_tolerance must be non-negative")
+        if not isinstance(self.include_unpriced_markets, bool):
+            raise TypeError("include_unpriced_markets must be a bool")
         if self.market_column_names is not None:
             if self.event_slug is None:
                 raise ValueError("market_column_names can only be used with event_slug")
@@ -128,6 +131,7 @@ class PolymarketPriceHistory(TSFN):
                 payload,
                 requested_slug=self.parameters.event_slug,
                 column_names=self.parameters.market_column_names,
+                include_unpriced_markets=self.parameters.include_unpriced_markets,
             )
             self._resolved_event_markets = markets
         return markets
@@ -319,6 +323,7 @@ def _markets_from_event_payload(
     *,
     requested_slug: str | None,
     column_names: tuple[str, ...] | None = None,
+    include_unpriced_markets: bool = False,
 ) -> tuple[PolymarketMarket, ...]:
     event = _event_from_payload(payload, requested_slug=requested_slug)
 
@@ -326,12 +331,17 @@ def _markets_from_event_payload(
     if not isinstance(markets, list):
         raise ValueError("Polymarket event payload must contain a markets list")
 
+    included_markets = [
+        market
+        for market in markets
+        if include_unpriced_markets or not _market_is_explicitly_unpriced(market)
+    ]
     output_column_names = _event_market_column_names(
-        market_count=len(markets),
+        market_count=len(included_markets),
         column_names=column_names,
     )
     event_markets = []
-    for index, market in enumerate(markets):
+    for index, market in enumerate(included_markets):
         if not isinstance(market, dict):
             raise ValueError("Polymarket event markets must be JSON objects")
         outcomes = _json_array_field(market, "outcomes")
@@ -352,6 +362,30 @@ def _markets_from_event_payload(
         )
 
     return tuple(event_markets)
+
+
+def _market_is_explicitly_unpriced(market: Any) -> bool:
+    if not isinstance(market, dict):
+        return False
+
+    if "outcomePrices" not in market:
+        has_lifecycle_flags = any(key in market for key in ("active", "funded", "ready"))
+        return (
+            has_lifecycle_flags
+            and market.get("active") is False
+            and market.get("funded") is False
+            and market.get("ready") is False
+        )
+
+    outcome_prices = market.get("outcomePrices")
+    if outcome_prices is None or outcome_prices == "":
+        return True
+    if isinstance(outcome_prices, str):
+        try:
+            outcome_prices = json.loads(outcome_prices)
+        except json.JSONDecodeError:
+            return False
+    return isinstance(outcome_prices, list) and len(outcome_prices) == 0
 
 
 def _event_market_column_names(

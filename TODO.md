@@ -4,12 +4,14 @@
 - fix polymarket price getter (for some markets it is bringing in weird columns), set rigourous tests against api
 - polymarket historical orderbook getter
 - yf price getter (mid data but we cope)
-- databento l3/2 price adapter (abuse free data)
+- databento l3/l2 price adapter (abuse free data)
 - create good abstraction for adapters based on the existing adapters
 - non ml transforms + testing (arith, timeseries, etc)
 - ml training -> nodes own scheduling criteria for retraining, we always assume that historical data exists and can be fetched
 - basic scheduler, always prefer columnar transforms to row transforms in scheduler
 - backtesting engine + assumptions? granularity based on data, parameterised
-- validation methods
+- end to end validation methods
+- error propagation -> the program shouldnt crash at compiletime and should raise all errors at once with some error union or error array?
 - summary stats
 - cloud???
+# - rank polymorphism

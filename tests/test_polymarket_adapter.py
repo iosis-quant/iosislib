@@ -160,6 +160,54 @@ def test_polymarket_event_payload_accepts_explicit_market_column_names() -> None
     )
 
 
+def test_polymarket_event_payload_skips_explicitly_unpriced_markets_by_default() -> None:
+    payload = {
+        "slug": "company-event",
+        "markets": [
+            {
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": None,
+                "clobTokenIds": '["empty-yes", "empty-no"]',
+            },
+            {
+                "outcomes": '["Yes", "No"]',
+                "active": False,
+                "funded": False,
+                "ready": False,
+                "clobTokenIds": '["inactive-yes", "inactive-no"]',
+            },
+            {
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.4", "0.6"]',
+                "clobTokenIds": '["priced-yes", "priced-no"]',
+            },
+        ],
+    }
+
+    markets = polymarket._markets_from_event_payload(
+        payload,
+        requested_slug="company-event",
+    )
+    all_markets = polymarket._markets_from_event_payload(
+        payload,
+        requested_slug="company-event",
+        include_unpriced_markets=True,
+    )
+
+    assert markets == (
+        polymarket.PolymarketMarket(
+            column_name="0",
+            outcomes=("Yes", "No"),
+            token_ids=("priced-yes", "priced-no"),
+        ),
+    )
+    assert tuple(market.token_ids for market in all_markets) == (
+        ("empty-yes", "empty-no"),
+        ("inactive-yes", "inactive-no"),
+        ("priced-yes", "priced-no"),
+    )
+
+
 def test_polymarket_event_payload_validation_is_explicit() -> None:
     with pytest.raises(ValueError, match="No Polymarket event found"):
         polymarket._markets_from_event_payload([], requested_slug="missing")
@@ -269,6 +317,12 @@ def test_polymarket_price_history_config_validation() -> None:
 
     with pytest.raises(TypeError, match="alignment_tolerance must be"):
         PolymarketPriceHistoryConfig(token_id="123", alignment_tolerance=True)
+
+    with pytest.raises(TypeError, match="include_unpriced_markets must be a bool"):
+        PolymarketPriceHistoryConfig(
+            event_slug="slug",
+            include_unpriced_markets="yes",
+        )
 
     with pytest.raises(ValueError, match="can only be used with event_slug"):
         PolymarketPriceHistoryConfig(token_id="123", market_column_names=("a",))
