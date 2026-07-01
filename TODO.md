@@ -1,2 +1,15 @@
 - caching function results and data
 - adapters for csv, parquet, polymarket
+- type hinting for parameters -> dicts is clunky, would be nicer to have something typed.
+- fix polymarket price getter (for some markets it is bringing in weird columns), set rigourous tests against api
+- polymarket historical orderbook getter
+- yf price getter (mid data but we cope)
+- databento l3/2 price adapter (abuse free data)
+- create good abstraction for adapters based on the existing adapters
+- non ml transforms + testing (arith, timeseries, etc)
+- ml training -> nodes own scheduling criteria for retraining, we always assume that historical data exists and can be fetched
+- basic scheduler, always prefer columnar transforms to row transforms in scheduler
+- backtesting engine + assumptions? granularity based on data, parameterised
+- validation methods
+- summary stats
+- cloud???
