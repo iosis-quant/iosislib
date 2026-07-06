@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import polars as pl
 
-from src.classes import FrameSignature, TSFN, TSFNConfig, TimeAxis
+from src.classes import FrameSignature, ItemwiseStructTSFN, TSFNConfig, TimeAxis
 from src.tsfn.transforms._validation import validate_column_name, validate_distinct_columns
 
 
@@ -26,7 +26,7 @@ class RatioConfig(TSFNConfig):
         validate_distinct_columns(self.timestamp_column, self.output_column)
 
 
-class Ratio(TSFN):
+class Ratio(ItemwiseStructTSFN):
     VERSION = "0.1.0"
     CONFIG_CLS = RatioConfig
 
@@ -45,14 +45,25 @@ class Ratio(TSFN):
         )
         return input_frame, output_frame
 
-    def apply(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+    def batch_input_columns(self) -> tuple[str, ...]:
         params = self.parameters
-        denominator = pl.col(params.denominator_column)
-        ratio = (
-            pl.when((denominator.is_null() | (denominator == 0.0)))
-            .then(pl.lit(None, dtype=pl.Float64))
-            .otherwise(pl.col(params.numerator_column) / denominator)
-            .cast(pl.Float64)
-            .alias(params.output_column)
-        )
-        return lf.select(params.timestamp_column, ratio)
+        return (params.numerator_column, params.denominator_column)
+
+    def batch_output_column(self) -> str:
+        return self.parameters.output_column
+
+    def batch(self, fields: dict[str, pl.Series]) -> pl.Series:
+        params = self.parameters
+        ratio = fields[params.numerator_column] / fields[params.denominator_column]
+        output_shape = self.output_column_signature(params.output_column).shape
+
+        if output_shape:
+            ratio = ratio.arr.eval(
+                pl.when(pl.element().is_infinite())
+                .then(None)
+                .otherwise(pl.element())
+            )
+        else:
+            ratio = ratio.set(ratio.is_infinite(), None)
+
+        return ratio.rename(params.output_column)

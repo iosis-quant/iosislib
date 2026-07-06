@@ -19,7 +19,7 @@ Use modern Python 3 style with `from __future__ import annotations`, type hints,
 
 Follow the existing style in `src/classes.py`: four-space indentation, `PascalCase` classes, `snake_case` functions and variables, uppercase class constants such as `VERSION`, and private helper functions prefixed with `_`. Use small helper functions when they make validation or formatting rules reusable.
 
-Model frame contracts with `FrameSignature` and `TimeAxis`. Store signature columns as tuples of `(name, dtype)` pairs, not lists. New `TSFN` subclasses must define a non-empty string `VERSION`, use a `TSFNConfig` dataclass through `CONFIG_CLS` when parameters are needed, return `(input_signature, output_signature)` from `type_signature()`, and keep transformations lazy inside `apply()`.
+Model frame contracts with `FrameSignature`, `TimeAxis`, and `ColumnSignature`. Store signature columns as tuples, not lists: use `(name, dtype)` for scalars and `ColumnSignature(name, dtype, shape)` or `(name, dtype, shape)` for shaped array values. New `TSFN` subclasses must define a non-empty string `VERSION`, use a `TSFNConfig` dataclass through `CONFIG_CLS` when parameters are needed, return `(input_signature, output_signature)` from `type_signature()`, and keep transformations lazy inside `apply()`.
 
 Keep node and graph identifiers deterministic. If data contributes to persistent IDs, serialize it with sorted keys or sorted items, and avoid unordered inputs unless they are normalized first. Human-facing names should remain labels only; identity should come from function identity, version, signatures, parameters, outputs, and bindings.
 

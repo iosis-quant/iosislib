@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import polars as pl
 
-from src.classes import FrameSignature, TSFN, TSFNConfig, TimeAxis
+from src.classes import FrameSignature, ItemwiseStructTSFN, TSFNConfig, TimeAxis
 from src.tsfn.transforms._validation import validate_column_name, validate_distinct_columns
 
 
@@ -26,7 +26,7 @@ class SpreadConfig(TSFNConfig):
         validate_distinct_columns(self.timestamp_column, self.output_column)
 
 
-class Spread(TSFN):
+class Spread(ItemwiseStructTSFN):
     VERSION = "0.1.0"
     CONFIG_CLS = SpreadConfig
 
@@ -45,11 +45,15 @@ class Spread(TSFN):
         )
         return input_frame, output_frame
 
-    def apply(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+    def batch_input_columns(self) -> tuple[str, ...]:
         params = self.parameters
-        spread = (
-            (pl.col(params.left_column) - pl.col(params.right_column))
-            .cast(pl.Float64)
-            .alias(params.output_column)
+        return (params.left_column, params.right_column)
+
+    def batch_output_column(self) -> str:
+        return self.parameters.output_column
+
+    def batch(self, fields: dict[str, pl.Series]) -> pl.Series:
+        params = self.parameters
+        return (fields[params.left_column] - fields[params.right_column]).rename(
+            params.output_column
         )
-        return lf.select(params.timestamp_column, spread)

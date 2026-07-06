@@ -5,15 +5,57 @@ import hashlib
 import json
 from datetime import timedelta
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
+from enum import Enum
+from math import prod
 from typing import Any, ClassVar, Type
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import inspect
 from types import MappingProxyType
 
 import polars as pl
+import numpy as np
+import pyarrow as pa
+import torch
 
 AsofTolerance = str | int | float | timedelta | None
+_MISSING_FILL_VALUE = object()
+
+
+class NullPolicy(str, Enum):
+    ERROR = "error"
+    PROPAGATE = "propagate"
+    DROP = "drop"
+    FILL = "fill"
+    PASS = "pass"
+
+
+@dataclass(frozen=True)
+class NullHandler:
+    policy: NullPolicy | None = None
+    function: Callable[[pl.Series], pl.Series] | None = None
+
+    def __post_init__(self) -> None:
+        has_policy = self.policy is not None
+        has_function = self.function is not None
+        if has_policy == has_function:
+            raise ValueError("NullHandler must wrap exactly one policy or function")
+        if has_policy:
+            object.__setattr__(self, "policy", _normalize_null_policy(self.policy))
+        if has_function:
+            _validate_null_handler_function(self.function)
+
+    @classmethod
+    def from_policy(cls, policy: NullPolicy | str) -> NullHandler:
+        return cls(policy=_normalize_null_policy(policy))
+
+    @classmethod
+    def from_function(cls, function: Callable[[pl.Series], pl.Series]) -> NullHandler:
+        return cls(function=function)
+
+    @property
+    def is_custom(self) -> bool:
+        return self.function is not None
 
 
 @dataclass(frozen=True)
@@ -24,9 +66,30 @@ class TimeAxis:
 
 
 @dataclass(frozen=True)
+class ColumnSignature:
+    name: str
+    dtype: pl.DataType
+    shape: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str):
+            raise TypeError("column name must be a string")
+        shape = _normalize_shape(self.shape)
+        _validate_column_dtype(self.dtype, shape)
+        object.__setattr__(self, "shape", shape)
+
+    @property
+    def physical_dtype(self) -> pl.DataType:
+        return _column_physical_dtype(self)
+
+
+ColumnEntry = tuple[str, pl.DataType] | tuple[str, pl.DataType, tuple[int, ...]]
+
+
+@dataclass(frozen=True)
 class FrameSignature:
     time: TimeAxis | None = field(default_factory=TimeAxis)
-    columns: tuple[tuple[str, pl.DataType], ...] = ()
+    columns: tuple[ColumnEntry | ColumnSignature, ...] = ()
 
     @classmethod
     def empty(cls) -> FrameSignature:
@@ -36,16 +99,14 @@ class FrameSignature:
     def __post_init__(self) -> None:
         if not isinstance(self.columns, tuple):
             raise TypeError("columns must be a tuple, not a list")
-        columns = self.columns
-        for column in columns:
-            if (
-                not isinstance(column, tuple)
-                or len(column) != 2
-                or not isinstance(column[0], str)
-            ):
-                raise TypeError("columns must contain (name, dtype) tuples")
+        normalized_columns = tuple(
+            _column_entry(_column_signature(column)) for column in self.columns
+        )
+        object.__setattr__(self, "columns", normalized_columns)
 
-        column_names = [name for name, _ in columns]
+        columns = _column_signatures(self)
+
+        column_names = [column.name for column in columns]
         duplicate_names = sorted(
             {name for name in column_names if column_names.count(name) > 1}
         )
@@ -54,13 +115,172 @@ class FrameSignature:
 
         if self.time is None and columns:
             raise ValueError("Inputless frame signatures cannot declare value columns")
-        if self.time is not None and any(name == self.time.column for name, _ in columns):
+        if self.time is not None and any(
+            column.name == self.time.column for column in columns
+        ):
             raise ValueError(
                 f"Time column '{self.time.column}' must not be listed as a value column"
             )
 
     def is_empty(self) -> bool:
         return self.time is None and not self.columns
+
+
+def _column_signature(column: ColumnEntry | ColumnSignature) -> ColumnSignature:
+    if isinstance(column, ColumnSignature):
+        shape = _normalize_shape(column.shape)
+        _validate_column_dtype(column.dtype, shape)
+        return ColumnSignature(column.name, column.dtype, shape)
+
+    if (
+        not isinstance(column, tuple)
+        or len(column) not in (2, 3)
+        or not isinstance(column[0], str)
+    ):
+        raise TypeError(
+            "columns must contain (name, dtype) or (name, dtype, shape) entries"
+        )
+
+    name = column[0]
+    dtype = column[1]
+    shape = _normalize_shape(column[2]) if len(column) == 3 else ()
+    _validate_column_dtype(dtype, shape)
+    return ColumnSignature(name, dtype, shape)
+
+
+def _column_entry(column: ColumnSignature) -> ColumnEntry:
+    if column.shape:
+        return (column.name, column.dtype, column.shape)
+    return (column.name, column.dtype)
+
+
+def _column_signatures(signature: FrameSignature) -> tuple[ColumnSignature, ...]:
+    return tuple(_column_signature(column) for column in signature.columns)
+
+
+def _column_signature_map(signature: FrameSignature) -> dict[str, ColumnSignature]:
+    return {column.name: column for column in _column_signatures(signature)}
+
+
+def _replace_column(
+    signature: FrameSignature,
+    column_name: str,
+    replacement: ColumnSignature,
+) -> tuple[ColumnEntry, ...]:
+    return tuple(
+        _column_entry(replacement if column.name == column_name else column)
+        for column in _column_signatures(signature)
+    )
+
+
+def _normalize_shape(shape: tuple[int, ...]) -> tuple[int, ...]:
+    if not isinstance(shape, tuple):
+        raise TypeError("column shape must be a tuple of positive integers")
+    for dimension in shape:
+        if (
+            isinstance(dimension, bool)
+            or not isinstance(dimension, int)
+            or dimension < 1
+        ):
+            raise ValueError("column shape dimensions must be positive integers")
+    return shape
+
+
+def _validate_column_dtype(dtype: pl.DataType, shape: tuple[int, ...]) -> None:
+    if not (_is_dtype_class(dtype) or isinstance(dtype, pl.DataType)):
+        raise TypeError("column dtype must be a Polars data type")
+    if shape and (
+        dtype is pl.Array
+        or dtype is pl.List
+        or _is_array_instance(dtype)
+        or _is_list_instance(dtype)
+    ):
+        raise TypeError("shaped columns must declare an element dtype, not Array/List")
+
+
+def _flat_size(shape: tuple[int, ...]) -> int:
+    return prod(shape) if shape else 1
+
+
+def _column_physical_dtype(column: ColumnEntry | ColumnSignature) -> pl.DataType:
+    column = _column_signature(column)
+    if not column.shape:
+        return column.dtype
+    return pl.Array(column.dtype, _flat_size(column.shape))
+
+
+def _format_column_signature(column: ColumnEntry | ColumnSignature) -> str:
+    column = _column_signature(column)
+    if not column.shape:
+        return str(column.dtype)
+    return f"{column.dtype} shape={column.shape}"
+
+
+def _column_signature_matches(
+    actual: ColumnSignature,
+    expected: ColumnSignature,
+) -> bool:
+    return actual.shape == expected.shape and _dtype_matches(actual.dtype, expected.dtype)
+
+
+def _is_array_dtype(dtype: pl.DataType) -> bool:
+    return _is_array_instance(dtype)
+
+
+def _column_null_expr(column_name: str, dtype: pl.DataType) -> pl.Expr:
+    column = pl.col(column_name)
+    if _is_array_dtype(dtype):
+        inner_nulls = column.arr.eval(pl.element().is_null()).arr.any().fill_null(False)
+        return column.is_null() | inner_nulls
+    return column.is_null()
+
+
+def _fill_column_null_expr(
+    column_name: str,
+    dtype: pl.DataType,
+    fill_value: Any,
+) -> pl.Expr:
+    column = pl.col(column_name)
+    if _is_array_dtype(dtype):
+        fill_array = [fill_value] * dtype.size
+        return (
+            pl.when(column.is_null())
+            .then(pl.lit(fill_array, dtype=dtype))
+            .otherwise(column)
+            .arr.eval(pl.element().fill_null(fill_value))
+            .alias(column_name)
+        )
+    return column.fill_null(fill_value).alias(column_name)
+
+
+def _series_null_count(series: pl.Series) -> int:
+    count = int(series.null_count())
+    if _is_array_dtype(series.dtype):
+        inner_count = series.to_frame().select(
+            pl.col(series.name)
+            .arr.eval(pl.element().is_null())
+            .arr.sum()
+            .sum()
+            .alias("inner_nulls")
+        )["inner_nulls"][0]
+        count += int(inner_count or 0)
+    return count
+
+
+def _drop_series_nulls(series: pl.Series) -> pl.Series:
+    return (
+        series.to_frame()
+        .filter(~_column_null_expr(series.name, series.dtype))
+        .to_series()
+    )
+
+
+def _fill_series_nulls(series: pl.Series, fill_value: Any) -> pl.Series:
+    return (
+        series.to_frame()
+        .select(_fill_column_null_expr(series.name, series.dtype, fill_value))
+        .to_series()
+    )
 
 
 def _dtype_matches(actual: pl.DataType, expected: pl.DataType) -> bool:
@@ -88,6 +308,10 @@ def _is_dtype_class(dtype: pl.DataType) -> bool:
 
 def _is_list_instance(dtype: pl.DataType) -> bool:
     return not _is_dtype_class(dtype) and isinstance(dtype, pl.List)
+
+
+def _is_array_instance(dtype: pl.DataType) -> bool:
+    return not _is_dtype_class(dtype) and isinstance(dtype, pl.Array)
 
 
 def _list_inner_dtype(dtype: pl.DataType) -> pl.DataType:
@@ -129,7 +353,17 @@ def _format_frame_signature(signature: FrameSignature) -> dict[str, Any]:
             "dtype": str(signature.time.dtype),
             "timezone": signature.time.timezone,
         },
-        "columns": [(name, str(dtype)) for name, dtype in signature.columns],
+        "columns": [
+            (column.name, str(column.dtype))
+            if not column.shape
+            else {
+                "name": column.name,
+                "dtype": str(column.dtype),
+                "shape": column.shape,
+                "physical_dtype": str(column.physical_dtype),
+            }
+            for column in _column_signatures(signature)
+        ],
     }
 
 
@@ -140,6 +374,65 @@ def _format_tolerance(tolerance: AsofTolerance) -> dict[str, str] | None:
         "type": type(tolerance).__name__,
         "value": str(tolerance),
     }
+
+
+def _normalize_null_policy(policy: NullPolicy | str) -> NullPolicy:
+    if isinstance(policy, NullPolicy):
+        return policy
+    try:
+        return NullPolicy(policy)
+    except ValueError as exc:
+        valid = [item.value for item in NullPolicy]
+        raise ValueError(f"Unknown null policy {policy!r}. Expected one of {valid}") from exc
+
+
+def _validate_null_handler_function(function: Callable[[pl.Series], pl.Series]) -> None:
+    if not inspect.isfunction(function):
+        raise TypeError("Custom null handlers must be named Python functions")
+    if function.__name__ == "<lambda>" or "<locals>" in function.__qualname__:
+        raise ValueError(
+            "Custom null handlers must be named top-level functions so node IDs "
+            "remain deterministic"
+        )
+
+
+def _normalize_null_handler(
+    handler: NullHandler | NullPolicy | str | Callable[[pl.Series], pl.Series],
+) -> NullHandler:
+    if isinstance(handler, NullHandler):
+        return handler
+    if isinstance(handler, NullPolicy) or isinstance(handler, str):
+        return NullHandler.from_policy(handler)
+    if callable(handler):
+        return NullHandler.from_function(handler)
+    raise TypeError(
+        "Null handlers must be a NullPolicy, policy string, NullHandler, or named function"
+    )
+
+
+def _format_null_handler(handler: NullHandler) -> dict[str, str]:
+    if handler.policy is not None:
+        return {"kind": "policy", "value": handler.policy.value}
+
+    assert handler.function is not None
+    return {
+        "kind": "function",
+        "module": handler.function.__module__,
+        "qualname": handler.function.__qualname__,
+    }
+
+
+def _format_null_handlers(
+    handlers: Mapping[str, NullHandler],
+) -> dict[str, dict[str, str]]:
+    return {
+        name: _format_null_handler(handler)
+        for name, handler in sorted(handlers.items())
+    }
+
+
+def _format_null_fill_values(values: Mapping[str, Any]) -> dict[str, Any]:
+    return {name: value for name, value in sorted(values.items())}
 
 
 def _format_function_identity(function: TSFN) -> dict[str, Any]:
@@ -204,6 +497,8 @@ class TSFN(abc.ABC):
         self.version = self._validate_version()
         self.parameters = self._bind_and_validate_config(parameters)
         self.signature = self.type_signature()
+        self._bridge_null_handlers = MappingProxyType({})
+        self._bridge_null_fill_values = MappingProxyType({})
 
     def _bind_and_validate_config(self, params: dict[str, Any]) -> TSFNConfig:
         config_fields = fields(self.CONFIG_CLS)
@@ -296,16 +591,68 @@ class TSFN(abc.ABC):
                 f"Expected {time_axis.timezone}, got {actual_timezone}"
             )
 
-        for col_name, expected_type in signature.columns:
-            if col_name not in current_schema:
-                raise ValueError(f"Missing required {schema_name} column: '{col_name}'")
+        for column in _column_signatures(signature):
+            if column.name not in current_schema:
+                raise ValueError(
+                    f"Missing required {schema_name} column: '{column.name}'"
+                )
             
-            actual_type = current_schema[col_name]
+            actual_type = current_schema[column.name]
+            expected_type = column.physical_dtype
             if not _dtype_matches(actual_type, expected_type):
                 raise TypeError(
-                    f"Column '{col_name}' type mismatch. "
-                    f"Expected {expected_type}, got {actual_type}"
+                    f"Column '{column.name}' type mismatch. "
+                    f"Expected {expected_type} ({_format_column_signature(column)}), "
+                    f"got {actual_type}"
                 )
+
+    def resolve_signature(
+        self,
+        bound_input_columns: Mapping[str, ColumnSignature],
+    ) -> tuple[FrameSignature, FrameSignature]:
+        """Resolve shape-dependent signatures from already-bound parent columns."""
+        return self.signature
+
+    def input_column_signature(self, column_name: str) -> ColumnSignature:
+        return _column_signature_map(self.signature[0])[column_name]
+
+    def output_column_signature(self, column_name: str) -> ColumnSignature:
+        return _column_signature_map(self.signature[1])[column_name]
+
+    def bridge_null_handler(
+        self,
+        column_name: str,
+        explicit_handler: (
+            NullHandler | NullPolicy | str | Callable[[pl.Series], pl.Series] | None
+        ) = None,
+    ) -> NullHandler:
+        if explicit_handler is not None:
+            return _normalize_null_handler(explicit_handler)
+        return self._bridge_null_handlers.get(
+            column_name,
+            NullHandler.from_policy(NullPolicy.ERROR),
+        )
+
+    def bridge_null_policy(
+        self,
+        column_name: str,
+        explicit_policy: NullPolicy | str | None = None,
+    ) -> NullPolicy:
+        handler = self.bridge_null_handler(column_name, explicit_policy)
+        if handler.policy is None:
+            raise TypeError(
+                f"Column '{column_name}' uses a custom null handler, not a NullPolicy"
+            )
+        return handler.policy
+
+    def bridge_null_fill_value(
+        self,
+        column_name: str,
+        explicit_fill_value: Any = _MISSING_FILL_VALUE,
+    ) -> Any:
+        if explicit_fill_value is not _MISSING_FILL_VALUE:
+            return explicit_fill_value
+        return self._bridge_null_fill_values.get(column_name, _MISSING_FILL_VALUE)
 
     def __call__(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         input_signature = self.signature[0]
@@ -319,10 +666,447 @@ class TSFN(abc.ABC):
         self.validate_output_schema(output_lf)
         return output_lf
 
+    def series_to_numpy(
+        self,
+        series: pl.Series,
+        shape: tuple[int, ...] | None = None,
+        *,
+        null_policy: (
+            NullHandler | NullPolicy | str | Callable[[pl.Series], pl.Series] | None
+        ) = None,
+        fill_value: Any = _MISSING_FILL_VALUE,
+        allow_copy: bool = True,
+    ):
+        series = self._prepare_series_for_bridge(
+            series,
+            null_policy=null_policy,
+            fill_value=fill_value,
+        )
+        array = series.to_numpy(allow_copy=allow_copy)
+        if shape:
+            return array.reshape((len(series), *_normalize_shape(shape)))
+        return array
+
+    def numpy_to_series(
+        self,
+        name: str,
+        array,
+        *,
+        dtype: pl.DataType = pl.Float64,
+        shape: tuple[int, ...] | None = None,
+        allow_copy: bool = True,
+    ) -> pl.Series:
+
+        array = np.asarray(array)
+        if shape:
+            shape = _normalize_shape(shape)
+            width = _flat_size(shape)
+            array = array.reshape((len(array), width))
+            if not array.flags.c_contiguous:
+                if not allow_copy:
+                    raise ValueError(
+                        f"Cannot create shaped Series '{name}' without copying: "
+                        "NumPy array is not C-contiguous"
+                    )
+                array = np.ascontiguousarray(array)
+
+            flat = array.ravel()
+            arrow_values = pa.array(flat)
+            arrow_array = pa.FixedSizeListArray.from_arrays(arrow_values, width)
+            series = pl.from_arrow(arrow_array).alias(name)
+            expected_dtype = pl.Array(dtype, width)
+            if series.dtype != expected_dtype:
+                if not allow_copy:
+                    raise TypeError(
+                        f"Cannot create Series '{name}' as {expected_dtype} without "
+                        f"copying or casting; inferred {series.dtype}"
+                    )
+                series = series.cast(expected_dtype, strict=False)
+            return series
+
+        if not array.flags.c_contiguous:
+            if not allow_copy:
+                raise ValueError(
+                    f"Cannot create Series '{name}' without copying: "
+                    "NumPy array is not C-contiguous"
+                )
+            array = np.ascontiguousarray(array)
+        series = pl.from_arrow(pa.array(array)).alias(name)
+        if series.dtype != dtype:
+            if not allow_copy:
+                raise TypeError(
+                    f"Cannot create Series '{name}' as {dtype} without copying or "
+                    f"casting; inferred {series.dtype}"
+                )
+            series = series.cast(dtype, strict=False)
+        return series
+
+    def series_to_torch(
+        self,
+        series: pl.Series,
+        shape: tuple[int, ...] | None = None,
+        *,
+        null_policy: (
+            NullHandler | NullPolicy | str | Callable[[pl.Series], pl.Series] | None
+        ) = None,
+        fill_value: Any = _MISSING_FILL_VALUE,
+        allow_copy: bool = True,
+    ):
+
+        array = self.series_to_numpy(
+            series,
+            shape,
+            null_policy=null_policy,
+            fill_value=fill_value,
+            allow_copy=allow_copy,
+        )
+        return torch.from_numpy(array)
+
+    def torch_to_series(
+        self,
+        name: str,
+        tensor,
+        *,
+        dtype: pl.DataType = pl.Float64,
+        shape: tuple[int, ...] | None = None,
+        allow_copy: bool = True,
+    ) -> pl.Series:
+        tensor = tensor.detach().cpu()
+        return self.numpy_to_series(
+            name,
+            tensor.numpy(),
+            dtype=dtype,
+            shape=shape,
+            allow_copy=allow_copy,
+        )
+
+    def series_to_pytorch(
+        self,
+        series: pl.Series,
+        shape: tuple[int, ...] | None = None,
+        *,
+        null_policy: (
+            NullHandler | NullPolicy | str | Callable[[pl.Series], pl.Series] | None
+        ) = None,
+        fill_value: Any = _MISSING_FILL_VALUE,
+        allow_copy: bool = True,
+    ):
+        return self.series_to_torch(
+            series,
+            shape,
+            null_policy=null_policy,
+            fill_value=fill_value,
+            allow_copy=allow_copy,
+        )
+
+    def pytorch_to_series(
+        self,
+        name: str,
+        tensor,
+        *,
+        dtype: pl.DataType = pl.Float64,
+        shape: tuple[int, ...] | None = None,
+        allow_copy: bool = True,
+    ) -> pl.Series:
+        return self.torch_to_series(
+            name,
+            tensor,
+            dtype=dtype,
+            shape=shape,
+            allow_copy=allow_copy,
+        )
+
+    def _prepare_series_for_bridge(
+        self,
+        series: pl.Series,
+        *,
+        null_policy: (
+            NullHandler | NullPolicy | str | Callable[[pl.Series], pl.Series] | None
+        ) = None,
+        fill_value: Any = _MISSING_FILL_VALUE,
+    ) -> pl.Series:
+        handler = self.bridge_null_handler(series.name, null_policy)
+        policy = handler.policy
+        if policy is None:
+            null_count = _series_null_count(series)
+            if null_count == 0:
+                return series
+            handled = handler.function(series)
+            if not isinstance(handled, pl.Series):
+                raise TypeError(
+                    f"Custom null handler for column '{series.name}' must return a "
+                    "Polars Series"
+                )
+            if handled.name != series.name:
+                handled = handled.rename(series.name)
+            return handled
+
+        if policy is NullPolicy.PASS:
+            return series
+        if policy is NullPolicy.PROPAGATE:
+            raise ValueError(
+                "NullPolicy.PROPAGATE cannot be used by direct NumPy/Torch bridge "
+                f"helpers for column '{series.name}'. Use a Polars-native transform "
+                "or implement propagation in the TSFN batch method."
+            )
+
+        null_count = _series_null_count(series)
+        if null_count == 0:
+            return series
+
+        if policy is NullPolicy.ERROR:
+            raise ValueError(
+                f"NullPolicy.ERROR failed for column '{series.name}': "
+                f"{null_count} null value(s) encountered before NumPy/Torch conversion"
+            )
+
+        if policy is NullPolicy.DROP:
+            return _drop_series_nulls(series)
+
+        if policy is NullPolicy.FILL:
+            fill_value = self.bridge_null_fill_value(series.name, fill_value)
+            if fill_value is _MISSING_FILL_VALUE:
+                raise ValueError(
+                    f"NullPolicy.FILL for column '{series.name}' requires a fill value"
+                )
+            return _fill_series_nulls(series, fill_value)
+
+        raise ValueError(f"Unhandled null policy {policy!r}")
+
     @abc.abstractmethod
     def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         """All transformations should be done lazily here."""
         pass
+
+
+class ItemwiseUnaryTSFN(TSFN, abc.ABC):
+    """Base for one-input transforms that operate independently per value."""
+
+    @abc.abstractmethod
+    def itemwise_input_column(self) -> str:
+        pass
+
+    @abc.abstractmethod
+    def itemwise_output_column(self) -> str:
+        pass
+
+    @abc.abstractmethod
+    def itemwise_expr(self, value: pl.Expr) -> pl.Expr:
+        pass
+
+    def resolve_signature(
+        self,
+        bound_input_columns: Mapping[str, ColumnSignature],
+    ) -> tuple[FrameSignature, FrameSignature]:
+        input_signature, output_signature = self.signature
+        input_columns = _column_signature_map(input_signature)
+        output_columns = _column_signature_map(output_signature)
+        input_name = self.itemwise_input_column()
+        output_name = self.itemwise_output_column()
+
+        if input_name not in input_columns:
+            raise ValueError(f"Itemwise input column '{input_name}' is not declared")
+        if output_name not in output_columns:
+            raise ValueError(f"Itemwise output column '{output_name}' is not declared")
+        if len(input_columns) != 1 or len(output_columns) != 1:
+            raise ValueError("ItemwiseUnaryTSFN requires exactly one input and one output")
+
+        bound_input = bound_input_columns.get(input_name)
+        if bound_input is None:
+            return self.signature
+
+        declared_input = input_columns[input_name]
+        declared_output = output_columns[output_name]
+        resolved_input = ColumnSignature(
+            declared_input.name,
+            declared_input.dtype,
+            bound_input.shape,
+        )
+        resolved_output = ColumnSignature(
+            declared_output.name,
+            declared_output.dtype,
+            bound_input.shape,
+        )
+        return (
+            FrameSignature(
+                time=input_signature.time,
+                columns=_replace_column(input_signature, input_name, resolved_input),
+            ),
+            FrameSignature(
+                time=output_signature.time,
+                columns=_replace_column(output_signature, output_name, resolved_output),
+            ),
+        )
+
+    def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
+        if lf is None:
+            raise ValueError("ItemwiseUnaryTSFN requires an input frame")
+
+        input_signature, output_signature = self.signature
+        if input_signature.time is None:
+            raise ValueError("ItemwiseUnaryTSFN input signature must declare a time axis")
+
+        input_column = _column_signature_map(input_signature)[self.itemwise_input_column()]
+        output_column = _column_signature_map(output_signature)[self.itemwise_output_column()]
+        value = pl.col(input_column.name)
+
+        if input_column.shape:
+            result = value.arr.eval(self.itemwise_expr(pl.element()))
+        else:
+            result = self.itemwise_expr(value)
+
+        return lf.select(
+            input_signature.time.column,
+            result.cast(output_column.physical_dtype).alias(output_column.name),
+        )
+
+
+class BatchTSFN(TSFN, abc.ABC):
+    """Base for one-output batch UDF transforms over Polars Series chunks."""
+
+    BATCH_IS_ELEMENTWISE: ClassVar[bool] = False
+
+    @abc.abstractmethod
+    def batch_input_columns(self) -> tuple[str, ...]:
+        pass
+
+    @abc.abstractmethod
+    def batch_output_column(self) -> str:
+        pass
+
+    @abc.abstractmethod
+    def batch(self, fields: Mapping[str, pl.Series]) -> pl.Series:
+        pass
+
+    def _batch_from_struct(self, struct_series: pl.Series) -> pl.Series:
+        fields = {
+            column_name: struct_series.struct.field(column_name)
+            for column_name in self.batch_input_columns()
+        }
+        return self.batch(fields)
+
+    def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
+        if lf is None:
+            raise ValueError("BatchTSFN requires an input frame")
+
+        input_signature, output_signature = self.signature
+        if input_signature.time is None:
+            raise ValueError("BatchTSFN input signature must declare a time axis")
+
+        prepared_lf = self._apply_lazy_null_policies(lf)
+        output_columns = _column_signature_map(output_signature)
+        output_column = output_columns[self.batch_output_column()]
+        input_columns = list(self.batch_input_columns())
+        batch_expr = (
+            pl.struct(input_columns)
+            .map_batches(
+                self._batch_from_struct,
+                return_dtype=output_column.physical_dtype,
+                is_elementwise=self.BATCH_IS_ELEMENTWISE,
+            )
+            .alias(output_column.name)
+        )
+        return prepared_lf.select(input_signature.time.column, batch_expr)
+
+    def _apply_lazy_null_policies(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        input_columns = _column_signature_map(self.signature[0])
+        prepared_lf = lf
+
+        for column_name in self.batch_input_columns():
+            handler = self.bridge_null_handler(column_name)
+            if handler.policy is None:
+                continue
+            policy = handler.policy
+            if policy not in (NullPolicy.DROP, NullPolicy.FILL):
+                continue
+
+            column = input_columns[column_name]
+            if policy is NullPolicy.DROP:
+                prepared_lf = prepared_lf.filter(
+                    ~_column_null_expr(column.name, column.physical_dtype)
+                )
+                continue
+
+            fill_value = self.bridge_null_fill_value(column.name)
+            if fill_value is _MISSING_FILL_VALUE:
+                raise ValueError(
+                    f"NullPolicy.FILL for column '{column.name}' requires a fill value"
+                )
+            prepared_lf = prepared_lf.with_columns(
+                _fill_column_null_expr(column.name, column.physical_dtype, fill_value)
+            )
+
+        return prepared_lf
+
+
+class ItemwiseStructTSFN(BatchTSFN, abc.ABC):
+    """Base for n-ary itemwise transforms lowered through a struct batch."""
+
+    BATCH_IS_ELEMENTWISE: ClassVar[bool] = True
+
+    def resolve_signature(
+        self,
+        bound_input_columns: Mapping[str, ColumnSignature],
+    ) -> tuple[FrameSignature, FrameSignature]:
+        input_signature, output_signature = self.signature
+        input_columns = _column_signature_map(input_signature)
+        output_columns = _column_signature_map(output_signature)
+        output_name = self.batch_output_column()
+
+        if output_name not in output_columns:
+            raise ValueError(f"Itemwise output column '{output_name}' is not declared")
+
+        resolved_input_columns: tuple[ColumnEntry, ...] = input_signature.columns
+        input_shapes = []
+        for input_name in self.batch_input_columns():
+            if input_name not in input_columns:
+                raise ValueError(f"Itemwise input column '{input_name}' is not declared")
+            declared_input = input_columns[input_name]
+            bound_input = bound_input_columns.get(input_name)
+            resolved_shape = (
+                declared_input.shape if bound_input is None else bound_input.shape
+            )
+            input_shapes.append(resolved_shape)
+            resolved_input_columns = _replace_column(
+                FrameSignature(time=input_signature.time, columns=resolved_input_columns),
+                input_name,
+                ColumnSignature(
+                    declared_input.name,
+                    declared_input.dtype,
+                    resolved_shape,
+                ),
+            )
+
+        output_shape = self.resolve_output_shape(tuple(input_shapes))
+        declared_output = output_columns[output_name]
+        resolved_output = ColumnSignature(
+            declared_output.name,
+            declared_output.dtype,
+            output_shape,
+        )
+        return (
+            FrameSignature(time=input_signature.time, columns=resolved_input_columns),
+            FrameSignature(
+                time=output_signature.time,
+                columns=_replace_column(output_signature, output_name, resolved_output),
+            ),
+        )
+
+    def resolve_output_shape(
+        self,
+        input_shapes: tuple[tuple[int, ...], ...],
+    ) -> tuple[int, ...]:
+        if not input_shapes:
+            return ()
+
+        first_shape = input_shapes[0]
+        mismatched_shapes = sorted({shape for shape in input_shapes if shape != first_shape})
+        if mismatched_shapes:
+            raise ValueError(
+                "Itemwise struct inputs must share the same shape unless "
+                "resolve_output_shape() is overridden"
+            )
+        return first_shape
 
 
 class Node:
@@ -338,6 +1122,13 @@ class Node:
         parameters: dict[str, Any] | None = None,
         name: str | None = None,
         tolerances: dict[str, AsofTolerance] | None = None,
+        null_handlers: dict[
+            str,
+            NullHandler | NullPolicy | str | Callable[[pl.Series], pl.Series],
+        ]
+        | None = None,
+        null_policies: dict[str, NullPolicy | str] | None = None,
+        null_fill_values: dict[str, Any] | None = None,
     ):
         self.name = name
         self.function_cls = function_cls
@@ -347,6 +1138,23 @@ class Node:
         # bindings map TSFN semantic input names to (parent_node, parent_output_column)
         self.bindings = MappingProxyType(dict(bindings or {}))
         self.tolerances = MappingProxyType(dict(tolerances or {}))
+        configured_handlers = dict(null_handlers or {})
+        policy_handlers = dict(null_policies or {})
+        duplicated_handlers = set(configured_handlers) & set(policy_handlers)
+        if duplicated_handlers:
+            raise ValueError(
+                "Inputs cannot be configured in both null_handlers and null_policies: "
+                f"{sorted(duplicated_handlers)}"
+            )
+        configured_handlers.update(policy_handlers)
+        self.null_handlers = MappingProxyType(
+            {
+                input_name: _normalize_null_handler(handler)
+                for input_name, handler in configured_handlers.items()
+            }
+        )
+        self.null_policies = self.null_handlers
+        self.null_fill_values = MappingProxyType(dict(null_fill_values or {}))
         unexpected_tolerances = set(self.tolerances) - set(self.bindings)
         if unexpected_tolerances:
             raise ValueError(
@@ -355,10 +1163,22 @@ class Node:
         
         # Deduplicate and extract unique parent Nodes preserving order
         self.inputs = tuple(dict.fromkeys(parent for parent, _ in self.bindings.values()))
+
+        bound_input_columns: dict[str, ColumnSignature] = {}
+        for input_name, (parent, parent_col) in self.bindings.items():
+            parent_outputs = _column_signature_map(parent.function.signature[1])
+            if parent_col in parent_outputs:
+                bound_input_columns[input_name] = parent_outputs[parent_col]
+        self.function.signature = self.function.resolve_signature(bound_input_columns)
+        self.function._bridge_null_handlers = self.null_handlers
+        self.function._bridge_null_fill_values = self.null_fill_values
         
         # Map exposed output names to their corresponding data types
         self.outputs = MappingProxyType(
-            {name: dtype for name, dtype in self.function.signature[1].columns}
+            {
+                column.name: column.physical_dtype
+                for column in _column_signatures(self.function.signature[1])
+            }
         )
         
         self.ID = self._generate_persistent_id()
@@ -417,6 +1237,8 @@ class Node:
         node_definition = {
             "bindings": serialized_bindings,
             "function": _format_function_identity(self.function),
+            "null_fill_values": _format_null_fill_values(self.null_fill_values),
+            "null_handlers": _format_null_handlers(self.null_handlers),
             "parameters": json.loads(str(self.parameters)),
             "outputs": sorted([(name, str(dtype)) for name, dtype in self.outputs.items()]),
         }
@@ -473,9 +1295,12 @@ class Graph:
 
         for node in self.node_list:
             input_signature = node.function.signature[0]
-            expected_inputs = {name for name, _ in input_signature.columns}
+            input_columns = _column_signature_map(input_signature)
+            expected_inputs = set(input_columns)
             bound_inputs = set(node.bindings.keys())
             tolerance_inputs = set(node.tolerances.keys())
+            null_handler_inputs = set(node.null_handlers.keys())
+            null_fill_inputs = set(node.null_fill_values.keys())
 
             if not node.bindings and not input_signature.is_empty():
                 raise ValueError(
@@ -488,6 +1313,33 @@ class Graph:
                 raise ValueError(
                     f"Binding validation failed for node '{node.name or node.ID}'. "
                     f"Unexpected tolerances for unbound inputs: {sorted(extra_tolerances)}"
+                )
+
+            extra_null_handlers = null_handler_inputs - expected_inputs
+            if extra_null_handlers:
+                raise ValueError(
+                    f"Binding validation failed for node '{node.name or node.ID}'. "
+                    f"Unexpected null handlers for inputs: {sorted(extra_null_handlers)}"
+                )
+
+            extra_null_fill_values = null_fill_inputs - expected_inputs
+            if extra_null_fill_values:
+                raise ValueError(
+                    f"Binding validation failed for node '{node.name or node.ID}'. "
+                    f"Unexpected null fill values for inputs: {sorted(extra_null_fill_values)}"
+                )
+
+            missing_fill_values = {
+                input_name
+                for input_name, handler in node.null_handlers.items()
+                if handler.policy is NullPolicy.FILL
+                and input_name not in node.null_fill_values
+            }
+            if missing_fill_values:
+                raise ValueError(
+                    f"Binding validation failed for node '{node.name or node.ID}'. "
+                    "NullPolicy.FILL requires null_fill_values for inputs: "
+                    f"{sorted(missing_fill_values)}"
                 )
 
             # 1. Binding completeness
@@ -512,7 +1364,6 @@ class Graph:
                 )
 
             # 2. Output existence & 3. Type compatibility
-            input_types = dict(input_signature.columns)
             for input_name, (parent_node, parent_col) in node.bindings.items():
                 if parent_node.ID not in node_ids:
                     raise ValueError(
@@ -521,20 +1372,24 @@ class Graph:
                     )
                 
                 # Check output existence
-                if parent_col not in parent_node.outputs:
+                parent_output_columns = _column_signature_map(
+                    parent_node.function.signature[1]
+                )
+                if parent_col not in parent_output_columns:
                     raise ValueError(
                         f"Binding validation failed for node '{node.name or node.ID}'. "
                         f"Parent node '{parent_node.name or parent_node.ID}' does not expose "
-                        f"output '{parent_col}'. Available outputs: {list(parent_node.outputs.keys())}"
+                        f"output '{parent_col}'. Available outputs: {list(parent_output_columns)}"
                     )
 
                 # Check type compatibility
-                expected_dtype = input_types[input_name]
-                actual_dtype = parent_node.outputs[parent_col]
-                if not _dtype_matches(actual_dtype, expected_dtype):
+                expected_column = input_columns[input_name]
+                actual_column = parent_output_columns[parent_col]
+                if not _column_signature_matches(actual_column, expected_column):
                     raise TypeError(
                         f"Type mismatch at node '{node.name or node.ID}' for input '{input_name}': "
-                        f"expected {expected_dtype}, got {actual_dtype} "
+                        f"expected {_format_column_signature(expected_column)}, "
+                        f"got {_format_column_signature(actual_column)} "
                         f"from '{parent_node.name or parent_node.ID}.{parent_col}'"
                     )
 
