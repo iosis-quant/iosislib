@@ -6,7 +6,16 @@ from datetime import datetime, timedelta
 import polars as pl
 import pytest
 
-from src.classes import FrameSignature, Graph, Node, TSFN, TSFNConfig, TimeAxis
+from src.classes import (
+    Executor,
+    FrameSignature,
+    Graph,
+    LocalExecutor,
+    Node,
+    TSFN,
+    TSFNConfig,
+    TimeAxis,
+)
 
 VALUE_FRAME = FrameSignature(columns=(("value", pl.Int64),))
 COMBINED_FRAME = FrameSignature(columns=(("left", pl.Int64), ("right", pl.Int64)))
@@ -59,6 +68,17 @@ class CombineThreeValues(TSFN):
 
 class NeedsInput(TSFN):
     VERSION = "1.0.0"
+
+    def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
+        return VALUE_FRAME, VALUE_FRAME
+
+    def apply(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        return lf.select("timestamp", "value")
+
+
+class RequiredMaterialization(TSFN):
+    VERSION = "1.0.0"
+    REQUIRES_MATERIALIZATION = True
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
         return VALUE_FRAME, VALUE_FRAME
@@ -134,6 +154,24 @@ def source_node(
     )
 
 
+class RecordingExecutor(LocalExecutor):
+    def __init__(self) -> None:
+        self.aligned_nodes: list[str] = []
+        self.materialized_nodes: list[str] = []
+
+    def align_inputs(
+        self,
+        node: Node,
+        results: dict[str, pl.LazyFrame],
+    ) -> pl.LazyFrame:
+        self.aligned_nodes.append(node.ID)
+        return super().align_inputs(node, results)
+
+    def materialize(self, node: Node, lf: pl.LazyFrame) -> pl.DataFrame:
+        self.materialized_nodes.append(node.ID)
+        return super().materialize(node, lf)
+
+
 def test_frame_signature_empty_accepts_only_no_time_and_no_columns() -> None:
     assert FrameSignature.empty().is_empty()
 
@@ -150,16 +188,161 @@ def test_inputless_tsfn_apply_is_called_without_frame() -> None:
     assert result["value"].to_list() == [10, 20]
 
 
-def test_graph_compile_returns_and_caches_root_lazyframe() -> None:
+def test_graph_verify_checks_contracts_without_lowering_or_materializing() -> None:
+    graph = Graph(Node(MissingTimeSource))
+
+    assert graph.verify() is None
+    assert not hasattr(graph, "_compiled_root_lf")
+
+    with pytest.raises(RuntimeError, match="Missing required output time column"):
+        graph.execute()
+
+
+def test_graph_uses_its_configured_executor_for_lowering_and_execution() -> None:
     source = source_node("source", (0, 1), (10, 20))
-    graph = Graph(source)
+    transform = Node(NeedsInput, bindings={"value": source.value}, name="transform")
+    executor = RecordingExecutor()
 
-    compiled = graph.compile()
+    result = Graph(transform, executor=executor).execute()
 
-    assert isinstance(compiled, pl.LazyFrame)
-    assert graph.compile() is compiled
-    assert graph._compiled_root_lf is compiled
-    assert graph.execute()["value"].to_list() == [10, 20]
+    assert result["value"].to_list() == [10, 20]
+    assert executor.aligned_nodes == [transform.ID]
+    assert executor.materialized_nodes == [transform.ID]
+
+
+def test_execute_can_override_the_graph_default_executor() -> None:
+    source = source_node("source", (0,), (10,))
+    configured = RecordingExecutor()
+    override = RecordingExecutor()
+    graph = Graph(source, executor=configured)
+
+    result = graph.execute(executor=override)
+
+    assert result["value"].to_list() == [10]
+    assert configured.materialized_nodes == []
+    assert override.materialized_nodes == [source.ID]
+
+
+def test_executor_is_abstract_and_graph_rejects_non_executors() -> None:
+    with pytest.raises(TypeError, match="abstract"):
+        Executor()  # type: ignore[abstract]
+    assert not hasattr(LocalExecutor(), "lower")
+
+    source = source_node("source", (0,), (10,))
+    with pytest.raises(TypeError, match="must be an Executor"):
+        Graph(source, executor=object())  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="must be an Executor"):
+        Graph(source).execute(executor=object())  # type: ignore[arg-type]
+
+
+def test_graph_materialization_points_split_lazy_execution_regions() -> None:
+    source = source_node("source", (0, 1), (10, 20))
+    middle = Node(
+        NeedsInput,
+        bindings={"value": source.value},
+        name="middle",
+        materialize=True,
+    )
+    root = Node(NeedsInput, bindings={"value": middle.value}, name="root")
+    executor = RecordingExecutor()
+    graph = Graph(root, executor=executor)
+
+    result = graph.execute()
+
+    assert result["value"].to_list() == [10, 20]
+    assert graph.materialized_node_ids == frozenset({middle.ID})
+    assert executor.materialized_nodes == [middle.ID, root.ID]
+    assert graph.ID == Graph(root).ID
+
+
+def test_explicit_root_materialization_is_not_performed_twice() -> None:
+    root = Node(
+        SeriesSource,
+        parameters={"minutes": (0,), "values": (10,)},
+        name="source",
+        materialize=True,
+    )
+    executor = RecordingExecutor()
+
+    Graph(root, executor=executor).execute()
+
+    assert executor.materialized_nodes == [root.ID]
+
+
+def test_node_materialization_is_execution_policy_not_semantic_identity() -> None:
+    source = source_node("source", (0,), (10,))
+    lazy_middle = Node(
+        NeedsInput,
+        bindings={"value": source.value},
+        materialize=False,
+    )
+    material_middle = Node(
+        NeedsInput,
+        bindings={"value": source.value},
+        materialize=True,
+    )
+    lazy_root = Node(NeedsInput, bindings={"value": lazy_middle.value})
+    material_root = Node(NeedsInput, bindings={"value": material_middle.value})
+
+    lazy_graph = Graph(lazy_root)
+    material_graph = Graph(material_root)
+
+    assert lazy_middle.ID == material_middle.ID
+    assert lazy_graph.ID == material_graph.ID
+    assert lazy_graph.materialized_node_ids == frozenset()
+    assert material_graph.materialized_node_ids == frozenset({material_middle.ID})
+
+
+def test_tsfn_materialization_requirement_defaults_node_intent_and_is_verified() -> None:
+    source = source_node("source", (0,), (10,))
+    default_node = Node(
+        RequiredMaterialization,
+        bindings={"value": source.value},
+    )
+    disabled_node = Node(
+        RequiredMaterialization,
+        bindings={"value": source.value},
+        materialize=False,
+    )
+
+    assert default_node.materialize is True
+    assert default_node.function.requires_materialization is True
+    assert Graph(default_node).materialized_node_ids == frozenset({default_node.ID})
+    with pytest.raises(AttributeError):
+        default_node.function.requires_materialization = False  # type: ignore[misc]
+    with pytest.raises(ValueError, match="requires materialization"):
+        Graph(disabled_node)
+
+
+def test_materialization_metadata_must_be_boolean() -> None:
+    with pytest.raises(TypeError, match="Node materialize must be a boolean"):
+        Node(SeriesSource, materialize=1)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="REQUIRES_MATERIALIZATION must be a boolean"):
+        class InvalidMaterializationMetadata(TSFN):
+            VERSION = "1.0.0"
+            REQUIRES_MATERIALIZATION = "yes"  # type: ignore[assignment]
+
+            def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
+                return FrameSignature.empty(), VALUE_FRAME
+
+            def apply(self) -> pl.LazyFrame:
+                return pl.DataFrame(
+                    {"timestamp": [dt(0)], "value": [1]}
+                ).lazy()
+
+    with pytest.raises(TypeError, match="DEFAULT_NULL_POLICY must be a NullPolicy"):
+        class InvalidDefaultNullPolicy(TSFN):
+            VERSION = "1.0.0"
+            DEFAULT_NULL_POLICY = "error"  # type: ignore[assignment]
+
+            def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
+                return FrameSignature.empty(), VALUE_FRAME
+
+            def apply(self) -> pl.LazyFrame:
+                return pl.DataFrame(
+                    {"timestamp": [dt(0)], "value": [1]}
+                ).lazy()
 
 
 def test_inputful_tsfn_receives_lazyframe() -> None:

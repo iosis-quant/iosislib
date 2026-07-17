@@ -3,10 +3,11 @@ from __future__ import annotations
 import abc
 import hashlib
 import json
-from datetime import timedelta
+from datetime import date, datetime, time, timedelta
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from enum import Enum
-from math import prod
+from math import isfinite, prod
+from pathlib import Path
 from typing import Any, ClassVar, Type
 from collections import defaultdict
 from collections.abc import Callable, Mapping
@@ -209,6 +210,32 @@ def _column_physical_dtype(column: ColumnEntry | ColumnSignature) -> pl.DataType
     return pl.Array(column.dtype, _flat_size(column.shape))
 
 
+def _time_axis_physical_dtype(time_axis: TimeAxis) -> pl.DataType:
+    dtype = time_axis.dtype
+    if time_axis.timezone is None:
+        return dtype
+    if dtype is pl.Datetime:
+        return pl.Datetime(time_zone=time_axis.timezone)
+    if isinstance(dtype, pl.Datetime):
+        return pl.Datetime(
+            time_unit=dtype.time_unit,
+            time_zone=time_axis.timezone,
+        )
+    raise TypeError("A timezone can only be declared for a Datetime time axis")
+
+
+def _frame_physical_schema(signature: FrameSignature) -> dict[str, pl.DataType]:
+    if signature.time is None:
+        raise ValueError("A physical frame schema requires a time axis")
+    return {
+        signature.time.column: _time_axis_physical_dtype(signature.time),
+        **{
+            column.name: column.physical_dtype
+            for column in _column_signatures(signature)
+        },
+    }
+
+
 def _format_column_signature(column: ColumnEntry | ColumnSignature) -> str:
     column = _column_signature(column)
     if not column.shape:
@@ -267,20 +294,19 @@ def _series_null_count(series: pl.Series) -> int:
     return count
 
 
-def _drop_series_nulls(series: pl.Series) -> pl.Series:
-    return (
-        series.to_frame()
-        .filter(~_column_null_expr(series.name, series.dtype))
-        .to_series()
-    )
-
-
-def _fill_series_nulls(series: pl.Series, fill_value: Any) -> pl.Series:
-    return (
-        series.to_frame()
-        .select(_fill_column_null_expr(series.name, series.dtype, fill_value))
-        .to_series()
-    )
+def _validate_numpy_arrow_alias(
+    name: str,
+    array: np.ndarray,
+    arrow_array: pa.Array,
+) -> None:
+    if array.size == 0:
+        return
+    data_buffer = arrow_array.buffers()[1]
+    numpy_address = array.__array_interface__["data"][0]
+    if data_buffer is None or data_buffer.address != numpy_address:
+        raise ValueError(
+            f"Conversion for Series '{name}' required a NumPy/Arrow buffer copy"
+        )
 
 
 def _dtype_matches(actual: pl.DataType, expected: pl.DataType) -> bool:
@@ -432,7 +458,10 @@ def _format_null_handlers(
 
 
 def _format_null_fill_values(values: Mapping[str, Any]) -> dict[str, Any]:
-    return {name: value for name, value in sorted(values.items())}
+    return {
+        name: _serialize_value(value)
+        for name, value in sorted(values.items())
+    }
 
 
 def _format_function_identity(function: TSFN) -> dict[str, Any]:
@@ -448,25 +477,274 @@ def _format_function_identity(function: TSFN) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class TSFNConfig(abc.ABC):
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            config_field.name: _serialize_value(getattr(self, config_field.name))
+            for config_field in fields(self)
+        }
+
     def __str__(self) -> str:
-        def serializer(obj):
-            if isinstance(obj, pl.DataType):
-                return str(obj)
-            raise TypeError(f"Type {type(obj)} not serializable")
-            
-        data = {f.name: getattr(self, f.name) for f in fields(self)}
-        return json.dumps(data, sort_keys=True, default=serializer)
+        return _canonical_json(self.to_dict())
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        _serialize_value(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _qualified_type_name(value: Any) -> str:
+    value_type = value if isinstance(value, type) else type(value)
+    return f"{value_type.__module__}.{value_type.__qualname__}"
+
+
+def _serialize_value(value: Any) -> Any:
+    """Return a deterministic, JSON-compatible representation of a value."""
+    if isinstance(value, Enum):
+        return _serialize_value(value.value)
+
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError("Non-finite floats are not serializable")
+        return value
+
+    if isinstance(value, np.generic):
+        return _serialize_value(value.item())
+
+    if _is_dtype_class(value) or isinstance(value, pl.DataType):
+        return str(value)
+
+    if isinstance(value, datetime):
+        return {"__type__": "datetime", "value": value.isoformat()}
+
+    if isinstance(value, date):
+        return {"__type__": "date", "value": value.isoformat()}
+
+    if isinstance(value, time):
+        return {"__type__": "time", "value": value.isoformat()}
+
+    if isinstance(value, timedelta):
+        return {
+            "__type__": "timedelta",
+            "days": value.days,
+            "seconds": value.seconds,
+            "microseconds": value.microseconds,
+        }
+
+    if isinstance(value, Path):
+        return {"__type__": "path", "value": str(value)}
+
+    if isinstance(value, bytes):
+        return {"__type__": "bytes", "value": value.hex()}
+
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            "__type__": _qualified_type_name(value),
+            "fields": {
+                item.name: _serialize_value(getattr(value, item.name))
+                for item in fields(value)
+            },
+        }
+
+    if isinstance(value, Mapping):
+        if all(isinstance(key, str) for key in value):
+            return {
+                key: _serialize_value(item)
+                for key, item in sorted(value.items())
+            }
+
+        serialized_items = [
+            (_serialize_value(key), _serialize_value(item))
+            for key, item in value.items()
+        ]
+        serialized_items.sort(key=lambda item: _canonical_json(item[0]))
+        return {
+            "__type__": "mapping",
+            "items": [[key, item] for key, item in serialized_items],
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [_serialize_value(item) for item in value]
+
+    if isinstance(value, (set, frozenset)):
+        serialized_items = [_serialize_value(item) for item in value]
+        serialized_items.sort(key=_canonical_json)
+        return {"__type__": "set", "items": serialized_items}
+
+    raise TypeError(f"Type {type(value)} not serializable")
+
+
+@dataclass(frozen=True, kw_only=True)
+class Model(abc.ABC):
+    """An immutable, framework-neutral model checkpoint."""
+
+    ID: str
+    trained_until: datetime | None = None
+    available_at: datetime | None = None
+    VERSION: ClassVar[str]
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        if not inspect.isabstract(cls):
+            cls._validate_version()
+
+    @classmethod
+    def _validate_version(cls) -> str:
+        if "VERSION" not in cls.__dict__:
+            raise TypeError(f"Model subclass '{cls.__name__}' must define VERSION")
+        if not isinstance(cls.VERSION, str):
+            raise TypeError(f"Model subclass '{cls.__name__}' VERSION must be a string")
+        if not cls.VERSION.strip():
+            raise ValueError(f"Model subclass '{cls.__name__}' VERSION must be non-empty")
+        return cls.VERSION
+
+    def __post_init__(self) -> None:
+        self._validate_version()
+        if not isinstance(self.ID, str):
+            raise TypeError("Model ID must be a string")
+        if not self.ID.strip():
+            raise ValueError("Model ID must be non-empty")
+
+        self._validate_causal_times(
+            self.trained_until,
+            self.available_at,
+            allow_untrained=True,
+        )
+
+    @staticmethod
+    def _validate_causal_times(
+        trained_until: datetime | None,
+        available_at: datetime | None,
+        *,
+        allow_untrained: bool,
+    ) -> None:
+        if allow_untrained and trained_until is None and available_at is None:
+            return
+
+        for field_name, value in (
+            ("trained_until", trained_until),
+            ("available_at", available_at),
+        ):
+            if value is not None and not isinstance(value, datetime):
+                raise TypeError(f"Model {field_name} must be a datetime or None")
+
+        if trained_until is None or available_at is None:
+            raise ValueError(
+                "Model trained_until and available_at must either both be set or both be None"
+            )
+
+        try:
+            available_before_training = available_at < trained_until
+        except TypeError as exc:
+            raise TypeError(
+                "Model trained_until and available_at must use compatible timezones"
+            ) from exc
+        if available_before_training:
+            raise ValueError("Model available_at cannot precede trained_until")
+
+    @property
+    def version(self) -> str:
+        return self._validate_version()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "module": self.__class__.__module__,
+            "qualname": self.__class__.__qualname__,
+            "version": self.version,
+            "ID": self.ID,
+            "trained_until": _serialize_value(self.trained_until),
+            "available_at": _serialize_value(self.available_at),
+        }
+
+    def __str__(self) -> str:
+        return _canonical_json(self.to_dict())
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}(id={self.ID[:8]!r}, "
+            f"version={self.version!r}, trained_until={self.trained_until!r}, "
+            f"available_at={self.available_at!r})"
+        )
+
+    def train(
+        self,
+        frame: pl.DataFrame,
+        *,
+        trained_until: datetime,
+        available_at: datetime,
+        seed: int,
+    ) -> Model:
+        """Return a new checkpoint trained from this checkpoint."""
+        if not isinstance(frame, pl.DataFrame):
+            raise TypeError("Model.train requires a Polars DataFrame")
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise TypeError("Model training seed must be an integer")
+        self._validate_causal_times(
+            trained_until,
+            available_at,
+            allow_untrained=False,
+        )
+
+        next_model = self._train(
+            frame,
+            trained_until=trained_until,
+            available_at=available_at,
+            seed=seed,
+        )
+        if not isinstance(next_model, Model):
+            raise TypeError("Model._train must return a Model")
+        if next_model is self:
+            raise ValueError("Model._train must return a new checkpoint")
+        if next_model.trained_until != trained_until:
+            raise ValueError("Trained model has an unexpected trained_until value")
+        if next_model.available_at != available_at:
+            raise ValueError("Trained model has an unexpected available_at value")
+        return next_model
+
+    def predict(self, frame: pl.DataFrame) -> pl.DataFrame:
+        """Evaluate this checkpoint without changing its logical state."""
+        if not isinstance(frame, pl.DataFrame):
+            raise TypeError("Model.predict requires a Polars DataFrame")
+        output = self._predict(frame)
+        if not isinstance(output, pl.DataFrame):
+            raise TypeError("Model._predict must return a Polars DataFrame")
+        return output
+
+    @abc.abstractmethod
+    def _train(
+        self,
+        frame: pl.DataFrame,
+        *,
+        trained_until: datetime,
+        available_at: datetime,
+        seed: int,
+    ) -> Model:
+        pass
+
+    @abc.abstractmethod
+    def _predict(self, frame: pl.DataFrame) -> pl.DataFrame:
+        pass
 
 
 class TSFN(abc.ABC):
     CONFIG_CLS: ClassVar[Type[TSFNConfig]] = TSFNConfig
     VERSION: ClassVar[str]
+    REQUIRES_MATERIALIZATION: ClassVar[bool] = False
+    DEFAULT_NULL_POLICY: ClassVar[NullPolicy] = NullPolicy.PROPAGATE
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
         if not inspect.isabstract(cls):
             cls._validate_config_cls()
             cls._validate_version()
+            cls._validate_materialization_requirement()
+            cls._validate_default_null_policy()
 
     @classmethod
     def _validate_version(cls) -> str:
@@ -489,16 +767,40 @@ class TSFN(abc.ABC):
             raise TypeError(f"{cls.__name__}.CONFIG_CLS must inherit TSFNConfig")
         return config_cls
 
+    @classmethod
+    def _validate_materialization_requirement(cls) -> bool:
+        required = cls.REQUIRES_MATERIALIZATION
+        if not isinstance(required, bool):
+            raise TypeError(
+                f"{cls.__name__}.REQUIRES_MATERIALIZATION must be a boolean"
+            )
+        return required
+
+    @classmethod
+    def _validate_default_null_policy(cls) -> NullPolicy:
+        policy = cls.DEFAULT_NULL_POLICY
+        if not isinstance(policy, NullPolicy):
+            raise TypeError(
+                f"{cls.__name__}.DEFAULT_NULL_POLICY must be a NullPolicy"
+            )
+        return policy
+
+    @property
+    def requires_materialization(self) -> bool:
+        return self._validate_materialization_requirement()
+
     def __init__(
         self,
         parameters: dict[str, Any],
     ):
         self._validate_config_cls()
         self.version = self._validate_version()
+        self._validate_materialization_requirement()
+        self._validate_default_null_policy()
         self.parameters = self._bind_and_validate_config(parameters)
         self.signature = self.type_signature()
-        self._bridge_null_handlers = MappingProxyType({})
-        self._bridge_null_fill_values = MappingProxyType({})
+        self._input_null_handlers = MappingProxyType({})
+        self._input_null_fill_values = MappingProxyType({})
 
     def _bind_and_validate_config(self, params: dict[str, Any]) -> TSFNConfig:
         config_fields = fields(self.CONFIG_CLS)
@@ -619,40 +921,33 @@ class TSFN(abc.ABC):
     def output_column_signature(self, column_name: str) -> ColumnSignature:
         return _column_signature_map(self.signature[1])[column_name]
 
-    def bridge_null_handler(
+    def input_null_handler(
         self,
         column_name: str,
-        explicit_handler: (
-            NullHandler | NullPolicy | str | Callable[[pl.Series], pl.Series] | None
-        ) = None,
     ) -> NullHandler:
-        if explicit_handler is not None:
-            return _normalize_null_handler(explicit_handler)
-        return self._bridge_null_handlers.get(
+        return self._input_null_handlers.get(
             column_name,
-            NullHandler.from_policy(NullPolicy.ERROR),
+            NullHandler.from_policy(self.DEFAULT_NULL_POLICY),
         )
 
-    def bridge_null_policy(
-        self,
-        column_name: str,
-        explicit_policy: NullPolicy | str | None = None,
-    ) -> NullPolicy:
-        handler = self.bridge_null_handler(column_name, explicit_policy)
+    def input_null_policy(self, column_name: str) -> NullPolicy:
+        handler = self.input_null_handler(column_name)
         if handler.policy is None:
             raise TypeError(
                 f"Column '{column_name}' uses a custom null handler, not a NullPolicy"
             )
         return handler.policy
 
-    def bridge_null_fill_value(
+    def input_null_fill_value(self, column_name: str) -> Any:
+        return self._input_null_fill_values.get(column_name, _MISSING_FILL_VALUE)
+
+    def _configure_input_nulls(
         self,
-        column_name: str,
-        explicit_fill_value: Any = _MISSING_FILL_VALUE,
-    ) -> Any:
-        if explicit_fill_value is not _MISSING_FILL_VALUE:
-            return explicit_fill_value
-        return self._bridge_null_fill_values.get(column_name, _MISSING_FILL_VALUE)
+        handlers: Mapping[str, NullHandler],
+        fill_values: Mapping[str, Any],
+    ) -> None:
+        self._input_null_handlers = MappingProxyType(dict(handlers))
+        self._input_null_fill_values = MappingProxyType(dict(fill_values))
 
     def __call__(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         input_signature = self.signature[0]
@@ -661,7 +956,9 @@ class TSFN(abc.ABC):
         if input_signature.is_empty():
             output_lf = self.apply()
         else:
-            output_lf = self.apply(lf)
+            if lf is None:
+                raise ValueError("Missing required input frame")
+            output_lf = self.apply(self._prepare_input_nulls(lf))
 
         self.validate_output_schema(output_lf)
         return output_lf
@@ -671,20 +968,17 @@ class TSFN(abc.ABC):
         series: pl.Series,
         shape: tuple[int, ...] | None = None,
         *,
-        null_policy: (
-            NullHandler | NullPolicy | str | Callable[[pl.Series], pl.Series] | None
-        ) = None,
-        fill_value: Any = _MISSING_FILL_VALUE,
-        allow_copy: bool = True,
+        allow_copy: bool = False,
     ):
-        series = self._prepare_series_for_bridge(
-            series,
-            null_policy=null_policy,
-            fill_value=fill_value,
-        )
+        series = self._prepare_series_for_bridge(series)
         array = series.to_numpy(allow_copy=allow_copy)
         if shape:
-            return array.reshape((len(series), *_normalize_shape(shape)))
+            reshaped = array.reshape((len(series), *_normalize_shape(shape)))
+            if not allow_copy and not np.shares_memory(array, reshaped):
+                raise ValueError(
+                    f"Cannot reshape Series '{series.name}' to {shape} without copying"
+                )
+            return reshaped
         return array
 
     def numpy_to_series(
@@ -694,14 +988,25 @@ class TSFN(abc.ABC):
         *,
         dtype: pl.DataType = pl.Float64,
         shape: tuple[int, ...] | None = None,
-        allow_copy: bool = True,
+        allow_copy: bool = False,
     ) -> pl.Series:
+        if not isinstance(array, np.ndarray):
+            if not allow_copy:
+                raise TypeError(
+                    f"Cannot create Series '{name}' without copying from "
+                    f"{type(array).__name__}; expected a NumPy ndarray"
+                )
+            array = np.asarray(array)
 
-        array = np.asarray(array)
         if shape:
             shape = _normalize_shape(shape)
             width = _flat_size(shape)
-            array = array.reshape((len(array), width))
+            reshaped = array.reshape((len(array), width))
+            if not allow_copy and not np.shares_memory(array, reshaped):
+                raise ValueError(
+                    f"Cannot reshape output for Series '{name}' without copying"
+                )
+            array = reshaped
             if not array.flags.c_contiguous:
                 if not allow_copy:
                     raise ValueError(
@@ -712,6 +1017,8 @@ class TSFN(abc.ABC):
 
             flat = array.ravel()
             arrow_values = pa.array(flat)
+            if not allow_copy:
+                _validate_numpy_arrow_alias(name, flat, arrow_values)
             arrow_array = pa.FixedSizeListArray.from_arrays(arrow_values, width)
             series = pl.from_arrow(arrow_array).alias(name)
             expected_dtype = pl.Array(dtype, width)
@@ -722,6 +1029,8 @@ class TSFN(abc.ABC):
                         f"copying or casting; inferred {series.dtype}"
                     )
                 series = series.cast(expected_dtype, strict=False)
+            if not allow_copy:
+                _validate_numpy_arrow_alias(name, flat, series.to_arrow().values)
             return series
 
         if not array.flags.c_contiguous:
@@ -731,7 +1040,10 @@ class TSFN(abc.ABC):
                     "NumPy array is not C-contiguous"
                 )
             array = np.ascontiguousarray(array)
-        series = pl.from_arrow(pa.array(array)).alias(name)
+        arrow_array = pa.array(array)
+        if not allow_copy:
+            _validate_numpy_arrow_alias(name, array, arrow_array)
+        series = pl.from_arrow(arrow_array).alias(name)
         if series.dtype != dtype:
             if not allow_copy:
                 raise TypeError(
@@ -739,6 +1051,8 @@ class TSFN(abc.ABC):
                     f"casting; inferred {series.dtype}"
                 )
             series = series.cast(dtype, strict=False)
+        if not allow_copy:
+            _validate_numpy_arrow_alias(name, array, series.to_arrow())
         return series
 
     def series_to_torch(
@@ -746,21 +1060,46 @@ class TSFN(abc.ABC):
         series: pl.Series,
         shape: tuple[int, ...] | None = None,
         *,
-        null_policy: (
-            NullHandler | NullPolicy | str | Callable[[pl.Series], pl.Series] | None
-        ) = None,
-        fill_value: Any = _MISSING_FILL_VALUE,
-        allow_copy: bool = True,
+        allow_copy: bool = False,
     ):
+        """Expose a Series buffer to Torch; the returned tensor is borrowed input."""
+        series = self._prepare_series_for_bridge(series)
 
-        array = self.series_to_numpy(
-            series,
-            shape,
-            null_policy=null_policy,
-            fill_value=fill_value,
-            allow_copy=allow_copy,
+        if series.n_chunks() > 1:
+            if not allow_copy:
+                raise ValueError(
+                    f"Cannot expose multi-chunk Series '{series.name}' to Torch "
+                    "without rechunking"
+                )
+            series = series.rechunk()
+
+        arrow_array = series.to_arrow()
+        arrow_values = (
+            arrow_array.flatten()
+            if pa.types.is_fixed_size_list(arrow_array.type)
+            else arrow_array
         )
-        return torch.from_numpy(array)
+        try:
+            tensor = torch.from_dlpack(arrow_values)
+        except (BufferError, RuntimeError, TypeError):
+            if not allow_copy:
+                raise ValueError(
+                    f"Cannot expose Series '{series.name}' to Torch through DLPack "
+                    "without copying"
+                ) from None
+            array = series.to_numpy(allow_copy=True)
+            tensor = torch.from_numpy(array)
+
+        if shape:
+            normalized_shape = _normalize_shape(shape)
+            expected_values = len(series) * _flat_size(normalized_shape)
+            if tensor.numel() != expected_values:
+                raise ValueError(
+                    f"Series '{series.name}' contains {tensor.numel()} values; "
+                    f"shape {normalized_shape} requires {expected_values}"
+                )
+            tensor = tensor.reshape((len(series), *normalized_shape))
+        return tensor
 
     def torch_to_series(
         self,
@@ -769,12 +1108,38 @@ class TSFN(abc.ABC):
         *,
         dtype: pl.DataType = pl.Float64,
         shape: tuple[int, ...] | None = None,
-        allow_copy: bool = True,
+        allow_copy: bool = False,
     ) -> pl.Series:
-        tensor = tensor.detach().cpu()
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError("torch_to_series requires a torch.Tensor")
+
+        tensor = tensor.detach()
+        if tensor.device.type != "cpu":
+            if not allow_copy:
+                raise ValueError(
+                    f"Cannot create Series '{name}' from a {tensor.device.type} "
+                    "tensor without copying it to CPU"
+                )
+            tensor = tensor.cpu()
+        if not tensor.is_contiguous():
+            if not allow_copy:
+                raise ValueError(
+                    f"Cannot create Series '{name}' from a non-contiguous tensor "
+                    "without copying"
+                )
+            tensor = tensor.contiguous()
+
+        try:
+            array = tensor.numpy()
+        except RuntimeError:
+            if not allow_copy:
+                raise ValueError(
+                    f"Cannot expose tensor storage for Series '{name}' without copying"
+                ) from None
+            array = tensor.resolve_conj().resolve_neg().numpy()
         return self.numpy_to_series(
             name,
-            tensor.numpy(),
+            array,
             dtype=dtype,
             shape=shape,
             allow_copy=allow_copy,
@@ -785,17 +1150,11 @@ class TSFN(abc.ABC):
         series: pl.Series,
         shape: tuple[int, ...] | None = None,
         *,
-        null_policy: (
-            NullHandler | NullPolicy | str | Callable[[pl.Series], pl.Series] | None
-        ) = None,
-        fill_value: Any = _MISSING_FILL_VALUE,
-        allow_copy: bool = True,
+        allow_copy: bool = False,
     ):
         return self.series_to_torch(
             series,
             shape,
-            null_policy=null_policy,
-            fill_value=fill_value,
             allow_copy=allow_copy,
         )
 
@@ -806,7 +1165,7 @@ class TSFN(abc.ABC):
         *,
         dtype: pl.DataType = pl.Float64,
         shape: tuple[int, ...] | None = None,
-        allow_copy: bool = True,
+        allow_copy: bool = False,
     ) -> pl.Series:
         return self.torch_to_series(
             name,
@@ -819,59 +1178,95 @@ class TSFN(abc.ABC):
     def _prepare_series_for_bridge(
         self,
         series: pl.Series,
-        *,
-        null_policy: (
-            NullHandler | NullPolicy | str | Callable[[pl.Series], pl.Series] | None
-        ) = None,
-        fill_value: Any = _MISSING_FILL_VALUE,
     ) -> pl.Series:
-        handler = self.bridge_null_handler(series.name, null_policy)
-        policy = handler.policy
-        if policy is None:
+        null_count = _series_null_count(series)
+        if null_count:
+            raise ValueError(
+                f"Cannot bridge column '{series.name}' with {null_count} null "
+                "value(s); input null policy must resolve them before conversion"
+            )
+        return series
+
+    def _prepare_input_nulls(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        """Apply every configured input null policy before subclass execution."""
+        input_columns = _column_signature_map(self.signature[0])
+        prepared_lf = lf
+        requires_eager_handling = False
+
+        for column_name in input_columns:
+            column = input_columns[column_name]
+            handler = self.input_null_handler(column_name)
+            if handler.policy is None:
+                requires_eager_handling = True
+                continue
+            policy = handler.policy
+            if policy is NullPolicy.ERROR:
+                requires_eager_handling = True
+                continue
+            if policy in (NullPolicy.PROPAGATE, NullPolicy.PASS):
+                continue
+
+            if policy is NullPolicy.DROP:
+                prepared_lf = prepared_lf.filter(
+                    ~_column_null_expr(column.name, column.physical_dtype)
+                )
+                continue
+
+            fill_value = self.input_null_fill_value(column.name)
+            if fill_value is _MISSING_FILL_VALUE:
+                raise ValueError(
+                    f"NullPolicy.FILL for column '{column.name}' requires a fill value"
+                )
+            prepared_lf = prepared_lf.with_columns(
+                _fill_column_null_expr(column.name, column.physical_dtype, fill_value)
+            )
+
+        if requires_eager_handling:
+            schema = prepared_lf.collect_schema()
+            prepared_lf = prepared_lf.map_batches(
+                self._apply_eager_null_handlers,
+                predicate_pushdown=False,
+                projection_pushdown=False,
+                slice_pushdown=False,
+                schema=schema,
+                validate_output_schema=True,
+                streamable=False,
+            )
+        return prepared_lf
+
+    def _apply_eager_null_handlers(self, frame: pl.DataFrame) -> pl.DataFrame:
+        prepared = frame
+        for column in _column_signatures(self.signature[0]):
+            handler = self.input_null_handler(column.name)
+            if handler.policy not in (None, NullPolicy.ERROR):
+                continue
+
+            series = prepared.get_column(column.name)
             null_count = _series_null_count(series)
             if null_count == 0:
-                return series
+                continue
+            if handler.policy is NullPolicy.ERROR:
+                raise ValueError(
+                    f"NullPolicy.ERROR failed for column '{column.name}': "
+                    f"{null_count} null value(s) encountered"
+                )
+
             handled = handler.function(series)
             if not isinstance(handled, pl.Series):
                 raise TypeError(
-                    f"Custom null handler for column '{series.name}' must return a "
+                    f"Custom null handler for column '{column.name}' must return a "
                     "Polars Series"
                 )
-            if handled.name != series.name:
-                handled = handled.rename(series.name)
-            return handled
-
-        if policy is NullPolicy.PASS:
-            return series
-        if policy is NullPolicy.PROPAGATE:
-            raise ValueError(
-                "NullPolicy.PROPAGATE cannot be used by direct NumPy/Torch bridge "
-                f"helpers for column '{series.name}'. Use a Polars-native transform "
-                "or implement propagation in the TSFN batch method."
-            )
-
-        null_count = _series_null_count(series)
-        if null_count == 0:
-            return series
-
-        if policy is NullPolicy.ERROR:
-            raise ValueError(
-                f"NullPolicy.ERROR failed for column '{series.name}': "
-                f"{null_count} null value(s) encountered before NumPy/Torch conversion"
-            )
-
-        if policy is NullPolicy.DROP:
-            return _drop_series_nulls(series)
-
-        if policy is NullPolicy.FILL:
-            fill_value = self.bridge_null_fill_value(series.name, fill_value)
-            if fill_value is _MISSING_FILL_VALUE:
+            if len(handled) != len(series):
                 raise ValueError(
-                    f"NullPolicy.FILL for column '{series.name}' requires a fill value"
+                    f"Custom null handler for column '{column.name}' must preserve "
+                    "row count"
                 )
-            return _fill_series_nulls(series, fill_value)
+            if handled.name != column.name:
+                handled = handled.rename(column.name)
+            prepared = prepared.with_columns(handled)
 
-        raise ValueError(f"Unhandled null policy {policy!r}")
+        return prepared
 
     @abc.abstractmethod
     def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
@@ -962,9 +1357,56 @@ class ItemwiseUnaryTSFN(TSFN, abc.ABC):
 
 
 class BatchTSFN(TSFN, abc.ABC):
-    """Base for one-output batch UDF transforms over Polars Series chunks."""
+    """Base for non-streaming, full-frame batch UDF transformations.
 
-    BATCH_IS_ELEMENTWISE: ClassVar[bool] = False
+    Polars lends the callback a DataFrame backed by its existing buffers. Batch
+    implementations must treat that input as immutable and return a frame matching
+    the complete output FrameSignature.
+    """
+
+    REQUIRES_MATERIALIZATION: ClassVar[bool] = True
+    DEFAULT_NULL_POLICY: ClassVar[NullPolicy] = NullPolicy.ERROR
+
+    @abc.abstractmethod
+    def batch(self, frame: pl.DataFrame) -> pl.DataFrame:
+        """Transform one complete input frame into the declared output frame."""
+        pass
+
+    def execute_batch(self, frame: pl.DataFrame) -> pl.DataFrame:
+        output = self.batch(frame)
+        if not isinstance(output, pl.DataFrame):
+            raise TypeError(
+                f"{self.__class__.__name__}.batch must return a Polars DataFrame, "
+                f"got {type(output).__name__}"
+            )
+        return output
+
+    def prepare_batch_input(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        input_signature = self.signature[0]
+        if input_signature.time is None:
+            raise ValueError("BatchTSFN input signature must declare a time axis")
+        input_schema = _frame_physical_schema(input_signature)
+        return lf.select(*input_schema.keys())
+
+    def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
+        if lf is None:
+            raise ValueError("BatchTSFN requires an input frame")
+
+        output_signature = self.signature[1]
+        output_schema = _frame_physical_schema(output_signature)
+        return self.prepare_batch_input(lf).map_batches(
+            self.execute_batch,
+            predicate_pushdown=False,
+            projection_pushdown=False,
+            slice_pushdown=False,
+            schema=output_schema,
+            validate_output_schema=True,
+            streamable=False,
+        )
+
+
+class ItemwiseStructTSFN(TSFN, abc.ABC):
+    """Base for n-ary itemwise transforms lowered through a struct batch."""
 
     @abc.abstractmethod
     def batch_input_columns(self) -> tuple[str, ...]:
@@ -983,66 +1425,36 @@ class BatchTSFN(TSFN, abc.ABC):
             column_name: struct_series.struct.field(column_name)
             for column_name in self.batch_input_columns()
         }
-        return self.batch(fields)
+        output = self.batch(fields)
+        if not isinstance(output, pl.Series):
+            raise TypeError(
+                f"{self.__class__.__name__}.batch must return a Polars Series, "
+                f"got {type(output).__name__}"
+            )
+        return output
 
     def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         if lf is None:
-            raise ValueError("BatchTSFN requires an input frame")
+            raise ValueError("ItemwiseStructTSFN requires an input frame")
 
         input_signature, output_signature = self.signature
         if input_signature.time is None:
-            raise ValueError("BatchTSFN input signature must declare a time axis")
+            raise ValueError("ItemwiseStructTSFN input signature must declare a time axis")
 
-        prepared_lf = self._apply_lazy_null_policies(lf)
-        output_columns = _column_signature_map(output_signature)
-        output_column = output_columns[self.batch_output_column()]
-        input_columns = list(self.batch_input_columns())
+        input_columns = self.batch_input_columns()
+        output_column = _column_signature_map(output_signature)[
+            self.batch_output_column()
+        ]
         batch_expr = (
-            pl.struct(input_columns)
+            pl.struct(list(input_columns))
             .map_batches(
                 self._batch_from_struct,
                 return_dtype=output_column.physical_dtype,
-                is_elementwise=self.BATCH_IS_ELEMENTWISE,
+                is_elementwise=True,
             )
             .alias(output_column.name)
         )
-        return prepared_lf.select(input_signature.time.column, batch_expr)
-
-    def _apply_lazy_null_policies(self, lf: pl.LazyFrame) -> pl.LazyFrame:
-        input_columns = _column_signature_map(self.signature[0])
-        prepared_lf = lf
-
-        for column_name in self.batch_input_columns():
-            handler = self.bridge_null_handler(column_name)
-            if handler.policy is None:
-                continue
-            policy = handler.policy
-            if policy not in (NullPolicy.DROP, NullPolicy.FILL):
-                continue
-
-            column = input_columns[column_name]
-            if policy is NullPolicy.DROP:
-                prepared_lf = prepared_lf.filter(
-                    ~_column_null_expr(column.name, column.physical_dtype)
-                )
-                continue
-
-            fill_value = self.bridge_null_fill_value(column.name)
-            if fill_value is _MISSING_FILL_VALUE:
-                raise ValueError(
-                    f"NullPolicy.FILL for column '{column.name}' requires a fill value"
-                )
-            prepared_lf = prepared_lf.with_columns(
-                _fill_column_null_expr(column.name, column.physical_dtype, fill_value)
-            )
-
-        return prepared_lf
-
-
-class ItemwiseStructTSFN(BatchTSFN, abc.ABC):
-    """Base for n-ary itemwise transforms lowered through a struct batch."""
-
-    BATCH_IS_ELEMENTWISE: ClassVar[bool] = True
+        return lf.select(input_signature.time.column, batch_expr)
 
     def resolve_signature(
         self,
@@ -1121,6 +1533,7 @@ class Node:
         bindings: dict[str, tuple[Node, str]] | None = None,
         parameters: dict[str, Any] | None = None,
         name: str | None = None,
+        materialize: bool | None = None,
         tolerances: dict[str, AsofTolerance] | None = None,
         null_handlers: dict[
             str,
@@ -1130,11 +1543,18 @@ class Node:
         null_policies: dict[str, NullPolicy | str] | None = None,
         null_fill_values: dict[str, Any] | None = None,
     ):
+        if materialize is not None and not isinstance(materialize, bool):
+            raise TypeError("Node materialize must be a boolean or None")
         self.name = name
         self.function_cls = function_cls
         self.function = function_cls(parameters or {})
         self.parameters = self.function.parameters
-        
+        self.materialize = (
+            self.function.requires_materialization
+            if materialize is None
+            else materialize
+        )
+
         # bindings map TSFN semantic input names to (parent_node, parent_output_column)
         self.bindings = MappingProxyType(dict(bindings or {}))
         self.tolerances = MappingProxyType(dict(tolerances or {}))
@@ -1160,7 +1580,7 @@ class Node:
             raise ValueError(
                 f"Unexpected tolerances for unbound inputs: {sorted(unexpected_tolerances)}"
             )
-        
+
         # Deduplicate and extract unique parent Nodes preserving order
         self.inputs = tuple(dict.fromkeys(parent for parent, _ in self.bindings.values()))
 
@@ -1170,9 +1590,11 @@ class Node:
             if parent_col in parent_outputs:
                 bound_input_columns[input_name] = parent_outputs[parent_col]
         self.function.signature = self.function.resolve_signature(bound_input_columns)
-        self.function._bridge_null_handlers = self.null_handlers
-        self.function._bridge_null_fill_values = self.null_fill_values
-        
+        self.function._configure_input_nulls(
+            self.null_handlers,
+            self.null_fill_values,
+        )
+
         # Map exposed output names to their corresponding data types
         self.outputs = MappingProxyType(
             {
@@ -1180,7 +1602,7 @@ class Node:
                 for column in _column_signatures(self.function.signature[1])
             }
         )
-        
+
         self.ID = self._generate_persistent_id()
         self._frozen = True
 
@@ -1220,7 +1642,8 @@ class Node:
         version = getattr(function, "version", "<uninitialized>")
         return (
             f"Node(name={attrs.get('name')!r}, id={str(node_id)[:8]!r}, "
-            f"fn={function_name}@{version})"
+            f"fn={function_name}@{version}, "
+            f"materialize={attrs.get('materialize', '<uninitialized>')!r})"
         )
 
     def _generate_persistent_id(self) -> str:
@@ -1239,30 +1662,200 @@ class Node:
             "function": _format_function_identity(self.function),
             "null_fill_values": _format_null_fill_values(self.null_fill_values),
             "null_handlers": _format_null_handlers(self.null_handlers),
-            "parameters": json.loads(str(self.parameters)),
+            "parameters": self.parameters.to_dict(),
             "outputs": sorted([(name, str(dtype)) for name, dtype in self.outputs.items()]),
         }
 
-        serialized_data = json.dumps(node_definition, sort_keys=True)
+        serialized_data = _canonical_json(node_definition)
         return hashlib.sha256(serialized_data.encode("utf-8")).hexdigest()
 
 
+class Executor(abc.ABC):
+    """Lower and execute a verified graph.
+
+    The base executor owns the Polars lowering contract, including temporal input
+    alignment. Concrete executors decide how a lazy result is materialized.
+    """
+
+    def execute(self, graph: Graph) -> pl.DataFrame:
+        graph.verify()
+        root_lf = self._evaluate_to_root(graph)
+        return self.materialize(graph.root_node, root_lf)
+
+    def _evaluate_to_root(self, graph: Graph) -> pl.LazyFrame:
+        """Evaluate required boundaries and return the root lazy value."""
+        graph.verify()
+        results: dict[str, pl.LazyFrame] = {}
+
+        for node in graph.node_list:
+            try:
+                node_input_lf = (
+                    None
+                    if not node.bindings
+                    else self.align_inputs(node, results)
+                )
+                results[node.ID] = self.lower_node(node, node_input_lf)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Execution failed at node '{node.name or node.ID[:8]}' "
+                    f"({node.function_cls.__name__}@{node.function.version}): {exc}"
+                ) from exc
+
+            if (
+                node.ID in graph.materialized_node_ids
+                and node.ID != graph.root_node.ID
+            ):
+                results[node.ID] = self.materialize(node, results[node.ID]).lazy()
+
+        return results[graph.root_node.ID]
+
+    def lower_node(
+        self,
+        node: Node,
+        input_lf: pl.LazyFrame | None,
+    ) -> pl.LazyFrame:
+        if input_lf is None:
+            return node.function()
+        return node.function(input_lf)
+
+    def align_inputs(
+        self,
+        node: Node,
+        results: Mapping[str, pl.LazyFrame],
+    ) -> pl.LazyFrame:
+        """Build a union timeline and backward-asof align a node's inputs."""
+        parent_to_bindings: dict[
+            tuple[Node, AsofTolerance],
+            list[tuple[str, str]],
+        ] = defaultdict(list)
+        for input_name, (parent_node, parent_col) in node.bindings.items():
+            tolerance = node.tolerances.get(input_name)
+            parent_to_bindings[(parent_node, tolerance)].append(
+                (parent_col, input_name)
+            )
+
+        input_time = node.function.signature[0].time
+        if input_time is None:
+            raise ValueError(
+                f"Bound node '{node.name or node.ID}' must declare an input time axis"
+            )
+        time_col = input_time.column
+
+        parent_frames: list[tuple[pl.LazyFrame, AsofTolerance]] = []
+        for (parent_node, tolerance), binds in parent_to_bindings.items():
+            parent_lf = results[parent_node.ID]
+            parent_time = parent_node.function.signature[1].time
+            if parent_time is None:
+                raise ValueError(
+                    f"Parent node '{parent_node.name or parent_node.ID}' "
+                    "must declare an output time axis"
+                )
+            select_exprs = [pl.col(parent_time.column).alias(time_col)]
+            select_exprs.extend(
+                pl.col(parent_col).alias(input_name)
+                for parent_col, input_name in binds
+            )
+            parent_frames.append(
+                (parent_lf.select(select_exprs).sort(time_col), tolerance)
+            )
+
+        node_input_lf = (
+            pl.concat(
+                [parent_lf.select(time_col) for parent_lf, _ in parent_frames],
+                how="vertical",
+            )
+            .unique()
+            .sort(time_col)
+        )
+        for parent_lf, tolerance in parent_frames:
+            node_input_lf = node_input_lf.join_asof(
+                parent_lf,
+                on=time_col,
+                strategy="backward",
+                tolerance=tolerance,
+            )
+        return node_input_lf
+
+    @abc.abstractmethod
+    def materialize(self, node: Node, lf: pl.LazyFrame) -> pl.DataFrame:
+        """Materialize one graph boundary into the executor's local table type."""
+        pass
+
+
+class LocalExecutor(Executor):
+    """Execute a graph on one machine using Polars' local query engine."""
+
+    def materialize(self, node: Node, lf: pl.LazyFrame) -> pl.DataFrame:
+        try:
+            return lf.collect()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Execution failed while materializing node "
+                f"'{node.name or node.ID[:8]}' "
+                f"({node.function_cls.__name__}@{node.function.version}): {exc}"
+            ) from exc
+
+
 class Graph:
-    def __init__(self, root_node: Node):
+    def __init__(
+        self,
+        root_node: Node,
+        *,
+        executor: Executor | None = None,
+    ):
+        if not isinstance(root_node, Node):
+            raise TypeError("Graph root_node must be a Node")
+        if executor is not None and not isinstance(executor, Executor):
+            raise TypeError("Graph executor must be an Executor")
+
         self.root_node = root_node
+        self._declared_nodes = self.get_declared_nodes(self.root_node)
         self.node_list = self.get_subgraph_execution_order(self.root_node)
-        
-        # Perform global static validation
-        self._validate_graph()
-        
+        self.executor = LocalExecutor() if executor is None else executor
+        self.materialized_node_ids = frozenset(
+            node.ID for node in self._declared_nodes if node.materialize
+        )
+
+        self.verify()
         self.ID = self._generate_persistent_id()
-        self._compiled_root_lf: pl.LazyFrame | None = None
 
     def __repr__(self) -> str:
         return (
             f"Graph(id={self.ID[:8]!r}, root={self.root_node.ID[:8]!r}, "
-            f"nodes={len(self.node_list)})"
+            f"nodes={len(self.node_list)}, "
+            f"executor={self.executor.__class__.__name__})"
         )
+
+    def verify(self) -> None:
+        """Verify graph structure and type contracts without lowering or executing."""
+        self._validate_materializations()
+        self._validate_graph()
+
+    def _validate_materializations(self) -> None:
+        for node in self._declared_nodes:
+            if node.function.requires_materialization and not node.materialize:
+                raise ValueError(
+                    f"Materialization validation failed for node "
+                    f"'{node.name or node.ID}': {node.function_cls.__name__} "
+                    "requires materialization"
+                )
+
+    def get_declared_nodes(self, target_node: Node) -> tuple[Node, ...]:
+        """Return every concrete node declaration, including semantic duplicates."""
+        visited_objects: set[int] = set()
+        declared_nodes: list[Node] = []
+
+        def visit(node: Node) -> None:
+            object_id = id(node)
+            if object_id in visited_objects:
+                return
+            visited_objects.add(object_id)
+            for parent, _ in node.bindings.values():
+                visit(parent)
+            declared_nodes.append(node)
+
+        visit(target_node)
+        return tuple(declared_nodes)
 
     def get_subgraph_execution_order(self, target_node: Node) -> list[Node]:
         visited: set[str] = set()
@@ -1438,81 +2031,8 @@ class Graph:
         serialized_data = json.dumps(graph_definition, sort_keys=True)
         return hashlib.sha256(serialized_data.encode("utf-8")).hexdigest()
 
-    def compile(self) -> pl.LazyFrame:
-        if self._compiled_root_lf is not None:
-            return self._compiled_root_lf
-
-        results: dict[str, pl.LazyFrame] = {}
-
-        for node in self.node_list:
-            try:
-                if not node.bindings:
-                    results[node.ID] = node.function()
-                else:
-                    # Construct TSFN input dataframe by grouping projections per parent
-                    parent_to_bindings = defaultdict(list)
-                    for input_name, (parent_node, parent_col) in node.bindings.items():
-                        tolerance = node.tolerances.get(input_name)
-                        parent_to_bindings[(parent_node, tolerance)].append((parent_col, input_name))
-
-                    input_time = node.function.signature[0].time
-                    if input_time is None:
-                        raise ValueError(
-                            f"Bound node '{node.name or node.ID}' must declare an input time axis"
-                        )
-                    time_col = input_time.column
-                    parent_frames = []
-                    for (parent_node, tolerance), binds in parent_to_bindings.items():
-                        parent_lf = results[parent_node.ID]
-                        parent_time = parent_node.function.signature[1].time
-                        if parent_time is None:
-                            raise ValueError(
-                                f"Parent node '{parent_node.name or parent_node.ID}' "
-                                "must declare an output time axis"
-                            )
-                        # Select expected columns and alias them directly to the TSFN's semantic input name.
-                        select_exprs = [pl.col(parent_time.column).alias(time_col)]
-                        select_exprs.extend(pl.col(p_col).alias(i_name) for p_col, i_name in binds)
-                        parent_frames.append(
-                            (parent_lf.select(select_exprs).sort(time_col), tolerance)
-                        )
-
-                    # Preserve every parent timestamp, then align each parent without lookahead.
-                    node_input_lf = (
-                        pl.concat(
-                            [parent_lf.select(time_col) for parent_lf, _ in parent_frames],
-                            how="vertical",
-                        )
-                        .unique()
-                        .sort(time_col)
-                    )
-                    for parent_lf, tolerance in parent_frames:
-                        node_input_lf = node_input_lf.join_asof(
-                            parent_lf,
-                            on=time_col,
-                            strategy="backward",
-                            tolerance=tolerance,
-                        )
-                    results[node.ID] = node.function(node_input_lf)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Execution failed at node '{node.name or node.ID[:8]}' "
-                    f"({node.function_cls.__name__}@{node.function.version}): {exc}"
-                ) from exc
-
-        self._compiled_root_lf = results[self.root_node.ID]
-        return self._compiled_root_lf
-
-    def execute(self) -> pl.DataFrame:
-        root_lf = self._compiled_root_lf
-        if root_lf is None:
-            root_lf = self.compile()
-
-        try:
-            return root_lf.collect()
-        except Exception as exc:
-            node = self.root_node
-            raise RuntimeError(
-                f"Execution failed while collecting root node '{node.name or node.ID[:8]}' "
-                f"({node.function_cls.__name__}@{node.function.version}): {exc}"
-            ) from exc
+    def execute(self, executor: Executor | None = None) -> pl.DataFrame:
+        selected_executor = self.executor if executor is None else executor
+        if not isinstance(selected_executor, Executor):
+            raise TypeError("Graph executor must be an Executor")
+        return selected_executor.execute(self)
