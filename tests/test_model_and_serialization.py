@@ -13,7 +13,17 @@ import numpy as np
 import polars as pl
 import pytest
 
-from src.classes import FrameSignature, Model, Node, TSFN, TSFNConfig
+from src.classes import (
+    Dataset,
+    DatasetSplit,
+    FrameDataset,
+    FrameSignature,
+    Model,
+    Node,
+    SupervisedModel,
+    TSFN,
+    TSFNConfig,
+)
 
 
 class TrainingMode(str, Enum):
@@ -178,194 +188,153 @@ def test_nested_config_values_participate_in_node_identity() -> None:
     assert first.ID != changed.ID
 
 
+def supervised_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "features": [[1.0, 10.0], [3.0, 30.0]],
+            "target": [1.0, 3.0],
+        },
+        schema={
+            "features": pl.Array(pl.Float64, 2),
+            "target": pl.Float64,
+        },
+    )
+
+
 @dataclass(frozen=True, kw_only=True)
-class MeanModel(Model):
+class MeanModel(SupervisedModel):
     VERSION = "1.0.0"
     mean: float = 0.0
 
-    def _train(
+    def _fit(
         self,
-        frame: pl.DataFrame,
+        train: Dataset,
+        validation: Dataset | None,
         *,
-        trained_until: datetime,
-        available_at: datetime,
         seed: int,
-    ) -> Model:
-        mean = float(frame.get_column("value").mean())
-        return MeanModel(
-            ID=f"{self.ID}:{seed}:{mean}",
-            trained_until=trained_until,
-            available_at=available_at,
-            mean=mean,
+    ) -> SupervisedModel:
+        del validation, seed
+        targets = pl.concat(
+            [batch.get_column("target") for batch in train.batches()]
         )
+        return MeanModel(mean=float(targets.mean()))
 
-    def _predict(self, frame: pl.DataFrame) -> pl.DataFrame:
-        return frame.select(
-            "timestamp",
-            (pl.col("value") - self.mean).alias("prediction"),
-        )
+    def _predict(self, features: pl.Series) -> pl.Series:
+        return pl.repeat(self.mean, len(features), dtype=pl.Float64, eager=True)
 
 
 @dataclass(frozen=True, kw_only=True)
-class BrokenModel(Model):
+class BrokenModel(SupervisedModel):
     VERSION = "1.0.0"
     behavior: str
 
-    def _train(
+    def _fit(
         self,
-        frame: pl.DataFrame,
+        train: Dataset,
+        validation: Dataset | None,
         *,
-        trained_until: datetime,
-        available_at: datetime,
         seed: int,
-    ) -> Model:
+    ) -> SupervisedModel:
+        del train, validation, seed
         if self.behavior == "self":
             return self
         if self.behavior == "not-model":
             return object()  # type: ignore[return-value]
-        return BrokenModel(
-            ID=f"{self.ID}:next",
-            trained_until=trained_until + timedelta(seconds=1),
-            available_at=available_at,
-            behavior=self.behavior,
-        )
+        return MeanModel()
 
-    def _predict(self, frame: pl.DataFrame) -> pl.DataFrame:
+    def _predict(self, features: pl.Series) -> pl.Series:
         if self.behavior == "bad-prediction":
             return object()  # type: ignore[return-value]
-        return frame
+        if self.behavior == "wrong-length":
+            return pl.Series([0.0])
+        if self.behavior == "null-prediction":
+            return pl.Series([None] * len(features), dtype=pl.Float64)
+        return pl.repeat(0.0, len(features), eager=True)
 
 
-def model_frame() -> pl.DataFrame:
-    return pl.DataFrame(
-        {
-            "timestamp": [datetime(2026, 1, 1), datetime(2026, 1, 2)],
-            "value": [1.0, 3.0],
-        }
-    )
+def model_split() -> DatasetSplit:
+    return DatasetSplit(FrameDataset(supervised_frame()))
 
 
-def test_model_is_an_immutable_checkpoint_with_serializable_metadata() -> None:
-    model = MeanModel(ID="initial")
+def test_model_is_an_immutable_serializable_inference_checkpoint() -> None:
+    model = MeanModel(mean=2.0)
 
     assert model.version == "1.0.0"
-    assert model.trained_until is None
-    assert model.available_at is None
     assert json.loads(str(model)) == model.to_dict()
+    assert model.to_dict()["state"] == {"mean": 2.0}
     assert "MeanModel" in repr(model)
-    assert "initial" in repr(model)
+    assert not hasattr(Model, "fit")
 
     with pytest.raises(FrozenInstanceError):
         model.mean = 10.0  # type: ignore[misc]
 
 
-def test_model_training_returns_a_new_causally_valid_checkpoint() -> None:
-    initial = MeanModel(ID="initial")
-    trained_until = datetime(2026, 1, 2)
-    available_at = datetime(2026, 1, 2, 0, 1)
-
-    trained = initial.train(
-        model_frame(),
-        trained_until=trained_until,
-        available_at=available_at,
-        seed=7,
-    )
+def test_supervised_fitting_returns_a_new_checkpoint() -> None:
+    initial = MeanModel()
+    trained = initial.fit(model_split(), seed=7)
 
     assert trained is not initial
     assert isinstance(trained, MeanModel)
     assert trained.mean == 2.0
-    assert trained.trained_until == trained_until
-    assert trained.available_at == available_at
     assert initial.mean == 0.0
-    assert initial.trained_until is None
-
-    predicted = trained.predict(model_frame())
-    assert predicted["prediction"].to_list() == [-1.0, 1.0]
+    assert trained.predict(supervised_frame()["features"]).to_list() == [2.0, 2.0]
 
 
-def test_model_metadata_rejects_invalid_identity_and_causal_times() -> None:
-    with pytest.raises(TypeError, match="ID must be a string"):
-        MeanModel(ID=1)  # type: ignore[arg-type]
+def test_supervised_fit_exposes_only_train_and_validation_to_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    train = FrameDataset(supervised_frame())
+    validation = FrameDataset(supervised_frame())
+    test = FrameDataset(supervised_frame())
+    datasets = DatasetSplit(train, validation, test)
+    received: list[tuple[Dataset, Dataset | None]] = []
+    original = MeanModel._fit
 
-    with pytest.raises(ValueError, match="ID must be non-empty"):
-        MeanModel(ID=" ")
+    def record(
+        self: MeanModel,
+        fit_train: Dataset,
+        fit_validation: Dataset | None,
+        *,
+        seed: int,
+    ) -> SupervisedModel:
+        received.append((fit_train, fit_validation))
+        return original(self, fit_train, fit_validation, seed=seed)
 
-    with pytest.raises(ValueError, match="must either both be set"):
-        MeanModel(ID="model", trained_until=datetime(2026, 1, 1))
+    monkeypatch.setattr(MeanModel, "_fit", record)
+    MeanModel().fit(datasets, seed=3)
 
-    with pytest.raises(ValueError, match="cannot precede"):
-        MeanModel(
-            ID="model",
-            trained_until=datetime(2026, 1, 2),
-            available_at=datetime(2026, 1, 1),
-        )
-
-    with pytest.raises(TypeError, match="compatible timezones"):
-        MeanModel(
-            ID="model",
-            trained_until=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            available_at=datetime(2026, 1, 1),
-        )
+    assert received[0][0] is train
+    assert received[0][1] is validation
+    assert "test" not in inspect.signature(MeanModel._fit).parameters
 
 
 def test_model_runtime_contract_rejects_invalid_inputs_and_outputs() -> None:
-    initial = MeanModel(ID="initial")
-    trained_until = datetime(2026, 1, 2)
-    available_at = datetime(2026, 1, 3)
+    features = supervised_frame()["features"]
 
-    with pytest.raises(TypeError, match="requires a Polars DataFrame"):
-        initial.train(  # type: ignore[arg-type]
-            object(),
-            trained_until=trained_until,
-            available_at=available_at,
-            seed=1,
-        )
-
+    with pytest.raises(TypeError, match="requires a DatasetSplit"):
+        MeanModel().fit(object(), seed=1)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="seed must be an integer"):
-        initial.train(
-            model_frame(),
-            trained_until=trained_until,
-            available_at=available_at,
-            seed=True,  # type: ignore[arg-type]
-        )
+        MeanModel().fit(model_split(), seed=True)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="must return a SupervisedModel"):
+        BrokenModel(behavior="not-model").fit(model_split(), seed=1)
+    with pytest.raises(ValueError, match="new checkpoint"):
+        BrokenModel(behavior="self").fit(model_split(), seed=1)
+    with pytest.raises(TypeError, match="must return a Polars Series"):
+        BrokenModel(behavior="bad-prediction").predict(features)
+    with pytest.raises(ValueError, match="preserve feature row count"):
+        BrokenModel(behavior="wrong-length").predict(features)
+    with pytest.raises(ValueError, match="null prediction"):
+        BrokenModel(behavior="null-prediction").predict(features)
+    with pytest.raises(TypeError, match="requires a Polars Series"):
+        MeanModel().predict(object())  # type: ignore[arg-type]
 
-    with pytest.raises(ValueError, match="cannot precede"):
-        initial.train(
-            model_frame(),
-            trained_until=available_at,
-            available_at=trained_until,
-            seed=1,
-        )
-
-    with pytest.raises(TypeError, match="Model._train must return a Model"):
-        BrokenModel(ID="bad", behavior="not-model").train(
-            model_frame(),
-            trained_until=trained_until,
-            available_at=available_at,
-            seed=1,
-        )
-
-    with pytest.raises(ValueError, match="must return a new checkpoint"):
-        BrokenModel(ID="bad", behavior="self").train(
-            model_frame(),
-            trained_until=trained_until,
-            available_at=available_at,
-            seed=1,
-        )
-
-    with pytest.raises(ValueError, match="unexpected trained_until"):
-        BrokenModel(ID="bad", behavior="wrong-time").train(
-            model_frame(),
-            trained_until=trained_until,
-            available_at=available_at,
-            seed=1,
-        )
-
-    with pytest.raises(TypeError, match="Model._predict must return a Polars DataFrame"):
-        BrokenModel(ID="bad", behavior="bad-prediction").predict(model_frame())
-
-    with pytest.raises(TypeError, match="requires a Polars DataFrame"):
-        initial.predict(object())  # type: ignore[arg-type]
+    null_features = pl.Series(
+        "features",
+        [[1.0, None]],
+        dtype=pl.Array(pl.Float64, 2),
+    )
+    with pytest.raises(ValueError, match="null feature"):
+        MeanModel().predict(null_features)
 
 
 def test_concrete_model_subclasses_must_define_versions() -> None:
@@ -374,69 +343,29 @@ def test_concrete_model_subclasses_must_define_versions() -> None:
         def extra_contract(self) -> None:
             pass
 
-        def _train(
-            self,
-            frame: pl.DataFrame,
-            *,
-            trained_until: datetime,
-            available_at: datetime,
-            seed: int,
-        ) -> Model:
-            return self
-
-        def _predict(self, frame: pl.DataFrame) -> pl.DataFrame:
-            return frame
+        def _predict(self, features: pl.Series) -> pl.Series:
+            return features
 
     assert inspect.isabstract(AbstractModel)
 
     with pytest.raises(TypeError, match="must define VERSION"):
 
         class MissingVersionModel(Model):
-            def _train(
-                self,
-                frame: pl.DataFrame,
-                *,
-                trained_until: datetime,
-                available_at: datetime,
-                seed: int,
-            ) -> Model:
-                return self
-
-            def _predict(self, frame: pl.DataFrame) -> pl.DataFrame:
-                return frame
+            def _predict(self, features: pl.Series) -> pl.Series:
+                return features
 
     with pytest.raises(TypeError, match="VERSION must be a string"):
 
         class NonStringVersionModel(Model):
             VERSION = 1  # type: ignore[assignment]
 
-            def _train(
-                self,
-                frame: pl.DataFrame,
-                *,
-                trained_until: datetime,
-                available_at: datetime,
-                seed: int,
-            ) -> Model:
-                return self
-
-            def _predict(self, frame: pl.DataFrame) -> pl.DataFrame:
-                return frame
+            def _predict(self, features: pl.Series) -> pl.Series:
+                return features
 
     with pytest.raises(ValueError, match="VERSION must be non-empty"):
 
         class EmptyVersionModel(Model):
             VERSION = " "
 
-            def _train(
-                self,
-                frame: pl.DataFrame,
-                *,
-                trained_until: datetime,
-                available_at: datetime,
-                seed: int,
-            ) -> Model:
-                return self
-
-            def _predict(self, frame: pl.DataFrame) -> pl.DataFrame:
-                return frame
+            def _predict(self, features: pl.Series) -> pl.Series:
+                return features
