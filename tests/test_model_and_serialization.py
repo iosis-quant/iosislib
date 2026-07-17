@@ -13,14 +13,16 @@ import numpy as np
 import polars as pl
 import pytest
 
-from src.classes import (
+from src.core.node import Node
+from src.core.model import (
     Dataset,
     DatasetSplit,
     FrameDataset,
-    FrameSignature,
     Model,
-    Node,
     SupervisedModel,
+)
+from src.core.tsfn import (
+    FrameSignature,
     TSFN,
     TSFNConfig,
 )

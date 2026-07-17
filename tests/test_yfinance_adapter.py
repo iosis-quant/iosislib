@@ -6,7 +6,8 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from src.classes import Graph, Node
+from src.core.graph import Graph
+from src.core.node import Node
 from src.tsfn.adapters import YFinanceOHLCV, YFinanceOHLCVConfig
 from src.tsfn.adapters import yfinance
 

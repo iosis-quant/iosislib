@@ -8,7 +8,7 @@ from typing import Any
 
 import polars as pl
 
-from src.classes import FrameSignature, TSFN, TSFNConfig, TimeAxis
+from src.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
 
 
 YFINANCE_INTERVALS = frozenset(

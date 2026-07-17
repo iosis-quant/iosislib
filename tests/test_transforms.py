@@ -7,7 +7,9 @@ from math import log
 import polars as pl
 import pytest
 
-from src.classes import FrameSignature, Graph, Node, TSFN, TSFNConfig
+from src.core.graph import Graph
+from src.core.node import Node
+from src.core.tsfn import FrameSignature, TSFN, TSFNConfig
 from src.tsfn.transforms import Delta, DeltaConfig, Logit, Ratio, Spread
 
 

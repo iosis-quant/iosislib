@@ -6,7 +6,8 @@ from urllib.parse import parse_qs, urlparse
 import polars as pl
 import pytest
 
-from src.classes import Graph, Node
+from src.core.graph import Graph
+from src.core.node import Node
 from src.tsfn.adapters import PolymarketPriceHistory, PolymarketPriceHistoryConfig
 from src.tsfn.adapters import polymarket
 

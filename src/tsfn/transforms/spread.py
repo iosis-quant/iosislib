@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import polars as pl
 
-from src.classes import FrameSignature, ItemwiseStructTSFN, TSFNConfig, TimeAxis
+from src.core.tsfn import FrameSignature, ItemwiseStructTSFN, TSFNConfig, TimeAxis
 from src.tsfn.transforms._validation import validate_column_name, validate_distinct_columns
 
 

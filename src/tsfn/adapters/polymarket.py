@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 
 import polars as pl
 
-from src.classes import FrameSignature, TSFN, TSFNConfig, TimeAxis
+from src.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
 
 
 POLYMARKET_CLOB_URL = "https://clob.polymarket.com"

@@ -9,15 +9,15 @@ import json
 import polars as pl
 import pytest
 
-from src.classes import (
+from src.core.graph import Graph
+from src.core.node import Node
+from src.core.tsfn import (
     FrameSignature,
-    Graph,
-    Node,
     TSFN,
     TSFNConfig,
     TimeAxis,
-    _dtype_matches,
 )
+from src.core.utils import _dtype_matches
 
 
 def dt(minute: int) -> datetime:

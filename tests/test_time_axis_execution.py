@@ -6,16 +6,9 @@ from datetime import datetime, timedelta
 import polars as pl
 import pytest
 
-from src.classes import (
-    Executor,
-    FrameSignature,
-    Graph,
-    LocalExecutor,
-    Node,
-    TSFN,
-    TSFNConfig,
-    TimeAxis,
-)
+from src.core.graph import Executor, Graph, LocalExecutor
+from src.core.node import Node
+from src.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
 
 VALUE_FRAME = FrameSignature(columns=(("value", pl.Int64),))
 COMBINED_FRAME = FrameSignature(columns=(("left", pl.Int64), ("right", pl.Int64)))

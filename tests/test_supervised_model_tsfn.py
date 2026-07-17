@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 import polars as pl
 import pytest
 
-from src.classes import (
+from src.core.graph import Graph
+from src.core.model import (
     AnyScheduler,
     ChronologicalSplitter,
     Dataset,
@@ -16,17 +17,18 @@ from src.classes import (
     DatasetSplitter,
     EveryNTicksScheduler,
     FrameDataset,
-    FrameSignature,
     FrozenScheduler,
-    Graph,
     MetricThresholdScheduler,
-    Node,
-    NullPolicy,
     ScheduleContext,
     ScheduleDecision,
     Scheduler,
     SupervisedModel,
     SupervisedModelTSFN,
+)
+from src.core.node import Node
+from src.core.tsfn import (
+    FrameSignature,
+    NullPolicy,
     TSFN,
     TSFNConfig,
     TimeAxis,

@@ -2,3 +2,7 @@ temp
 .agents
 .*_cache
 *.pyc
+build/
+dist/
+*.egg-info/
+__pycache__/

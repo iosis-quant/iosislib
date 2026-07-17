@@ -58,7 +58,8 @@ def _available_outcome_points(timestamps, price_vectors, outcome_index):
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.classes import Graph, Node
+from src.core.graph import Graph
+from src.core.node import Node
 from src.tsfn.adapters import PolymarketPriceHistory,YFinanceOHLCV
 from src.tsfn.transforms import Delta, Spread, Logit, Ratio
 
