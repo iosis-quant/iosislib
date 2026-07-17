@@ -1,7 +1,14 @@
-"""Typed graph, transformation, and modelling infrastructure."""
+﻿"""Typed graph, transformation, and modelling infrastructure."""
 
-from src.core.graph import Executor, Graph, LocalExecutor
-from src.core.model import (
+from iosislib.core.graph import (
+    Executor,
+    Graph,
+    GraphValidationError,
+    LocalExecutor,
+    ValidationIssue,
+    ValidationReport,
+)
+from iosislib.core.model import (
     AnyScheduler,
     ChronologicalSplitter,
     Dataset,
@@ -18,8 +25,8 @@ from src.core.model import (
     SupervisedModel,
     SupervisedModelTSFN,
 )
-from src.core.node import Node
-from src.core.tsfn import (
+from iosislib.core.node import Node
+from iosislib.core.tsfn import (
     BatchTSFN,
     ColumnSignature,
     FrameSignature,
@@ -31,7 +38,7 @@ from src.core.tsfn import (
     TSFNConfig,
     TimeAxis,
 )
-from src.core.utils import AsofTolerance
+from iosislib.core.utils import AsofTolerance
 
 
 __all__ = [
@@ -49,6 +56,7 @@ __all__ = [
     "FrameSignature",
     "FrozenScheduler",
     "Graph",
+    "GraphValidationError",
     "ItemwiseStructTSFN",
     "ItemwiseUnaryTSFN",
     "LocalExecutor",
@@ -65,4 +73,6 @@ __all__ = [
     "TSFN",
     "TSFNConfig",
     "TimeAxis",
+    "ValidationIssue",
+    "ValidationReport",
 ]

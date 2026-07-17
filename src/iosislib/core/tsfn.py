@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import abc
 import json
@@ -14,7 +14,7 @@ import numpy as np
 import pyarrow as pa
 import torch
 
-from src.core.utils import (
+from iosislib.core.utils import (
     _canonical_json,
     _datetime_dtype_without_timezone,
     _dtype_matches,
@@ -44,6 +44,7 @@ class NullPolicy(str, Enum):
 class NullHandler:
     policy: NullPolicy | None = None
     function: Callable[[pl.Series], pl.Series] | None = None
+    version: str | None = None
 
     def __post_init__(self) -> None:
         has_policy = self.policy is not None
@@ -51,17 +52,30 @@ class NullHandler:
         if has_policy == has_function:
             raise ValueError("NullHandler must wrap exactly one policy or function")
         if has_policy:
+            if self.version is not None:
+                raise ValueError("Policy null handlers cannot declare a version")
             object.__setattr__(self, "policy", _normalize_null_policy(self.policy))
         if has_function:
             _validate_null_handler_function(self.function)
+            if self.version is not None and (
+                not isinstance(self.version, str) or not self.version.strip()
+            ):
+                raise ValueError(
+                    "Custom null handler version must be a non-empty string"
+                )
 
     @classmethod
     def from_policy(cls, policy: NullPolicy | str) -> NullHandler:
         return cls(policy=_normalize_null_policy(policy))
 
     @classmethod
-    def from_function(cls, function: Callable[[pl.Series], pl.Series]) -> NullHandler:
-        return cls(function=function)
+    def from_function(
+        cls,
+        function: Callable[[pl.Series], pl.Series],
+        *,
+        version: str | None = None,
+    ) -> NullHandler:
+        return cls(function=function, version=version)
 
     @property
     def is_custom(self) -> bool:
@@ -74,6 +88,24 @@ class TimeAxis:
     dtype: pl.DataType = pl.Datetime
     timezone: str | None = None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.column, str):
+            raise TypeError("time column must be a string")
+        if not self.column.strip():
+            raise ValueError("time column must be non-empty")
+        if not (_is_dtype_class(self.dtype) or isinstance(self.dtype, pl.DataType)):
+            raise TypeError("time axis dtype must be a Polars data type")
+        if self.timezone is not None and not isinstance(self.timezone, str):
+            raise TypeError("time axis timezone must be a string or None")
+        if self.timezone is not None and not (
+            self.dtype is pl.Datetime
+            or (
+                not _is_dtype_class(self.dtype)
+                and isinstance(self.dtype, pl.Datetime)
+            )
+        ):
+            raise TypeError("A timezone can only be declared for a Datetime time axis")
+
 
 @dataclass(frozen=True)
 class ColumnSignature:
@@ -84,6 +116,8 @@ class ColumnSignature:
     def __post_init__(self) -> None:
         if not isinstance(self.name, str):
             raise TypeError("column name must be a string")
+        if not self.name.strip():
+            raise ValueError("column name must be non-empty")
         shape = _normalize_shape(self.shape)
         _validate_column_dtype(self.dtype, shape)
         object.__setattr__(self, "shape", shape)
@@ -107,6 +141,8 @@ class FrameSignature:
         return cls(time=None, columns=())
 
     def __post_init__(self) -> None:
+        if self.time is not None and not isinstance(self.time, TimeAxis):
+            raise TypeError("time must be a TimeAxis or None")
         if not isinstance(self.columns, tuple):
             raise TypeError("columns must be a tuple, not a list")
         normalized_columns = tuple(
@@ -349,6 +385,14 @@ class TSFN(abc.ABC):
     REQUIRES_MATERIALIZATION: ClassVar[bool] = False
     DEFAULT_NULL_POLICY: ClassVar[NullPolicy] = NullPolicy.PROPAGATE
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        if self.__dict__.get("_node_definition_frozen", False):
+            raise AttributeError("Configured TSFN definitions are immutable")
+        object.__setattr__(self, name, value)
+
+    def _freeze_definition(self) -> None:
+        object.__setattr__(self, "_node_definition_frozen", True)
+
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
         if not inspect.isabstract(cls):
@@ -409,9 +453,32 @@ class TSFN(abc.ABC):
         self._validate_materialization_requirement()
         self._validate_default_null_policy()
         self.parameters = self._bind_and_validate_config(parameters)
-        self.signature = self.type_signature()
+        self.signature = self._validate_type_signature(self.type_signature())
         self._input_null_handlers = MappingProxyType({})
         self._input_null_fill_values = MappingProxyType({})
+
+    def _validate_type_signature(self, signature: Any) -> tuple[
+        FrameSignature,
+        FrameSignature,
+    ]:
+        class_name = self.__class__.__name__
+        if not isinstance(signature, tuple):
+            raise TypeError(
+                f"{class_name}.type_signature() must return a tuple of exactly two "
+                "FrameSignature values"
+            )
+        if len(signature) != 2:
+            raise ValueError(
+                f"{class_name}.type_signature() must return exactly two items, "
+                f"got {len(signature)}"
+            )
+        for index, frame_signature in enumerate(signature):
+            if not isinstance(frame_signature, FrameSignature):
+                raise TypeError(
+                    f"{class_name}.type_signature() item {index} must be a "
+                    f"FrameSignature, got {type(frame_signature).__name__}"
+                )
+        return signature
 
     def _bind_and_validate_config(self, params: dict[str, Any]) -> TSFNConfig:
         config_fields = fields(self.CONFIG_CLS)
@@ -519,6 +586,15 @@ class TSFN(abc.ABC):
                     f"got {actual_type}"
                 )
 
+        if schema_name == "output":
+            expected_columns = list(_frame_physical_schema(signature))
+            actual_columns = list(current_schema)
+            if actual_columns != expected_columns:
+                raise ValueError(
+                    "Output schema columns must exactly match the declared order. "
+                    f"Expected {expected_columns}, got {actual_columns}"
+                )
+
     def resolve_signature(
         self,
         bound_input_columns: Mapping[str, ColumnSignature],
@@ -571,6 +647,11 @@ class TSFN(abc.ABC):
                 raise ValueError("Missing required input frame")
             output_lf = self.apply(self._prepare_input_nulls(lf))
 
+        if not isinstance(output_lf, pl.LazyFrame):
+            raise TypeError(
+                f"{self.__class__.__name__}.apply() must return a Polars LazyFrame, "
+                f"got {type(output_lf).__name__}"
+            )
         self.validate_output_schema(output_lf)
         return output_lf
 

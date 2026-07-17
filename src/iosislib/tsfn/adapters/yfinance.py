@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -8,7 +8,7 @@ from typing import Any
 
 import polars as pl
 
-from src.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
+from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
 
 
 YFINANCE_INTERVALS = frozenset(

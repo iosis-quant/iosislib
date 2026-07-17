@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -7,10 +7,10 @@ from math import log
 import polars as pl
 import pytest
 
-from src.core.graph import Graph
-from src.core.node import Node
-from src.core.tsfn import FrameSignature, TSFN, TSFNConfig
-from src.tsfn.transforms import Delta, DeltaConfig, Logit, Ratio, Spread
+from iosislib.core.graph import Graph
+from iosislib.core.node import Node
+from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig
+from iosislib.tsfn.transforms import Delta, DeltaConfig, Logit, Ratio, Spread
 
 
 @dataclass(frozen=True)

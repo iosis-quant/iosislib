@@ -1,17 +1,19 @@
-- caching function results and data
-- adapters for csv, parquet, polymarket
-- type hinting for parameters -> dicts is clunky, would be nicer to have something typed.
-- fix polymarket price getter (for some markets it is bringing in weird columns), set rigourous tests against api
-- polymarket historical orderbook getter
-- yf price getter (mid data but we cope)
-- databento l3/l2 price adapter (abuse free data)
-- create good abstraction for adapters based on the existing adapters
-- non ml transforms + testing (arith, timeseries, etc)
-- ml training -> nodes own scheduling criteria for retraining, we always assume that historical data exists and can be fetched
-- basic scheduler, always prefer columnar transforms to row transforms in scheduler
-- backtesting engine + assumptions? granularity based on data, parameterised
-- end to end validation methods
-- error propagation -> the program shouldnt crash at compiletime and should raise all errors at once with some error union or error array?
-- summary stats
-- cloud???
-# - rank polymorphism
+# Roadmap
+
+The core graph, causal alignment, null policies, materialization boundaries,
+walk-forward model lifecycle, transforms, local CSV/Parquet sources, and
+Polymarket/yfinance adapters are implemented. Current work is ordered by the
+contracts needed before a release:
+
+1. Introduce typed TSFN configuration construction without weakening stable
+   identity serialization.
+2. Rework definition IDs only when cache freshness/dirty semantics have concrete
+   requirements; current Node IDs remain authoritative.
+3. Add content-addressed result caching, then dependency-depth and Ray executor
+   implementations.
+4. Expand adapter coverage and domain transforms as concrete workflows require
+   them.
+5. Build backtesting and richer observability as layers above the graph core.
+
+The numbered design briefs in `temp/todo/` are local coordination material and
+are intentionally not part of the published package.

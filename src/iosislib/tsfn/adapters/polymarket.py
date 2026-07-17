@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from collections.abc import Sequence
@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 
 import polars as pl
 
-from src.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
+from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
 
 
 POLYMARKET_CLOB_URL = "https://clob.polymarket.com"

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import abc
 import hashlib
@@ -10,8 +10,8 @@ from typing import Any, ClassVar
 
 import polars as pl
 
-from src.core.tsfn import BatchTSFN, _frame_physical_schema
-from src.core.utils import (
+from iosislib.core.tsfn import BatchTSFN, _frame_physical_schema
+from iosislib.core.utils import (
     _canonical_json,
     _dtype_matches,
     _qualified_type_name,

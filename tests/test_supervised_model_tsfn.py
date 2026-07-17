@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from collections.abc import Mapping
@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 import polars as pl
 import pytest
 
-from src.core.graph import Graph
-from src.core.model import (
+from iosislib.core.graph import Graph
+from iosislib.core.model import (
     AnyScheduler,
     ChronologicalSplitter,
     Dataset,
@@ -25,8 +25,8 @@ from src.core.model import (
     SupervisedModel,
     SupervisedModelTSFN,
 )
-from src.core.node import Node
-from src.core.tsfn import (
+from iosislib.core.node import Node
+from iosislib.core.tsfn import (
     FrameSignature,
     NullPolicy,
     TSFN,

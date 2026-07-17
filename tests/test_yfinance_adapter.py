@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
 
@@ -6,10 +6,10 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from src.core.graph import Graph
-from src.core.node import Node
-from src.tsfn.adapters import YFinanceOHLCV, YFinanceOHLCVConfig
-from src.tsfn.adapters import yfinance
+from iosislib.core.graph import Graph
+from iosislib.core.node import Node
+from iosislib.tsfn.adapters import YFinanceOHLCV, YFinanceOHLCVConfig
+from iosislib.tsfn.adapters import yfinance
 
 
 def make_config(**overrides) -> YFinanceOHLCVConfig:

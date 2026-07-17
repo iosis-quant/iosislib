@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import abc
 import inspect
@@ -13,15 +13,15 @@ import numpy as np
 import polars as pl
 import pytest
 
-from src.core.node import Node
-from src.core.model import (
+from iosislib.core.node import Node
+from iosislib.core.model import (
     Dataset,
     DatasetSplit,
     FrameDataset,
     Model,
     SupervisedModel,
 )
-from src.core.tsfn import (
+from iosislib.core.tsfn import (
     FrameSignature,
     TSFN,
     TSFNConfig,

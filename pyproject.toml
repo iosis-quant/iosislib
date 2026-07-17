@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iosislib"
-version = "0.0.0"
+version = "0.1.0"
 description = "Typed, deterministic, time-aware computation graphs for Polars time series"
-readme = { text = "iosislib builds typed, deterministic feature and modelling graphs over Polars time-series data.", content-type = "text/markdown" }
-requires-python = ">=3.11"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "numpy>=1.26",
     "polars>=1.30",
@@ -27,8 +27,15 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Chris2Rich/iosislib"
+Issues = "https://github.com/Chris2Rich/iosislib/issues"
+Repository = "https://github.com/Chris2Rich/iosislib.git"
 
 [project.optional-dependencies]
 yfinance = [
@@ -41,22 +48,47 @@ test = [
 ]
 dev = [
     "build>=1.2",
+    "check-wheel-contents>=0.6",
+    "mypy>=1.11",
     "pandas>=2.0",
     "pytest>=8",
+    "ruff>=0.6",
     "twine>=5",
     "yfinance>=0.2.40",
 ]
 
 [tool.setuptools]
+package-dir = {"" = "src"}
 include-package-data = false
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["src*"]
-exclude = ["examples*", "temp*", "tests*"]
-namespaces = true
+where = ["src"]
+include = ["iosislib*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+iosislib = ["py.typed"]
+
+[tool.check-wheel-contents]
+toplevel = ["iosislib"]
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["temp"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.11"
+explicit_package_bases = true
+follow_imports = "skip"
+strict = true
+pretty = true
+show_error_codes = true
+# Establish a strict leaf-module baseline without recursively checking unowned modules.
+files = ["src/iosislib/tsfn/transforms/_validation.py"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
-pythonpath = "."
 testpaths = ["tests"]

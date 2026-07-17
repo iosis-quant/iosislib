@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -7,9 +7,9 @@ import numpy as np
 import polars as pl
 import pytest
 
-from src.core.graph import Graph
-from src.core.node import Node
-from src.core.tsfn import (
+from iosislib.core.graph import Graph
+from iosislib.core.node import Node
+from iosislib.core.tsfn import (
     BatchTSFN,
     ColumnSignature,
     FrameSignature,
@@ -19,7 +19,7 @@ from src.core.tsfn import (
     TSFN,
     TSFNConfig,
 )
-from src.tsfn.transforms import Logit, Ratio, Spread
+from iosislib.tsfn.transforms import Logit, Ratio, Spread
 
 
 def dt(minute: int) -> datetime:
@@ -321,6 +321,7 @@ def test_tsfn_centrally_applies_custom_handlers_before_subclass_execution() -> N
         Logit,
         bindings={"value": source.value},
         null_handlers={"value": fill_vector_nulls_with_half},
+        null_handler_versions={"value": "1.0.0"},
     )
 
     result = Graph(logit).execute()
@@ -334,6 +335,7 @@ def test_custom_null_handlers_must_preserve_frame_row_count() -> None:
         Logit,
         bindings={"value": source.value},
         null_handlers={"value": drop_last_handler_row},
+        null_handler_versions={"value": "1.0.0"},
     )
 
     with pytest.raises(RuntimeError, match="must preserve row count"):
@@ -501,6 +503,7 @@ def test_custom_null_handler_function_prepares_batch_input_before_bridge() -> No
         VectorMean,
         bindings={"value": source.value},
         null_handlers={"value": fill_vector_nulls_with_ten},
+        null_handler_versions={"value": "1.0.0"},
     )
 
     result = Graph(mean).execute()
@@ -514,7 +517,12 @@ def test_explicit_null_handler_wrapper_uses_custom_function() -> None:
     mean = Node(
         VectorMean,
         bindings={"value": source.value},
-        null_handlers={"value": NullHandler.from_function(fill_vector_nulls_with_ten)},
+        null_handlers={
+            "value": NullHandler.from_function(
+                fill_vector_nulls_with_ten,
+                version="1.0.0",
+            )
+        },
     )
 
     result = Graph(mean).execute()
@@ -528,6 +536,7 @@ def test_custom_null_handler_identity_affects_node_id() -> None:
         VectorMean,
         bindings={"value": source.value},
         null_handlers={"value": fill_vector_nulls_with_ten},
+        null_handler_versions={"value": "1.0.0"},
     )
     builtin = Node(
         VectorMean,

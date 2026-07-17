@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
 import polars as pl
 
-from src.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
-from src.tsfn.transforms._validation import validate_column_name, validate_distinct_columns
+from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
+from iosislib.tsfn.transforms._validation import validate_column_name, validate_distinct_columns
 
 
 @dataclass(frozen=True)

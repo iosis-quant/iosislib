@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from copy import copy
 from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time, timedelta
 from enum import Enum
 from math import isfinite, prod
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -140,9 +142,204 @@ def _canonical_json(value: Any) -> str:
     )
 
 
+def _canonical_identity_json(value: Any) -> str:
+    """Return the injective canonical encoding used by persistent identities."""
+    return json.dumps(
+        _serialize_identity_value(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
 def _qualified_type_name(value: Any) -> str:
     value_type = value if isinstance(value, type) else type(value)
     return f"{value_type.__module__}.{value_type.__qualname__}"
+
+
+def _normalize_identity_value(value: Any) -> Any:
+    """Copy supported identity input into recursively immutable canonical state."""
+    if isinstance(value, Enum):
+        return value
+
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError("Non-finite floats are not valid identity values")
+        return value
+
+    if isinstance(value, np.generic):
+        return _normalize_identity_value(value.item())
+
+    if _is_dtype_class(value) or isinstance(value, pl.DataType):
+        return value
+
+    if isinstance(value, (datetime, date, time, timedelta, Path, bytes)):
+        return value
+
+    if is_dataclass(value) and not isinstance(value, type):
+        params = getattr(type(value), "__dataclass_params__", None)
+        if params is None or not params.frozen:
+            raise TypeError(
+                f"Dataclass identity value {_qualified_type_name(value)} must be frozen"
+            )
+        field_names = {item.name for item in fields(value)}
+        undeclared_state = set(getattr(value, "__dict__", {})) - field_names
+        if undeclared_state:
+            raise TypeError(
+                f"Dataclass identity value {_qualified_type_name(value)} has "
+                f"undeclared state: {sorted(undeclared_state)}"
+            )
+        normalized = copy(value)
+        for item in fields(value):
+            object.__setattr__(
+                normalized,
+                item.name,
+                _normalize_identity_value(getattr(value, item.name)),
+            )
+        return normalized
+
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {
+                _normalize_identity_value(key): _normalize_identity_value(item)
+                for key, item in value.items()
+            }
+        )
+
+    if isinstance(value, (list, tuple)):
+        return tuple(_normalize_identity_value(item) for item in value)
+
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_normalize_identity_value(item) for item in value)
+
+    raise TypeError(f"Type {type(value)} is not a supported identity value")
+
+
+def _serialize_identity_value(value: Any) -> Any:
+    """Return a type-tagged JSON value with no supported cross-category aliases."""
+    if isinstance(value, Enum):
+        return {
+            "type": "enum",
+            "class": _qualified_type_name(value),
+            "value": _serialize_identity_value(value.value),
+        }
+
+    if isinstance(value, np.generic):
+        return {
+            "type": "numpy_scalar",
+            "dtype": value.dtype.str,
+            "value": _serialize_identity_value(value.item()),
+        }
+
+    if value is None:
+        return {"type": "none"}
+
+    if isinstance(value, bool):
+        return {"type": "bool", "value": value}
+
+    if isinstance(value, str):
+        return {"type": "str", "value": value}
+
+    if isinstance(value, int):
+        return {"type": "int", "value": str(value)}
+
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError("Non-finite floats are not valid identity values")
+        return {"type": "float", "value": value.hex()}
+
+    if _is_dtype_class(value):
+        return {
+            "type": "polars_dtype_class",
+            "class": _qualified_type_name(value),
+        }
+
+    if isinstance(value, pl.DataType):
+        return {
+            "type": "polars_dtype_instance",
+            "class": _qualified_type_name(value),
+            "value": str(value),
+        }
+
+    if isinstance(value, datetime):
+        return {"type": "datetime", "value": value.isoformat()}
+
+    if isinstance(value, date):
+        return {"type": "date", "value": value.isoformat()}
+
+    if isinstance(value, time):
+        return {"type": "time", "value": value.isoformat()}
+
+    if isinstance(value, timedelta):
+        return {
+            "type": "timedelta",
+            "days": value.days,
+            "seconds": value.seconds,
+            "microseconds": value.microseconds,
+        }
+
+    if isinstance(value, Path):
+        return {"type": "path", "value": str(value)}
+
+    if isinstance(value, bytes):
+        return {"type": "bytes", "value": value.hex()}
+
+    if getattr(type(value), "_SERIALIZE_WITH_TO_DICT", False):
+        return {
+            "type": "to_dict",
+            "class": _qualified_type_name(value),
+            "value": _serialize_identity_value(value.to_dict()),
+        }
+
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            "type": "dataclass",
+            "class": _qualified_type_name(value),
+            "fields": [
+                [item.name, _serialize_identity_value(getattr(value, item.name))]
+                for item in fields(value)
+            ],
+        }
+
+    if isinstance(value, Mapping):
+        serialized_items = [
+            (
+                _serialize_identity_value(key),
+                _serialize_identity_value(item),
+            )
+            for key, item in value.items()
+        ]
+        serialized_items.sort(key=lambda item: _identity_sort_key(item[0]))
+        return {
+            "type": "mapping",
+            "items": [[key, item] for key, item in serialized_items],
+        }
+
+    if isinstance(value, list):
+        return {
+            "type": "list",
+            "items": [_serialize_identity_value(item) for item in value],
+        }
+
+    if isinstance(value, tuple):
+        return {
+            "type": "tuple",
+            "items": [_serialize_identity_value(item) for item in value],
+        }
+
+    if isinstance(value, (set, frozenset)):
+        serialized_items = [_serialize_identity_value(item) for item in value]
+        serialized_items.sort(key=_identity_sort_key)
+        return {"type": "set", "items": serialized_items}
+
+    raise TypeError(f"Type {type(value)} is not serializable for identity")
+
+
+def _identity_sort_key(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def _serialize_value(value: Any) -> Any:

@@ -1,6 +1,6 @@
-"""Versioned TSFN implementations, transforms, and adapters."""
+﻿"""Versioned TSFN implementations, transforms, and adapters."""
 
-from src.tsfn.transforms import (
+from iosislib.tsfn.transforms import (
     Delta,
     DeltaConfig,
     Logit,

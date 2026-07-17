@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping
@@ -7,60 +7,120 @@ from typing import Any
 
 import polars as pl
 
-from src.core.tsfn import (
+from iosislib.core.tsfn import (
     ColumnSignature,
     NullHandler,
     NullPolicy,
     TSFN,
     _column_signature_map,
     _column_signatures,
-    _format_frame_signature,
     _normalize_null_handler,
 )
-from src.core.utils import (
+from iosislib.core.utils import (
     AsofTolerance,
-    _canonical_json,
-    _format_tolerance,
-    _serialize_value,
+    _canonical_identity_json,
+    _normalize_identity_value,
 )
 
 
-def _format_null_handler(handler: NullHandler) -> dict[str, str]:
+def _format_null_handler(
+    handler: NullHandler,
+    version: str | None,
+) -> dict[str, str]:
     if handler.policy is not None:
         return {"kind": "policy", "value": handler.policy.value}
 
     assert handler.function is not None
+    assert version is not None
     return {
         "kind": "function",
         "module": handler.function.__module__,
         "qualname": handler.function.__qualname__,
+        "version": version,
     }
 
 
 def _format_null_handlers(
     handlers: Mapping[str, NullHandler],
+    versions: Mapping[str, str],
 ) -> dict[str, dict[str, str]]:
     return {
-        name: _format_null_handler(handler)
+        name: _format_null_handler(handler, versions.get(name))
         for name, handler in sorted(handlers.items())
     }
 
 
-def _format_null_fill_values(values: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        name: _serialize_value(value)
-        for name, value in sorted(values.items())
-    }
+def _declared_null_handler_version(
+    input_name: str,
+    handler: NullHandler,
+    configured_versions: Mapping[str, str],
+) -> str | None:
+    if handler.function is None:
+        return None
+
+    configured = configured_versions.get(input_name)
+    wrapped = handler.version
+    attributed = getattr(handler.function, "__iosis_version__", None)
+    declared = [
+        (source, value)
+        for source, value in (
+            ("NullHandler", wrapped),
+            ("Node.null_handler_versions", configured),
+            ("function.__iosis_version__", attributed),
+        )
+        if value is not None
+    ]
+    versions = {value for _, value in declared}
+    if len(versions) > 1:
+        raise ValueError(
+            f"Conflicting custom null handler versions for input '{input_name}'"
+        )
+    version = declared[0][1] if declared else None
+    if version is None:
+        raise ValueError(
+            f"Custom null handler for input '{input_name}' must declare a behavior "
+            "version through NullHandler.from_function(..., version=...), "
+            "Node.null_handler_versions, or function.__iosis_version__"
+        )
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError(
+            f"Custom null handler version for input '{input_name}' must be "
+            "a non-empty string"
+        )
+    return version
 
 
-def _format_function_identity(function: TSFN) -> dict[str, Any]:
+def _normalize_function_state(function: TSFN) -> None:
+    for name, value in tuple(vars(function).items()):
+        object.__setattr__(function, name, _normalize_identity_value(value))
+
+
+def _format_function_identity(
+    function_cls: type[TSFN],
+    function: TSFN,
+) -> dict[str, Any]:
     input_signature, output_signature = function.signature
+    core_state = {
+        "version",
+        "parameters",
+        "signature",
+        "_input_null_handlers",
+        "_input_null_fill_values",
+        "_node_definition_frozen",
+    }
     return {
-        "module": function.__class__.__module__,
-        "qualname": function.__class__.__qualname__,
+        "module": function_cls.__module__,
+        "qualname": function_cls.__qualname__,
         "version": function.version,
-        "input_signature": _format_frame_signature(input_signature),
-        "output_signature": _format_frame_signature(output_signature),
+        "input_signature": input_signature,
+        "output_signature": output_signature,
+        "state": MappingProxyType(
+            {
+                name: value
+                for name, value in sorted(vars(function).items())
+                if name not in core_state
+            }
+        ),
     }
 
 
@@ -85,12 +145,15 @@ class Node:
         | None = None,
         null_policies: dict[str, NullPolicy | str] | None = None,
         null_fill_values: dict[str, Any] | None = None,
+        null_handler_versions: dict[str, str] | None = None,
     ):
         if materialize is not None and not isinstance(materialize, bool):
             raise TypeError("Node materialize must be a boolean or None")
         self.name = name
         self.function_cls = function_cls
-        self.function = function_cls(parameters or {})
+        normalized_parameters = _normalize_identity_value(parameters or {})
+        self.function = function_cls(normalized_parameters)
+        _normalize_function_state(self.function)
         self.parameters = self.function.parameters
         self.materialize = (
             self.function.requires_materialization
@@ -116,7 +179,35 @@ class Node:
             }
         )
         self.null_policies = self.null_handlers
-        self.null_fill_values = MappingProxyType(dict(null_fill_values or {}))
+        normalized_fill_values = _normalize_identity_value(null_fill_values or {})
+        self.null_fill_values = normalized_fill_values
+        configured_versions = dict(null_handler_versions or {})
+        unexpected_versions = set(configured_versions) - set(self.null_handlers)
+        if unexpected_versions:
+            raise ValueError(
+                "Unexpected custom null handler versions for unconfigured inputs: "
+                f"{sorted(unexpected_versions)}"
+            )
+        self.null_handler_versions = MappingProxyType(
+            {
+                input_name: version
+                for input_name, handler in self.null_handlers.items()
+                if (
+                    version := _declared_null_handler_version(
+                        input_name,
+                        handler,
+                        configured_versions,
+                    )
+                )
+                is not None
+            }
+        )
+        policy_versions = set(configured_versions) - set(self.null_handler_versions)
+        if policy_versions:
+            raise ValueError(
+                "Custom null handler versions require function handlers: "
+                f"{sorted(policy_versions)}"
+            )
         unexpected_tolerances = set(self.tolerances) - set(self.bindings)
         if unexpected_tolerances:
             raise ValueError(
@@ -132,7 +223,9 @@ class Node:
             parent_outputs = _column_signature_map(parent.function.signature[1])
             if parent_column in parent_outputs:
                 bound_input_columns[input_name] = parent_outputs[parent_column]
-        self.function.signature = self.function.resolve_signature(bound_input_columns)
+        self.function.signature = _normalize_identity_value(
+            self.function.resolve_signature(bound_input_columns)
+        )
         self.function._configure_input_nulls(
             self.null_handlers,
             self.null_fill_values,
@@ -145,6 +238,8 @@ class Node:
             }
         )
 
+        self.function._freeze_definition()
+        self.definition = self._normalized_definition()
         self.ID = self._generate_persistent_id()
         self._frozen = True
 
@@ -189,28 +284,31 @@ class Node:
         )
 
     def _generate_persistent_id(self) -> str:
+        serialized_data = _canonical_identity_json(self.definition)
+        return hashlib.sha256(serialized_data.encode("utf-8")).hexdigest()
+
+    def _normalized_definition(self) -> Mapping[str, Any]:
         serialized_bindings = {
             input_name: {
                 "parent_id": parent.ID,
                 "parent_output": parent_column,
-                "tolerance": _format_tolerance(self.tolerances.get(input_name)),
+                "tolerance": self.tolerances.get(input_name),
             }
             for input_name, (parent, parent_column) in sorted(self.bindings.items())
         }
 
         node_definition = {
             "bindings": serialized_bindings,
-            "function": _format_function_identity(self.function),
-            "null_fill_values": _format_null_fill_values(self.null_fill_values),
-            "null_handlers": _format_null_handlers(self.null_handlers),
-            "parameters": self.parameters.to_dict(),
-            "outputs": sorted(
-                (name, str(dtype)) for name, dtype in self.outputs.items()
+            "function": _format_function_identity(self.function_cls, self.function),
+            "null_fill_values": self.null_fill_values,
+            "null_handlers": _format_null_handlers(
+                self.null_handlers,
+                self.null_handler_versions,
             ),
+            "parameters": self.parameters,
+            "outputs": tuple(sorted(self.outputs.items())),
         }
-
-        serialized_data = _canonical_json(node_definition)
-        return hashlib.sha256(serialized_data.encode("utf-8")).hexdigest()
+        return _normalize_identity_value(node_definition)
 
 
 __all__ = ["Node"]

@@ -6,10 +6,10 @@ from urllib.parse import parse_qs, urlparse
 import polars as pl
 import pytest
 
-from src.core.graph import Graph
-from src.core.node import Node
-from src.tsfn.adapters import PolymarketPriceHistory, PolymarketPriceHistoryConfig
-from src.tsfn.adapters import polymarket
+from iosislib.core.graph import Graph
+from iosislib.core.node import Node
+from iosislib.tsfn.adapters import PolymarketPriceHistory, PolymarketPriceHistoryConfig
+from iosislib.tsfn.adapters import polymarket
 
 
 def test_polymarket_price_history_url_uses_expected_clob_query_params() -> None:

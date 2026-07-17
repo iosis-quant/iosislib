@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -6,9 +6,9 @@ from datetime import datetime, timedelta
 import polars as pl
 import pytest
 
-from src.core.graph import Executor, Graph, LocalExecutor
-from src.core.node import Node
-from src.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
+from iosislib.core.graph import Executor, Graph, LocalExecutor
+from iosislib.core.node import Node
+from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
 
 VALUE_FRAME = FrameSignature(columns=(("value", pl.Int64),))
 COMBINED_FRAME = FrameSignature(columns=(("left", pl.Int64), ("right", pl.Int64)))

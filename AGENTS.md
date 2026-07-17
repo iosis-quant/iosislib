@@ -1,4 +1,4 @@
-# Repository Guidelines
+﻿# Repository Guidelines
 
 ## Project Purpose
 
@@ -8,17 +8,17 @@ Keep the library narrower than a generic workflow orchestrator or backtester. Po
 
 ## Source Layout And Imports
 
-- `src/core/tsfn.py`: `TimeAxis`, `ColumnSignature`, `FrameSignature`, null handling, `TSFN`, `ItemwiseUnaryTSFN`, `ItemwiseStructTSFN`, and `BatchTSFN`.
-- `src/core/model.py`: datasets, splitters, immutable model checkpoints, schedulers, and `SupervisedModelTSFN`.
-- `src/core/node.py`: immutable declarative `Node` objects, bindings, materialization choices, and content-addressed IDs.
-- `src/core/graph.py`: verification, topological ordering, time alignment, `Executor`, and `LocalExecutor`.
-- `src/core/utils.py`: generic dtype, shape, serialization, tolerance, and zero-copy helpers.
-- `src/tsfn/transforms/`: concrete transforms such as delta, logit, ratio, and spread.
-- `src/tsfn/adapters/`: data-producing TSFNs such as Polymarket and yfinance.
+- `src/iosislib/core/tsfn.py`: `TimeAxis`, `ColumnSignature`, `FrameSignature`, null handling, `TSFN`, `ItemwiseUnaryTSFN`, `ItemwiseStructTSFN`, and `BatchTSFN`.
+- `src/iosislib/core/model.py`: datasets, splitters, immutable model checkpoints, schedulers, and `SupervisedModelTSFN`.
+- `src/iosislib/core/node.py`: immutable declarative `Node` objects, bindings, materialization choices, and content-addressed IDs.
+- `src/iosislib/core/graph.py`: verification, topological ordering, time alignment, `Executor`, and `LocalExecutor`.
+- `src/iosislib/core/utils.py`: generic dtype, shape, serialization, tolerance, and zero-copy helpers.
+- `src/iosislib/tsfn/transforms/`: concrete transforms such as delta, logit, ratio, and spread.
+- `src/iosislib/tsfn/adapters/`: data-producing TSFNs such as Polymarket and yfinance.
 - `tests/`: the tracked pytest suite. `examples/` contains runnable examples.
 - `temp/`: ignored research and prototypes only. Production code and tracked tests must not depend on it.
 
-The old `src.classes` monolith was deliberately removed. Do not recreate a compatibility facade. Import from the owning module, for example `from src.core.node import Node` and `from src.core.graph import Graph`. Internally, preserve the dependency direction `utils -> tsfn -> model/node -> graph`; `tsfn.py` must not depend on model or graph state.
+The old `src.classes` monolith and temporary `src.*` package namespace were deliberately removed. Do not recreate a compatibility facade. Import from the owning module, for example `from iosislib.core.node import Node` and `from iosislib.core.graph import Graph`. Internally, preserve the dependency direction `utils -> tsfn -> model/node -> graph`; `tsfn.py` must not depend on model or graph state.
 
 ## Architectural Invariants
 
@@ -81,7 +81,7 @@ Prefer native Polars expressions. `ItemwiseUnaryTSFN` is the preferred scalar/fi
 
 A Polars null means missing or invalid data, not zero, NaN, or an empty value. Preserve that distinction. Nodes can configure per-input `NullHandler` values using `NullPolicy.ERROR`, `PROPAGATE`, `DROP`, `FILL`, `PASS`, or a named custom function. Fill policies require explicit fill values. Custom handlers must preserve row count where required.
 
-Models default to loud failure on null input or prediction output. Do not silently edit market/model data to make it look complete. Diagnose feed behavior, alignment, or plotting before changing values.
+Custom null-handler functions require an explicit behavior version through `NullHandler`, the Node mapping, or `function.__iosis_version__`; changing handler behavior requires changing that version. Models default to loud failure on null input or prediction output. Do not silently edit market/model data to make it look complete. Diagnose feed behavior, alignment, or plotting before changing values.
 
 When crossing out of Polars, use the existing Arrow/NumPy/Torch bridge methods. They attempt zero-copy transfer and validate aliasing when requested, but zero-copy is a conditional invariant, not a slogan: null bitmaps, non-contiguous buffers, unsupported Arrow DLPack paths, or dtype conversion may require an explicit allowed copy. Keep Python orchestration outside the hot elementwise path.
 
@@ -99,7 +99,7 @@ Do not add `available_at` or framework-wide bitemporality casually. The graph en
 
 TSFN version, qualified class name, resolved signatures, normalized parameters, bindings, tolerances, null policies/fill values, and outputs contribute to node identity. Names are human labels only. Graph IDs derive from the root and node IDs.
 
-Serialization must be deterministic: sort mapping keys/items, normalize unordered values, reject unsupported or non-finite values, and never use process-local identity. New value/config/helper classes that enter IDs need stable `to_dict()`/`__str__()` behavior. Moving classes between modules changes qualified names and therefore IDs; treat such moves as migrations.
+Serialization must be deterministic: sort mapping keys/items, normalize unordered values, reject unsupported or non-finite values, and never use process-local identity. New value/config/helper classes that enter IDs need stable `to_dict()`/`__str__()` behavior. The `iosislib` namespace migration intentionally invalidated pre-migration qualified-name-based Node and Graph IDs; future module moves are identity migrations too.
 
 Caching is not implemented yet. When added, cached deterministic results should supersede scheduler labels such as "always": identical node identity and inputs should reuse the same result. Do not weaken identity now to make a speculative cache easier.
 
@@ -112,7 +112,7 @@ The yfinance adapter imports pandas/yfinance only when used and is covered by th
 ## Development Workflow
 
 - `python -m pip install -e ".[dev]"`: install package and development extras.
-- `python -m compileall -q src/core src/tsfn`: syntax-check package modules.
+- `python -m compileall -q src/iosislib`: syntax-check package modules.
 - `python -m pytest`: run tracked tests under `tests/`.
 - `python -m build`: build wheel and source distributions under `dist/`.
 
