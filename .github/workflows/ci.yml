@@ -81,9 +81,11 @@ jobs:
           wheel="$(find "$GITHUB_WORKSPACE/dist" -maxdepth 1 -name '*.whl' -print -quit)"
           sdist="$(find "$GITHUB_WORKSPACE/dist" -maxdepth 1 -name '*.tar.gz' -print -quit)"
           smoke_env="$RUNNER_TEMP/iosislib-package-smoke"
-          python -m venv "$smoke_env"
+          # Reuse the job's already-tested dependencies instead of installing the
+          # multi-gigabyte Torch/CUDA stack into a second environment.
+          python -m venv --system-site-packages "$smoke_env"
           "$smoke_env/bin/python" -m pip install --upgrade pip
-          "$smoke_env/bin/python" -m pip install "$wheel"
+          "$smoke_env/bin/python" -m pip install --no-deps "$wheel"
           cd "$RUNNER_TEMP"
           "$smoke_env/bin/python" - <<'PY'
           from datetime import datetime
