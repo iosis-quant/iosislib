@@ -18,70 +18,28 @@ surface for `Graph`, `Node`, and frame signatures.
 
 ## Offline quickstart
 
-This example snapshots a local CSV by content hash, then executes two lazy
-transforms without any network access.
+The tracked [offline graph example](examples/offline_graph.py) snapshots a
+temporary local CSV by content hash, then executes `CSVSource -> Logit -> Delta`
+without network access. Run it from the repository root after installation:
 
-```python
-from datetime import datetime
-
-import polars as pl
-
-from iosislib.core.graph import Graph
-from iosislib.core.node import Node
-from iosislib.core.tsfn import FrameSignature
-from iosislib.tsfn.adapters import CSVSource, sha256_file
-from iosislib.tsfn.transforms import Delta, Logit
-
-
-csv_path = "prices.csv"
-pl.DataFrame(
-    {
-        "timestamp": [
-            datetime(2026, 1, 1, 0, 0),
-            datetime(2026, 1, 1, 0, 1),
-            datetime(2026, 1, 1, 0, 2),
-        ],
-        "probability": [0.25, 0.5, 0.75],
-    }
-).write_csv(csv_path)
-
-source = Node(
-    CSVSource,
-    parameters={
-        "path": csv_path,
-        "output_signature": FrameSignature(
-            columns=(("probability", pl.Float64),),
-        ),
-        "content_sha256": sha256_file(csv_path),
-    },
-    name="prices",
-)
-log_odds = Node(
-    Logit,
-    bindings={"probability": source.probability},
-    parameters={
-        "input_column": "probability",
-        "output_column": "log_odds",
-    },
-)
-change = Node(
-    Delta,
-    bindings={"log_odds": log_odds.log_odds},
-    parameters={
-        "input_column": "log_odds",
-        "output_column": "change",
-    },
-)
-
-graph = Graph(change)
-graph.verify()
-result = graph.execute()
-print(result)
+```console
+python examples/offline_graph.py
 ```
 
 Nodes are immutable declarations. A child owns the alignment tolerance and
 null policy for each input it consumes; graph execution aligns parents with a
 backward as-of join on the union of their timestamps.
+
+Concrete frozen configs are accepted through the typed `config=` path, while
+`parameters=` mappings remain available for dynamic programs. Both normalize to
+the same Node identity. Use `node.output("column")` for an explicit typed binding;
+`node.column` remains equivalent shorthand.
+
+Graphs are immutable after successful validation. Execution strategies are
+runtime choices, supplied with `graph.execute(executor=...)`; they are not part of
+the graph declaration or ID. Local CSV and Parquet sources read, hash, and parse
+the same in-memory byte snapshot. This gives an exact content guarantee at the
+cost of holding the full source bytes and parsed frame at that boundary.
 
 ## Development
 
@@ -94,26 +52,35 @@ python -m pip install -e ".[dev]"
 Run the same quality gates enforced by CI:
 
 ```console
-python -m compileall -q src/iosislib
-python -m ruff check src
+python -m compileall -q src/iosislib examples
+python -m ruff check src examples
 python -m mypy
+python examples/offline_graph.py
 python -m pytest
 python -m build
 python -m twine check --strict dist/*
 check-wheel-contents dist
 ```
 
-Ruff checks production source without forcing churn in legacy examples or
-deliberately adversarial tests. `mypy` currently applies strict checking to the
-transform validation boundary. That deliberately small baseline can expand as
-the public namespace and typed configuration work land; it does not imply that
-all production modules already pass strict static analysis. Imported modules
-are skipped until they are deliberately added to the checked file set.
+Ruff checks production source and tracked examples without forcing churn in
+deliberately adversarial tests. Strict mypy checks the TSFN and Node contracts,
+the concrete transforms, and a public consumer fixture. This is an enforced
+public slice, not a claim that every production module is already strict-clean.
 
 Tracked tests use local fixtures or mock remote API boundaries; they do not
 require live market or finance services. CI runs the full suite on Windows and
 Ubuntu for every declared Python version, then validates both source and wheel
 distributions in a clean environment outside the checkout.
+
+## Portable strategy declarations
+
+`iosislib.strategy` provides the backend-independent `iosis.strategy/v1` YAML
+representation for storing strategies and passing them between APIs and
+frontends. It uses versioned symbolic operations and readable `node.output`
+references rather than Python class paths or backend graph IDs. The parser,
+deterministic serializer, fingerprint, and packaged JSON Schema are documented in
+[the strategy format specification](docs/strategy-format-v1.md). A backend
+operation registry/compiler is intentionally a later layer.
 
 See [TODO.md](TODO.md) for the ordered roadmap and [AGENTS.md](AGENTS.md) for
 the architectural and contribution constraints.

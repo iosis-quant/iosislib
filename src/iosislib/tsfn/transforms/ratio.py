@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import polars as pl
@@ -26,7 +27,7 @@ class RatioConfig(TSFNConfig):
         validate_distinct_columns(self.timestamp_column, self.output_column)
 
 
-class Ratio(ItemwiseStructTSFN):
+class Ratio(ItemwiseStructTSFN[RatioConfig]):
     VERSION = "0.1.0"
     CONFIG_CLS = RatioConfig
 
@@ -52,7 +53,7 @@ class Ratio(ItemwiseStructTSFN):
     def batch_output_column(self) -> str:
         return self.parameters.output_column
 
-    def batch(self, fields: dict[str, pl.Series]) -> pl.Series:
+    def batch(self, fields: Mapping[str, pl.Series]) -> pl.Series:
         params = self.parameters
         ratio = fields[params.numerator_column] / fields[params.denominator_column]
         output_shape = self.output_column_signature(params.output_column).shape

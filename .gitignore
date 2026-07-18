@@ -1,5 +1,7 @@
 temp
 .agents
+.codex
+.claude
 .*_cache
 *.pyc
 build/

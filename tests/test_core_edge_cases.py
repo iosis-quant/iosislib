@@ -622,8 +622,15 @@ def test_node_and_graph_ids_are_independent_of_binding_insertion_order() -> None
     first = Node(Pair, bindings={"left": left.value, "right": right.value}, name="pair")
     second = Node(Pair, bindings={"right": right.value, "left": left.value}, name="pair")
 
+    first_graph = Graph(first)
+    second_graph = Graph(second)
+
     assert first.ID == second.ID
-    assert Graph(first).ID == Graph(second).ID
+    assert first_graph.ID == second_graph.ID
+    assert first_graph.node_list == second_graph.node_list
+    assert first_graph.describe() == second_graph.describe()
+    assert Graph.validate(first) == Graph.validate(second)
+    assert first_graph.execute().equals(second_graph.execute())
 
 
 def test_graph_ids_are_deterministic_and_node_list_is_topological() -> None:
@@ -649,7 +656,7 @@ def test_duplicate_semantic_parent_ids_are_deduplicated_without_losing_bindings(
     result = graph.execute()
 
     assert left == right
-    assert graph.node_list == [left, root]
+    assert graph.node_list == (left, root)
     assert result["timestamp"].to_list() == [dt(0), dt(1)]
     assert result["left"].to_list() == [10, 20]
     assert result["right"].to_list() == [10, 20]
@@ -679,7 +686,7 @@ def test_equal_sources_share_output_execution_node_when_consumers_choose_toleran
     result = graph.execute()
 
     assert default.ID == same_source.ID
-    assert graph.node_list == [default, root]
+    assert graph.node_list == (default, root)
     assert result["timestamp"].to_list() == [dt(0)]
     assert result["left"].to_list() == [10]
     assert result["right"].to_list() == [10]
@@ -692,7 +699,7 @@ def test_same_parent_can_feed_multiple_inputs_without_duplicate_execution_nodes(
 
     result = graph.execute()
 
-    assert graph.node_list == [parent, root]
+    assert graph.node_list == (parent, root)
     assert result["timestamp"].to_list() == [dt(0), dt(2)]
     assert result["left"].to_list() == [10, 20]
     assert result["right"].to_list() == [10, 20]
@@ -708,7 +715,7 @@ def test_diamond_graph_with_identical_branches_shares_cached_branch_execution() 
     result = graph.execute()
 
     assert left.ID == right.ID
-    assert graph.node_list == [parent, left, root]
+    assert graph.node_list == (parent, left, root)
     assert result["timestamp"].to_list() == [dt(0), dt(1)]
     assert result["left"].to_list() == [5, 6]
     assert result["right"].to_list() == [5, 6]
@@ -730,7 +737,7 @@ def test_graph_validation_rejects_unknown_outputs_wrong_types_and_orphaned_mutat
     with pytest.raises(ValueError, match="does not expose output 'missing'"):
         Graph(Node(Identity, bindings={"value": (upstream, "missing")}))
 
-    with pytest.raises(TypeError, match="Type mismatch"):
+    with pytest.raises(ValueError, match="Type mismatch"):
         Graph(Node(Identity, bindings={"value": Node(FloatSource).value}))
 
     mutated = Node(Identity, bindings={"value": upstream.value})
@@ -748,10 +755,10 @@ def test_graph_validation_rejects_time_axis_column_dtype_and_timezone_mismatches
     with pytest.raises(ValueError, match="Time axis mismatch"):
         Graph(Node(Identity, bindings={"value": wrong_time_name.value}))
 
-    with pytest.raises(TypeError, match="Time axis dtype mismatch"):
+    with pytest.raises(ValueError, match="Time axis dtype mismatch"):
         Graph(Node(Identity, bindings={"value": wrong_dtype.value}))
 
-    with pytest.raises(TypeError, match="Time axis timezone mismatch"):
+    with pytest.raises(ValueError, match="Time axis timezone mismatch"):
         Graph(Node(Identity, bindings={"value": wrong_timezone.value}))
 
 

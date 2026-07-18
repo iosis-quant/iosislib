@@ -11,6 +11,7 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
     "numpy>=1.26",
     "polars>=1.30",
+    "PyYAML>=6.0",
     "pyarrow>=14",
     "torch>=2.1",
 ]
@@ -54,6 +55,7 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
     "twine>=5",
+    "types-PyYAML>=6.0",
     "yfinance>=0.2.40",
 ]
 
@@ -67,7 +69,7 @@ include = ["iosislib*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-iosislib = ["py.typed"]
+iosislib = ["py.typed", "strategy/*.json"]
 
 [tool.check-wheel-contents]
 toplevel = ["iosislib"]
@@ -82,12 +84,23 @@ select = ["E4", "E7", "E9", "F"]
 [tool.mypy]
 python_version = "3.11"
 explicit_package_bases = true
-follow_imports = "skip"
+follow_imports = "normal"
+mypy_path = ["src"]
 strict = true
 pretty = true
 show_error_codes = true
-# Establish a strict leaf-module baseline without recursively checking unowned modules.
-files = ["src/iosislib/tsfn/transforms/_validation.py"]
+warn_unused_configs = true
+files = [
+    "src/iosislib/core/tsfn.py",
+    "src/iosislib/core/node.py",
+    "src/iosislib/strategy",
+    "src/iosislib/tsfn/transforms",
+    "tests/typing/typed_construction.py",
+]
+
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = "-ra"

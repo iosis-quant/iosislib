@@ -57,13 +57,16 @@ def _validate_output_signature(output_signature: FrameSignature) -> None:
         raise ValueError("output_signature must declare a time axis")
 
 
-def _verify_snapshot(path: str, expected_sha256: str) -> None:
-    actual_sha256 = sha256_file(path)
+def _read_verified_snapshot(path: str, expected_sha256: str) -> bytes:
+    """Read, verify, and return the one byte snapshot this execution consumes."""
+    snapshot = Path(path).read_bytes()
+    actual_sha256 = hashlib.sha256(snapshot).hexdigest()
     if actual_sha256 != expected_sha256:
         raise ValueError(
             f"Local file content digest mismatch for {path!r}. "
             f"Expected {expected_sha256}, got {actual_sha256}"
         )
+    return snapshot
 
 
 def _project_declared_columns(
@@ -99,7 +102,13 @@ class CSVSourceConfig(TSFNConfig):
 
 
 class CSVSource(TSFN):
-    VERSION = "0.1.0"
+    """Read one verified in-memory snapshot, then expose parsed data lazily.
+
+    Execution holds the complete source bytes plus the parsed frame in memory. No
+    staging file or other persistent artifact is created.
+    """
+
+    VERSION = "0.2.0"
     CONFIG_CLS = CSVSourceConfig
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
@@ -107,15 +116,14 @@ class CSVSource(TSFN):
 
     def apply(self) -> pl.LazyFrame:
         params = self.parameters
-        _verify_snapshot(params.path, params.content_sha256)
-        frame = pl.scan_csv(
-            params.path,
+        snapshot = _read_verified_snapshot(params.path, params.content_sha256)
+        frame = pl.read_csv(
+            snapshot,
             has_header=True,
             separator=params.separator,
             schema_overrides=_frame_physical_schema(params.output_signature),
             try_parse_dates=True,
-            glob=False,
-        )
+        ).lazy()
         return _project_declared_columns(frame, params.output_signature)
 
 
@@ -136,7 +144,13 @@ class ParquetSourceConfig(TSFNConfig):
 
 
 class ParquetSource(TSFN):
-    VERSION = "0.1.0"
+    """Read one verified in-memory snapshot, then expose parsed data lazily.
+
+    Execution holds the complete source bytes plus the parsed frame in memory. No
+    staging file or other persistent artifact is created.
+    """
+
+    VERSION = "0.2.0"
     CONFIG_CLS = ParquetSourceConfig
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
@@ -144,8 +158,8 @@ class ParquetSource(TSFN):
 
     def apply(self) -> pl.LazyFrame:
         params = self.parameters
-        _verify_snapshot(params.path, params.content_sha256)
-        frame = pl.scan_parquet(params.path, glob=False)
+        snapshot = _read_verified_snapshot(params.path, params.content_sha256)
+        frame = pl.read_parquet(snapshot).lazy()
         return _project_declared_columns(frame, params.output_signature)
 
 

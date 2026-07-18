@@ -8,7 +8,7 @@ import pytest
 
 from iosislib.core.graph import Executor, Graph, LocalExecutor
 from iosislib.core.node import Node
-from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
+from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig
 
 VALUE_FRAME = FrameSignature(columns=(("value", pl.Int64),))
 COMBINED_FRAME = FrameSignature(columns=(("left", pl.Int64), ("right", pl.Int64)))
@@ -150,7 +150,16 @@ def source_node(
 class RecordingExecutor(LocalExecutor):
     def __init__(self) -> None:
         self.aligned_nodes: list[str] = []
+        self.lowered_nodes: list[str] = []
         self.materialized_nodes: list[str] = []
+
+    def lower_node(
+        self,
+        node: Node,
+        input_lf: pl.LazyFrame | None,
+    ) -> pl.LazyFrame:
+        self.lowered_nodes.append(node.ID)
+        return super().lower_node(node, input_lf)
 
     def align_inputs(
         self,
@@ -191,29 +200,66 @@ def test_graph_verify_checks_contracts_without_lowering_or_materializing() -> No
         graph.execute()
 
 
-def test_graph_uses_its_configured_executor_for_lowering_and_execution() -> None:
+def test_execute_and_describe_consume_the_stored_validated_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = source_node("source", (0, 1), (10, 20))
+    graph = Graph(source)
+    original_id = graph.ID
+    original_nodes = graph.node_list
+
+    def unexpected_revalidation(*args: object, **kwargs: object) -> object:
+        raise AssertionError("validated graph state must be reused")
+
+    monkeypatch.setattr(Graph, "verify", unexpected_revalidation)
+    monkeypatch.setattr(
+        Graph,
+        "_validated_declaration",
+        classmethod(unexpected_revalidation),
+    )
+    monkeypatch.setattr(
+        Graph,
+        "_dependency_order",
+        classmethod(unexpected_revalidation),
+    )
+
+    description = graph.describe()
+    result = graph.execute()
+
+    assert graph.ID == original_id
+    assert graph.node_list == original_nodes
+    assert description["id"] == original_id
+    assert [node["id"] for node in description["nodes"]] == [source.ID]
+    assert result["value"].to_list() == [10, 20]
+
+
+def test_graph_execute_uses_the_supplied_runtime_executor() -> None:
     source = source_node("source", (0, 1), (10, 20))
     transform = Node(NeedsInput, bindings={"value": source.value}, name="transform")
     executor = RecordingExecutor()
 
-    result = Graph(transform, executor=executor).execute()
+    graph = Graph(transform)
+    result = graph.execute(executor=executor)
 
     assert result["value"].to_list() == [10, 20]
+    assert not hasattr(graph, "executor")
+    assert executor.lowered_nodes == [source.ID, transform.ID]
     assert executor.aligned_nodes == [transform.ID]
     assert executor.materialized_nodes == [transform.ID]
 
 
-def test_execute_can_override_the_graph_default_executor() -> None:
+def test_each_execute_can_select_an_independent_runtime_executor() -> None:
     source = source_node("source", (0,), (10,))
-    configured = RecordingExecutor()
-    override = RecordingExecutor()
-    graph = Graph(source, executor=configured)
+    first = RecordingExecutor()
+    second = RecordingExecutor()
+    graph = Graph(source)
 
-    result = graph.execute(executor=override)
+    first_result = graph.execute(executor=first)
+    second_result = graph.execute(executor=second)
 
-    assert result["value"].to_list() == [10]
-    assert configured.materialized_nodes == []
-    assert override.materialized_nodes == [source.ID]
+    assert first_result.equals(second_result)
+    assert first.materialized_nodes == [source.ID]
+    assert second.materialized_nodes == [source.ID]
 
 
 def test_executor_is_abstract_and_graph_rejects_non_executors() -> None:
@@ -222,8 +268,8 @@ def test_executor_is_abstract_and_graph_rejects_non_executors() -> None:
     assert not hasattr(LocalExecutor(), "lower")
 
     source = source_node("source", (0,), (10,))
-    with pytest.raises(TypeError, match="must be an Executor"):
-        Graph(source, executor=object())  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="unexpected keyword argument 'executor'"):
+        Graph(source, executor=LocalExecutor())  # type: ignore[call-arg]
     with pytest.raises(TypeError, match="must be an Executor"):
         Graph(source).execute(executor=object())  # type: ignore[arg-type]
 
@@ -238,9 +284,9 @@ def test_graph_materialization_points_split_lazy_execution_regions() -> None:
     )
     root = Node(NeedsInput, bindings={"value": middle.value}, name="root")
     executor = RecordingExecutor()
-    graph = Graph(root, executor=executor)
+    graph = Graph(root)
 
-    result = graph.execute()
+    result = graph.execute(executor=executor)
 
     assert result["value"].to_list() == [10, 20]
     assert graph.materialized_node_ids == frozenset({middle.ID})
@@ -257,12 +303,12 @@ def test_explicit_root_materialization_is_not_performed_twice() -> None:
     )
     executor = RecordingExecutor()
 
-    Graph(root, executor=executor).execute()
+    Graph(root).execute(executor=executor)
 
     assert executor.materialized_nodes == [root.ID]
 
 
-def test_node_materialization_is_execution_policy_not_semantic_identity() -> None:
+def test_node_materialization_is_effective_semantic_identity() -> None:
     source = source_node("source", (0,), (10,))
     lazy_middle = Node(
         NeedsInput,
@@ -280,10 +326,39 @@ def test_node_materialization_is_execution_policy_not_semantic_identity() -> Non
     lazy_graph = Graph(lazy_root)
     material_graph = Graph(material_root)
 
-    assert lazy_middle.ID == material_middle.ID
-    assert lazy_graph.ID == material_graph.ID
+    assert lazy_middle.ID != material_middle.ID
+    assert lazy_root.ID != material_root.ID
+    assert lazy_graph.ID != material_graph.ID
     assert lazy_graph.materialized_node_ids == frozenset()
     assert material_graph.materialized_node_ids == frozenset({material_middle.ID})
+
+
+def test_mixed_materialization_declarations_execute_as_distinct_nodes() -> None:
+    lazy = Node(
+        SeriesSource,
+        parameters={"minutes": (0,), "values": (10,)},
+        materialize=False,
+    )
+    materialized = Node(
+        SeriesSource,
+        parameters={"minutes": (0,), "values": (10,)},
+        materialize=True,
+    )
+    root = Node(
+        CombineValues,
+        bindings={"left": lazy.value, "right": materialized.value},
+    )
+    executor = RecordingExecutor()
+    graph = Graph(root)
+
+    result = graph.execute(executor=executor)
+
+    assert lazy.ID != materialized.ID
+    assert graph.node_list == (lazy, materialized, root)
+    assert executor.lowered_nodes == [lazy.ID, materialized.ID, root.ID]
+    assert executor.materialized_nodes == [materialized.ID, root.ID]
+    assert result["left"].to_list() == [10]
+    assert result["right"].to_list() == [10]
 
 
 def test_tsfn_materialization_requirement_defaults_node_intent_and_is_verified() -> None:
@@ -486,7 +561,7 @@ def test_binding_validation_still_catches_missing_extra_unknown_and_wrong_typed_
             )
         )
 
-    with pytest.raises(TypeError, match="Type mismatch"):
+    with pytest.raises(ValueError, match="Type mismatch"):
         Graph(
             Node(
                 CombineValues,

@@ -29,12 +29,14 @@ jobs:
           python-version: "3.13"
       - name: Install development environment
         run: python -m pip install -e ".[dev]"
-      - name: Compile package
-        run: python -m compileall -q src/iosislib
+      - name: Compile package and examples
+        run: python -m compileall -q src/iosislib examples
       - name: Lint
-        run: python -m ruff check src
+        run: python -m ruff check src examples
       - name: Type check
         run: python -m mypy
+      - name: Run offline example
+        run: python examples/offline_graph.py
 
   tests:
     name: Tests (${{ matrix.os }}, Python ${{ matrix.python-version }})

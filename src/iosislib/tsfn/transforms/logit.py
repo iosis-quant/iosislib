@@ -22,7 +22,7 @@ class LogitConfig(TSFNConfig):
         validate_distinct_columns(self.timestamp_column, self.output_column)
 
 
-class Logit(ItemwiseUnaryTSFN):
+class Logit(ItemwiseUnaryTSFN[LogitConfig]):
     VERSION = "0.1.0"
     CONFIG_CLS = LogitConfig
 

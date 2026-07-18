@@ -5,7 +5,7 @@ import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import polars as pl
@@ -40,6 +40,7 @@ class ValidationIssue:
     tsfn_version: str
     input_name: str | None = None
     output_name: str | None = None
+    _node_position: int = field(default=-1, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,9 +55,9 @@ class ValidationIssue:
             "output_name": self.output_name,
         }
 
-    def _sort_key(self) -> tuple[str, ...]:
+    def _sort_key(self) -> tuple[Any, ...]:
         return (
-            self.node_id,
+            self._node_position,
             self.code,
             self.input_name or "",
             self.output_name or "",
@@ -72,7 +73,14 @@ class ValidationReport:
     issues: tuple[ValidationIssue, ...] = ()
 
     def __post_init__(self) -> None:
-        normalized = tuple(sorted(set(self.issues), key=ValidationIssue._sort_key))
+        unique: dict[ValidationIssue, ValidationIssue] = {}
+        for issue in self.issues:
+            current = unique.get(issue)
+            if current is None or issue._sort_key() < current._sort_key():
+                unique[issue] = issue
+        normalized = tuple(
+            sorted(unique.values(), key=ValidationIssue._sort_key)
+        )
         object.__setattr__(self, "issues", normalized)
 
     @property
@@ -86,7 +94,7 @@ class ValidationReport:
         }
 
 
-class GraphValidationError(ValueError, TypeError):
+class GraphValidationError(ValueError):
     """Raised when graph construction or verification finds invalid declarations."""
 
     def __init__(self, report: ValidationReport):
@@ -105,13 +113,11 @@ class Executor(abc.ABC):
     """Lower and execute a verified graph with time-aware input alignment."""
 
     def execute(self, graph: Graph) -> pl.DataFrame:
-        graph.verify()
         root_lf = self._evaluate_to_root(graph)
         return self.materialize(graph.root_node, root_lf)
 
     def _evaluate_to_root(self, graph: Graph) -> pl.LazyFrame:
         """Evaluate required boundaries and return the root lazy value."""
-        graph.verify()
         results: dict[str, pl.LazyFrame] = {}
 
         for node in graph.node_list:
@@ -155,7 +161,9 @@ class Executor(abc.ABC):
             tuple[Node, AsofTolerance],
             list[tuple[str, str]],
         ] = defaultdict(list)
-        for input_name, (parent_node, parent_column) in node.bindings.items():
+        for input_name, (parent_node, parent_column) in sorted(
+            node.bindings.items()
+        ):
             tolerance = node.tolerances.get(input_name)
             parent_to_bindings[(parent_node, tolerance)].append(
                 (parent_column, input_name)
@@ -224,43 +232,49 @@ class LocalExecutor(Executor):
 
 
 class Graph:
-    def __init__(
-        self,
-        root_node: Node,
-        *,
-        executor: Executor | None = None,
-    ):
+    __slots__ = (
+        "ID",
+        "_frozen",
+        "_validation_report",
+        "materialized_node_ids",
+        "node_list",
+        "root_node",
+    )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_frozen", False):
+            raise AttributeError("Graph instances are immutable")
+        object.__setattr__(self, name, value)
+
+    def __init__(self, root_node: Node):
         if not isinstance(root_node, Node):
             raise TypeError("Graph root_node must be a Node")
-        if executor is not None and not isinstance(executor, Executor):
-            raise TypeError("Graph executor must be an Executor")
 
-        self.root_node = root_node
-        self._declared_nodes = self.get_declared_nodes(self.root_node)
-        report = self.validate(self.root_node)
+        node_list, report = self._validated_declaration(root_node)
         if not report.is_valid:
             raise GraphValidationError(report)
 
-        self.node_list = self.get_subgraph_execution_order(self.root_node)
-        self.executor = LocalExecutor() if executor is None else executor
-        self.materialized_node_ids = frozenset(
-            node.ID for node in self._declared_nodes if node.materialize
+        object.__setattr__(self, "root_node", root_node)
+        object.__setattr__(self, "node_list", node_list)
+        object.__setattr__(self, "_validation_report", report)
+        object.__setattr__(
+            self,
+            "materialized_node_ids",
+            frozenset(node.ID for node in node_list if node.materialize),
         )
-
-        self.ID = self._generate_persistent_id()
+        object.__setattr__(self, "ID", self._generate_persistent_id())
+        object.__setattr__(self, "_frozen", True)
 
     def __repr__(self) -> str:
         return (
             f"Graph(id={self.ID[:8]!r}, root={self.root_node.ID[:8]!r}, "
-            f"nodes={len(self.node_list)}, "
-            f"executor={self.executor.__class__.__name__})"
+            f"nodes={len(self.node_list)})"
         )
 
     def verify(self) -> None:
-        """Verify graph structure and type contracts without executing."""
-        report = self.validate(self.root_node)
-        if not report.is_valid:
-            raise GraphValidationError(report)
+        """Consult the immutable validation result established at construction."""
+        if not self._validation_report.is_valid:
+            raise GraphValidationError(self._validation_report)
 
     @classmethod
     def validate(cls, root_node: Node) -> ValidationReport:
@@ -268,28 +282,30 @@ class Graph:
         if not isinstance(root_node, Node):
             raise TypeError("Graph root_node must be a Node")
 
-        declared_nodes = cls.get_declared_nodes(root_node)
-        ordered_nodes, cycle = cls._canonical_execution_order(root_node)
+        _, report = cls._validated_declaration(root_node)
+        return report
+
+    @classmethod
+    def _validated_declaration(
+        cls,
+        root_node: Node,
+    ) -> tuple[tuple[Node, ...], ValidationReport]:
+        ordered_nodes, cycle = cls._dependency_order(root_node)
         if cycle is not None:
             cycle_node = cycle[-1]
-            cycle_path = " -> ".join(
-                node.name or node.ID for node in cycle
+            cycle_path = " -> ".join(node.name or node.ID for node in cycle)
+            issue = cls._issue(
+                cycle_node,
+                code="CYCLE",
+                category="structure",
+                message=f"Cycle detected: {cycle_path}. Graphs must be acyclic.",
             )
-            return ValidationReport(
-                (
-                    cls._issue(
-                        cycle_node,
-                        code="CYCLE",
-                        category="structure",
-                        message=(
-                            f"Cycle detected: {cycle_path}. Graphs must be acyclic."
-                        ),
-                    ),
-                )
+            return ordered_nodes, ValidationReport(
+                (replace(issue, _node_position=0),)
             )
 
         issues: list[ValidationIssue] = []
-        for node in sorted(declared_nodes, key=cls._node_sort_key):
+        for node in ordered_nodes:
             if node.function.requires_materialization and not node.materialize:
                 issues.append(
                     cls._issue(
@@ -308,39 +324,22 @@ class Graph:
         for node in ordered_nodes:
             cls._collect_node_issues(node, node_ids, issues)
 
-        return ValidationReport(tuple(issues))
-
-    @staticmethod
-    def get_declared_nodes(target_node: Node) -> tuple[Node, ...]:
-        """Return every declaration, including semantically duplicate nodes."""
-        visited_objects: set[int] = set()
-        declared_nodes: list[Node] = []
-
-        def visit(node: Node) -> None:
-            object_id = id(node)
-            if object_id in visited_objects:
-                return
-            visited_objects.add(object_id)
-            for parent, _ in node.bindings.values():
-                visit(parent)
-            declared_nodes.append(node)
-
-        visit(target_node)
-        return tuple(declared_nodes)
-
-    @staticmethod
-    def _node_sort_key(node: Node) -> tuple[str, str, str]:
-        return (
-            node.ID,
-            node.name or "",
-            f"{node.function_cls.__module__}.{node.function_cls.__qualname__}",
+        positions = {node.ID: index for index, node in enumerate(ordered_nodes)}
+        positioned_issues = tuple(
+            replace(
+                issue,
+                _node_position=positions.get(issue.node_id, len(ordered_nodes)),
+            )
+            for issue in issues
         )
+        return ordered_nodes, ValidationReport(positioned_issues)
 
     @classmethod
-    def _canonical_execution_order(
+    def _dependency_order(
         cls,
         target_node: Node,
-    ) -> tuple[list[Node], tuple[Node, ...] | None]:
+    ) -> tuple[tuple[Node, ...], tuple[Node, ...] | None]:
+        """Return one canonical, ID-deduplicated dependency traversal."""
         visited: set[str] = set()
         visiting: dict[str, int] = {}
         stack: list[Node] = []
@@ -359,7 +358,7 @@ class Graph:
 
             visiting[node.ID] = len(stack)
             stack.append(node)
-            for parent_node in sorted(node.inputs, key=cls._node_sort_key):
+            for parent_node in cls._canonical_parents(node):
                 dfs(parent_node)
             stack.pop()
             visiting.pop(node.ID)
@@ -369,31 +368,28 @@ class Graph:
             ordered_nodes.append(node)
 
         dfs(target_node)
-        return ordered_nodes, cycle
+        return tuple(ordered_nodes), cycle
 
-    def get_subgraph_execution_order(self, target_node: Node) -> list[Node]:
-        visited: set[str] = set()
-        visiting: set[str] = set()
-        ordered_nodes: list[Node] = []
+    @staticmethod
+    def _canonical_parents(node: Node) -> tuple[Node, ...]:
+        """Order declared parents by consuming input, deduplicating by Node ID."""
+        declared_parent_ids = {parent.ID for parent in node.inputs}
+        parent_entries: dict[str, tuple[str, Node]] = {}
 
-        def dfs(node: Node) -> None:
-            if node.ID in visiting:
-                raise ValueError(
-                    f"Cycle detected at node '{node.name or node.ID}'! "
-                    "Graphs must be acyclic."
-                )
-            if node.ID in visited:
-                return
+        for input_name, (parent, _) in sorted(node.bindings.items()):
+            if parent.ID in declared_parent_ids:
+                parent_entries.setdefault(parent.ID, (input_name, parent))
 
-            visiting.add(node.ID)
-            for parent_node in node.inputs:
-                dfs(parent_node)
-            visiting.remove(node.ID)
-            visited.add(node.ID)
-            ordered_nodes.append(node)
+        for parent in node.inputs:
+            parent_entries.setdefault(parent.ID, ("\uffff", parent))
 
-        dfs(target_node)
-        return ordered_nodes
+        return tuple(
+            parent
+            for _, parent in sorted(
+                parent_entries.values(),
+                key=lambda entry: (entry[0], entry[1].ID),
+            )
+        )
 
     @classmethod
     def _collect_node_issues(
@@ -705,14 +701,10 @@ class Graph:
 
     def describe(self) -> dict[str, Any]:
         """Return deterministic JSON-compatible graph metadata without executing."""
-        self.verify()
-        ordered_nodes, cycle = self._canonical_execution_order(self.root_node)
-        assert cycle is None
-
         return {
             "id": self.ID,
             "root_id": self.root_node.ID,
-            "nodes": [self._describe_node(node) for node in ordered_nodes],
+            "nodes": [self._describe_node(node) for node in self.node_list],
         }
 
     def _describe_node(self, node: Node) -> dict[str, Any]:
@@ -754,7 +746,7 @@ class Graph:
             },
             "null_handlers": {
                 input_name: self._describe_null_handler(
-                    node.function.input_null_handler(input_name),
+                    node.null_handlers[input_name],
                     node.null_handler_versions.get(input_name),
                 )
                 for input_name in sorted(input_columns)
@@ -765,6 +757,7 @@ class Graph:
             },
             "materialization": {
                 "boundary": bool(reasons),
+                "effective": node.materialize,
                 "required_by_tsfn": node.function.requires_materialization,
                 "declared_by_node": declared_boundary,
                 "reasons": reasons,
@@ -791,13 +784,13 @@ class Graph:
     def _generate_persistent_id(self) -> str:
         graph_definition = {
             "root_id": self.root_node.ID,
-            "nodes": sorted(node.ID for node in self.node_list),
+            "nodes": tuple(node.ID for node in self.node_list),
         }
         serialized_data = json.dumps(graph_definition, sort_keys=True)
         return hashlib.sha256(serialized_data.encode("utf-8")).hexdigest()
 
     def execute(self, executor: Executor | None = None) -> pl.DataFrame:
-        selected_executor = self.executor if executor is None else executor
+        selected_executor = LocalExecutor() if executor is None else executor
         if not isinstance(selected_executor, Executor):
             raise TypeError("Graph executor must be an Executor")
         return selected_executor.execute(self)

@@ -6,6 +6,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+import iosislib.tsfn.adapters.local_sources as local_sources
 from iosislib.core.graph import Graph
 from iosislib.core.node import Node
 from iosislib.core.tsfn import ColumnSignature, FrameSignature, TimeAxis
@@ -75,7 +76,7 @@ def write_parquet(path: Path) -> None:
         (ParquetSource, write_parquet, ".parquet", [1.0, 2.0, 3.0]),
     ],
 )
-def test_local_sources_scan_lazily_and_project_declared_columns(
+def test_local_sources_return_lazy_projection_from_verified_snapshot(
     tmp_path: Path,
     source_cls: type[CSVSource] | type[ParquetSource],
     writer,
@@ -149,6 +150,28 @@ def test_local_source_configs_and_node_ids_are_deterministic(tmp_path: Path) -> 
     assert first_node.ID == second_node.ID
 
 
+def test_csv_source_preserves_separator_date_parsing_and_schema(tmp_path: Path) -> None:
+    path = tmp_path / "prices.csv"
+    path.write_text(
+        "timestamp;value;ignored\n"
+        "2026-01-01T00:00:00;0.25;discarded\n"
+        "2026-01-01T00:01:00;0.50;discarded\n",
+        encoding="utf-8",
+    )
+    node = Node(
+        CSVSource,
+        parameters={**source_parameters(path), "separator": ";"},
+    )
+
+    result = Graph(node).execute()
+
+    assert result.schema == pl.Schema(
+        {"timestamp": pl.Datetime("us"), "value": pl.Float64}
+    )
+    assert result["timestamp"].to_list() == TIMESTAMP[:2]
+    assert result["value"].to_list() == [0.25, 0.5]
+
+
 def test_local_source_config_validation_is_explicit(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="declare a time axis"):
         ParquetSourceConfig(tmp_path / "data.parquet", FrameSignature.empty(), "0" * 64)
@@ -188,25 +211,95 @@ def test_missing_local_file_retains_execution_context(
 
     with pytest.raises(
         RuntimeError,
-        match=rf"Execution failed at node 'local_prices' \({source_cls.__name__}@0\.1\.0\)",
+        match=rf"Execution failed at node 'local_prices' \({source_cls.__name__}@0\.2\.0\)",
     ):
         Graph(node).execute()
 
 
-def test_changed_file_fails_snapshot_verification_with_context(tmp_path: Path) -> None:
-    path = tmp_path / "prices.parquet"
-    write_parquet(path)
+@pytest.mark.parametrize(
+    ("source_cls", "writer", "suffix"),
+    [
+        (CSVSource, write_csv, ".csv"),
+        (ParquetSource, write_parquet, ".parquet"),
+    ],
+)
+def test_initial_digest_mismatch_fails_with_execution_context(
+    tmp_path: Path,
+    source_cls: type[CSVSource] | type[ParquetSource],
+    writer,
+    suffix: str,
+) -> None:
+    path = tmp_path / f"prices{suffix}"
+    writer(path)
     parameters = source_parameters(path)
-    write_parquet(path)
     with path.open("ab") as file:
         file.write(b"changed")
-    node = Node(ParquetSource, parameters=parameters, name="snapshot")
+    node = Node(source_cls, parameters=parameters, name="snapshot")
 
     with pytest.raises(
         RuntimeError,
-        match=r"Execution failed at node 'snapshot' \(ParquetSource@0\.1\.0\).*digest mismatch",
+        match=(
+            rf"Execution failed at node 'snapshot' "
+            rf"\({source_cls.__name__}@0\.2\.0\).*digest mismatch"
+        ),
     ):
         Graph(node).execute()
+
+
+@pytest.mark.parametrize(
+    ("source_cls", "writer", "suffix", "original", "replacement"),
+    [
+        (CSVSource, write_csv, ".csv", [0.25, 0.5, 0.75], [0.1, 0.2, 0.3]),
+        (ParquetSource, write_parquet, ".parquet", [1.0, 2.0, 3.0], [7.0, 8.0, 9.0]),
+    ],
+)
+def test_source_parses_verified_bytes_when_path_mutates_after_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_cls: type[CSVSource] | type[ParquetSource],
+    writer,
+    suffix: str,
+    original: list[float],
+    replacement: list[float],
+) -> None:
+    path = tmp_path / f"prices{suffix}"
+    writer(path)
+    node = Node(source_cls, parameters=source_parameters(path), name="snapshot")
+    read_verified_snapshot = local_sources._read_verified_snapshot
+
+    def read_then_replace(snapshot_path: str, expected_sha256: str) -> bytes:
+        snapshot = read_verified_snapshot(snapshot_path, expected_sha256)
+        replacement_frame = pl.DataFrame(
+            {
+                "timestamp": TIMESTAMP,
+                "value": replacement,
+                "ignored": [4, 5, 6],
+            },
+            schema={
+                "timestamp": pl.Datetime,
+                "value": pl.Float64,
+                "ignored": pl.Int64,
+            },
+        )
+        if suffix == ".csv":
+            replacement_frame.write_csv(path)
+        else:
+            replacement_frame.write_parquet(path)
+        return snapshot
+
+    monkeypatch.setattr(
+        local_sources,
+        "_read_verified_snapshot",
+        read_then_replace,
+    )
+
+    result = Graph(node).execute()
+
+    assert result["value"].to_list() == original
+    if suffix == ".csv":
+        assert pl.read_csv(path)["value"].to_list() == replacement
+    else:
+        assert pl.read_parquet(path)["value"].to_list() == replacement
 
 
 def test_parquet_schema_mismatch_is_clear_and_contextual(tmp_path: Path) -> None:
@@ -225,7 +318,7 @@ def test_parquet_schema_mismatch_is_clear_and_contextual(tmp_path: Path) -> None
         RuntimeError,
         match=(
             r"Execution failed at node 'wrong_value' "
-            r"\(ParquetSource@0\.1\.0\).*Column 'value' type mismatch"
+            r"\(ParquetSource@0\.2\.0\).*Column 'value' type mismatch"
         ),
     ):
         Graph(node).execute()
@@ -265,16 +358,40 @@ def test_parquet_timestamp_contract_mismatch_is_clear(
         Graph(node).execute()
 
 
-def test_csv_invalid_declared_value_fails_during_materialization(tmp_path: Path) -> None:
-    path = tmp_path / "invalid.csv"
-    path.write_text("timestamp,value\n2026-01-01T00:00:00,not-a-float\n", encoding="utf-8")
-    node = Node(CSVSource, parameters=source_parameters(path), name="invalid_csv")
+@pytest.mark.parametrize(
+    ("source_cls", "suffix", "content"),
+    [
+        (
+            CSVSource,
+            ".csv",
+            b"timestamp,value\n2026-01-01T00:00:00,not-a-float\n",
+        ),
+        (ParquetSource, ".parquet", b"not a parquet file"),
+    ],
+)
+def test_malformed_source_fails_with_execution_context(
+    tmp_path: Path,
+    source_cls: type[CSVSource] | type[ParquetSource],
+    suffix: str,
+    content: bytes,
+) -> None:
+    path = tmp_path / f"invalid{suffix}"
+    path.write_bytes(content)
+    node = Node(source_cls, parameters=source_parameters(path), name="malformed")
 
     with pytest.raises(
         RuntimeError,
-        match=r"materializing node 'invalid_csv' \(CSVSource@0\.1\.0\)",
+        match=(
+            rf"Execution failed at node 'malformed' "
+            rf"\({source_cls.__name__}@0\.2\.0\)"
+        ),
     ):
         Graph(node).execute()
+
+
+def test_source_versions_describe_verified_snapshot_behavior() -> None:
+    assert CSVSource.VERSION == "0.2.0"
+    assert ParquetSource.VERSION == "0.2.0"
 
 
 def test_offline_quickstart_graph(tmp_path: Path) -> None:

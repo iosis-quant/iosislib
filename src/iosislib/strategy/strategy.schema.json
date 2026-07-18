@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iosis.dev/schema/strategy/v1.json",
+  "title": "iosis strategy",
+  "description": "Portable declaration of a time-aware strategy graph.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "name", "nodes", "outputs"],
+  "properties": {
+    "format": {"const": "iosis.strategy/v1"},
+    "name": {"type": "string", "minLength": 1},
+    "description": {"type": "string"},
+    "metadata": {"$ref": "#/$defs/objectValue"},
+    "nodes": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/identifier"},
+      "additionalProperties": {"$ref": "#/$defs/node"}
+    },
+    "outputs": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/identifier"},
+      "additionalProperties": {"$ref": "#/$defs/reference"}
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "reference": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*\\.[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "value": {
+      "oneOf": [
+        {"type": ["null", "boolean", "number", "string"]},
+        {
+          "type": "array",
+          "items": {"$ref": "#/$defs/value"}
+        },
+        {"$ref": "#/$defs/objectValue"}
+      ]
+    },
+    "objectValue": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/value"}
+    },
+    "input": {
+      "oneOf": [
+        {"$ref": "#/$defs/reference"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["from"],
+          "properties": {
+            "from": {"$ref": "#/$defs/reference"},
+            "tolerance": {
+              "oneOf": [
+                {"type": "string", "minLength": 1},
+                {"type": "number", "minimum": 0}
+              ]
+            },
+            "nulls": {
+              "enum": ["error", "propagate", "drop", "fill", "pass"]
+            },
+            "fill": {"type": ["boolean", "number", "string"]}
+          },
+          "allOf": [
+            {
+              "if": {
+                "required": ["nulls"],
+                "properties": {"nulls": {"const": "fill"}}
+              },
+              "then": {"required": ["fill"]},
+              "else": {"not": {"required": ["fill"]}}
+            }
+          ]
+        }
+      ]
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op"],
+      "properties": {
+        "op": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]*/v[1-9][0-9]*$"
+        },
+        "inputs": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {"$ref": "#/$defs/input"}
+        },
+        "params": {"$ref": "#/$defs/objectValue"},
+        "materialize": {"type": "boolean"}
+      }
+    }
+  }
+}

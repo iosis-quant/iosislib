@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import polars as pl
@@ -26,7 +27,7 @@ class SpreadConfig(TSFNConfig):
         validate_distinct_columns(self.timestamp_column, self.output_column)
 
 
-class Spread(ItemwiseStructTSFN):
+class Spread(ItemwiseStructTSFN[SpreadConfig]):
     VERSION = "0.1.0"
     CONFIG_CLS = SpreadConfig
 
@@ -52,7 +53,7 @@ class Spread(ItemwiseStructTSFN):
     def batch_output_column(self) -> str:
         return self.parameters.output_column
 
-    def batch(self, fields: dict[str, pl.Series]) -> pl.Series:
+    def batch(self, fields: Mapping[str, pl.Series]) -> pl.Series:
         params = self.parameters
         return (fields[params.left_column] - fields[params.right_column]).rename(
             params.output_column

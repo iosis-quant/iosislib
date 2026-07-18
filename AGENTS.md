@@ -24,13 +24,13 @@ The old `src.classes` monolith and temporary `src.*` package namespace were deli
 
 ### Nodes Are Declarations
 
-A `Node` says which versioned TSFN runs, with what parameters, which predecessor outputs satisfy its named inputs, and which per-input policies apply. Nodes do not execute, inspect graph state, or own scheduling infrastructure. They are immutable after construction, hash and compare by persistent ID, and expose `node.output_name` only as binding sugar.
+A `Node` says which versioned TSFN runs, with what parameters, which predecessor outputs satisfy its named inputs, and which per-input policies apply. Nodes do not execute, inspect graph state, or own scheduling infrastructure. They are immutable after construction, hash and compare by persistent ID, and expose both typed `node.output("name")` bindings and `node.output_name` sugar.
 
 Do not introduce a `GraphEdge` wrapper. The existing binding `input_name -> (parent_node, parent_output)` already carries the graph relation. Do not infer semantic equality from Python object identity; node identity is content-addressed.
 
 ### Graphs Own Execution
 
-`Graph` discovers dependencies, rejects cycles, verifies exact bindings and frame compatibility, and delegates lowering/materialization to an `Executor`. Execution errors must retain node name/ID and TSFN version context. Keep execution methods out of `Node`, and do not make TSFNs aware of their consumers or the enclosing graph.
+`Graph` discovers dependencies, rejects cycles, verifies exact bindings and frame compatibility, and delegates lowering/materialization to an `Executor`. A successfully constructed Graph is an immutable validated declaration with one canonical topological tuple. Executors are runtime strategies passed to `graph.execute(executor=...)`; they are not stored Graph state or identity. Execution errors must retain node name/ID and TSFN version context. Keep execution methods out of `Node`, and do not make TSFNs aware of their consumers or the enclosing graph.
 
 There is no runtime `SourceNode` distinction and no external source-frame dictionary. A node without predecessors is valid only when its TSFN input is `FrameSignature.empty()`. The executor calls that TSFN with no frame, and its parameters generate or load the data. This is a type-contract distinction, not an `isinstance` branch over source subclasses.
 
@@ -65,7 +65,7 @@ Shape-polymorphic unary transforms should resolve their input/output shape from 
 Every concrete TSFN must:
 
 - Define a non-empty `VERSION`; changing behavior requires a version change.
-- Use a frozen `TSFNConfig` dataclass through `CONFIG_CLS` for parameters.
+- Use a frozen `TSFNConfig` dataclass through `CONFIG_CLS` for parameters. Prefer typed `Node(..., config=ExactConfig(...))`; mapping-based `parameters=` remains supported and must normalize identically.
 - Declare accurate input and output signatures.
 - Return a `pl.LazyFrame` from `apply()`.
 - Preserve the declared time contract and emit exactly the declared physical schema.
@@ -75,11 +75,11 @@ Intermediate abstract TSFN subclasses may omit a concrete version; validation ru
 
 Prefer native Polars expressions. `ItemwiseUnaryTSFN` is the preferred scalar/fixed-array elementwise path. `ItemwiseStructTSFN` uses a struct batch for n-ary operations. `BatchTSFN` uses `LazyFrame.map_batches` for full-frame operations and is a materialization boundary. Avoid `map_elements`, Python row loops, or arbitrary eager collection inside normal TSFNs.
 
-`TSFN.REQUIRES_MATERIALIZATION` is a class-level minimum imposed by the operation. `Node(materialize=True)` may request an additional persisted boundary for that declaration, but a node cannot disable a boundary required by its TSFN. The executor keeps values lazy between boundaries, collects required/intermediate boundaries, and always collects the root result.
+`TSFN.REQUIRES_MATERIALIZATION` is a class-level minimum imposed by the operation. `Node(materialize=True)` may request an additional persisted boundary for that declaration, but a node cannot disable a boundary required by its TSFN. Effective materialization is Node declaration state and participates in Node/Graph identity. The executor keeps values lazy between boundaries, collects required/intermediate boundaries, and always collects the root result.
 
 ## Null And External-Compute Semantics
 
-A Polars null means missing or invalid data, not zero, NaN, or an empty value. Preserve that distinction. Nodes can configure per-input `NullHandler` values using `NullPolicy.ERROR`, `PROPAGATE`, `DROP`, `FILL`, `PASS`, or a named custom function. Fill policies require explicit fill values. Custom handlers must preserve row count where required.
+A Polars null means missing or invalid data, not zero, NaN, or an empty value. Preserve that distinction. Nodes can configure per-input `NullHandler` values using `NullPolicy.ERROR`, `PROPAGATE`, `DROP`, `FILL`, `PASS`, or a named custom function. Every declared input resolves to an effective handler for runtime, description, and identity; omitted and explicit defaults are equivalent. Fill policies require explicit fill values, and fill values for non-`FILL` handlers are rejected. Custom handlers must preserve row count where required.
 
 Custom null-handler functions require an explicit behavior version through `NullHandler`, the Node mapping, or `function.__iosis_version__`; changing handler behavior requires changing that version. Models default to loud failure on null input or prediction output. Do not silently edit market/model data to make it look complete. Diagnose feed behavior, alignment, or plotting before changing values.
 
@@ -97,7 +97,7 @@ Do not add `available_at` or framework-wide bitemporality casually. The graph en
 
 ## Identity, Serialization, And Future Caching
 
-TSFN version, qualified class name, resolved signatures, normalized parameters, bindings, tolerances, null policies/fill values, and outputs contribute to node identity. Names are human labels only. Graph IDs derive from the root and node IDs.
+TSFN version, qualified class name, resolved signatures, normalized parameters, bindings, tolerances, effective null policies/relevant fill values, effective materialization, and outputs contribute to node identity. Names are human labels only. Graph IDs derive from the canonical topological tuple and root ID.
 
 Serialization must be deterministic: sort mapping keys/items, normalize unordered values, reject unsupported or non-finite values, and never use process-local identity. New value/config/helper classes that enter IDs need stable `to_dict()`/`__str__()` behavior. The `iosislib` namespace migration intentionally invalidated pre-migration qualified-name-based Node and Graph IDs; future module moves are identity migrations too.
 
@@ -109,10 +109,15 @@ Polymarket slug mode resolves Gamma event markets, preserves outcome order from 
 
 The yfinance adapter imports pandas/yfinance only when used and is covered by the `yfinance` package extra. Network tests should mock API boundaries; tracked tests must not depend on live services.
 
+Local CSV/Parquet sources consume one complete in-memory byte snapshot: they hash and parse the same bytes, then expose the parsed frame lazily downstream. Mutation after capture cannot change that execution. This intentionally uses memory for both the source bytes and parsed frame and creates no staging artifacts.
+
 ## Development Workflow
 
 - `python -m pip install -e ".[dev]"`: install package and development extras.
-- `python -m compileall -q src/iosislib`: syntax-check package modules.
+- `python -m compileall -q src/iosislib examples`: syntax-check package modules and tracked examples.
+- `python -m ruff check src examples`: lint production source and tracked examples.
+- `python -m mypy`: check the enforced strict public typing slice.
+- `python examples/offline_graph.py`: execute the offline compatibility example.
 - `python -m pytest`: run tracked tests under `tests/`.
 - `python -m build`: build wheel and source distributions under `dist/`.
 

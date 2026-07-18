@@ -27,7 +27,7 @@ class DeltaConfig(TSFNConfig):
             raise ValueError("periods must be at least 1")
 
 
-class Delta(TSFN):
+class Delta(TSFN[DeltaConfig]):
     VERSION = "0.1.0"
     CONFIG_CLS = DeltaConfig
 
@@ -43,7 +43,9 @@ class Delta(TSFN):
         )
         return input_frame, output_frame
 
-    def apply(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+    def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
+        if lf is None:
+            raise ValueError("Delta requires an input frame")
         params = self.parameters
         value = pl.col(params.input_column)
         delta = (

@@ -4,15 +4,17 @@ import abc
 import json
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from enum import Enum
-from typing import Any, ClassVar, Type
+from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, cast
 from collections.abc import Callable, Mapping
 import inspect
 from types import MappingProxyType
 
 import polars as pl
 import numpy as np
+import numpy.typing as npt
 import pyarrow as pa
 import torch
+from torch.utils.dlpack import from_dlpack as torch_from_dlpack
 
 from iosislib.core.utils import (
     _canonical_json,
@@ -22,6 +24,7 @@ from iosislib.core.utils import (
     _is_array_instance,
     _is_dtype_class,
     _is_list_instance,
+    _normalize_identity_value,
     _normalize_shape,
     _serialize_value,
     _series_null_count,
@@ -30,6 +33,9 @@ from iosislib.core.utils import (
 
 
 _MISSING_FILL_VALUE = object()
+
+
+PolarsDataType: TypeAlias = pl.DataType | type[pl.DataType]
 
 
 class NullPolicy(str, Enum):
@@ -52,11 +58,15 @@ class NullHandler:
         if has_policy == has_function:
             raise ValueError("NullHandler must wrap exactly one policy or function")
         if has_policy:
+            policy = self.policy
+            assert policy is not None
             if self.version is not None:
                 raise ValueError("Policy null handlers cannot declare a version")
-            object.__setattr__(self, "policy", _normalize_null_policy(self.policy))
+            object.__setattr__(self, "policy", _normalize_null_policy(policy))
         if has_function:
-            _validate_null_handler_function(self.function)
+            function = self.function
+            assert function is not None
+            _validate_null_handler_function(function)
             if self.version is not None and (
                 not isinstance(self.version, str) or not self.version.strip()
             ):
@@ -85,7 +95,7 @@ class NullHandler:
 @dataclass(frozen=True)
 class TimeAxis:
     column: str = "timestamp"
-    dtype: pl.DataType = pl.Datetime
+    dtype: PolarsDataType = pl.Datetime
     timezone: str | None = None
 
     def __post_init__(self) -> None:
@@ -93,14 +103,15 @@ class TimeAxis:
             raise TypeError("time column must be a string")
         if not self.column.strip():
             raise ValueError("time column must be non-empty")
-        if not (_is_dtype_class(self.dtype) or isinstance(self.dtype, pl.DataType)):
+        dtype = cast(pl.DataType, self.dtype)
+        if not (_is_dtype_class(dtype) or isinstance(dtype, pl.DataType)):
             raise TypeError("time axis dtype must be a Polars data type")
         if self.timezone is not None and not isinstance(self.timezone, str):
             raise TypeError("time axis timezone must be a string or None")
         if self.timezone is not None and not (
             self.dtype is pl.Datetime
             or (
-                not _is_dtype_class(self.dtype)
+                not _is_dtype_class(dtype)
                 and isinstance(self.dtype, pl.Datetime)
             )
         ):
@@ -110,7 +121,7 @@ class TimeAxis:
 @dataclass(frozen=True)
 class ColumnSignature:
     name: str
-    dtype: pl.DataType
+    dtype: PolarsDataType
     shape: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
@@ -123,11 +134,14 @@ class ColumnSignature:
         object.__setattr__(self, "shape", shape)
 
     @property
-    def physical_dtype(self) -> pl.DataType:
+    def physical_dtype(self) -> PolarsDataType:
         return _column_physical_dtype(self)
 
 
-ColumnEntry = tuple[str, pl.DataType] | tuple[str, pl.DataType, tuple[int, ...]]
+ColumnEntry = (
+    tuple[str, PolarsDataType]
+    | tuple[str, PolarsDataType, tuple[int, ...]]
+)
 
 
 @dataclass(frozen=True)
@@ -219,26 +233,27 @@ def _replace_column(
     )
 
 
-def _validate_column_dtype(dtype: pl.DataType, shape: tuple[int, ...]) -> None:
-    if not (_is_dtype_class(dtype) or isinstance(dtype, pl.DataType)):
+def _validate_column_dtype(dtype: PolarsDataType, shape: tuple[int, ...]) -> None:
+    dtype_value = cast(pl.DataType, dtype)
+    if not (_is_dtype_class(dtype_value) or isinstance(dtype_value, pl.DataType)):
         raise TypeError("column dtype must be a Polars data type")
     if shape and (
         dtype is pl.Array
         or dtype is pl.List
-        or _is_array_instance(dtype)
-        or _is_list_instance(dtype)
+        or _is_array_instance(dtype_value)
+        or _is_list_instance(dtype_value)
     ):
         raise TypeError("shaped columns must declare an element dtype, not Array/List")
 
 
-def _column_physical_dtype(column: ColumnEntry | ColumnSignature) -> pl.DataType:
+def _column_physical_dtype(column: ColumnEntry | ColumnSignature) -> PolarsDataType:
     column = _column_signature(column)
     if not column.shape:
         return column.dtype
     return pl.Array(column.dtype, _flat_size(column.shape))
 
 
-def _time_axis_physical_dtype(time_axis: TimeAxis) -> pl.DataType:
+def _time_axis_physical_dtype(time_axis: TimeAxis) -> PolarsDataType:
     dtype = time_axis.dtype
     if time_axis.timezone is None:
         return dtype
@@ -252,7 +267,7 @@ def _time_axis_physical_dtype(time_axis: TimeAxis) -> pl.DataType:
     raise TypeError("A timezone can only be declared for a Datetime time axis")
 
 
-def _frame_physical_schema(signature: FrameSignature) -> dict[str, pl.DataType]:
+def _frame_physical_schema(signature: FrameSignature) -> dict[str, PolarsDataType]:
     if signature.time is None:
         raise ValueError("A physical frame schema requires a time axis")
     return {
@@ -275,14 +290,17 @@ def _column_signature_matches(
     actual: ColumnSignature,
     expected: ColumnSignature,
 ) -> bool:
-    return actual.shape == expected.shape and _dtype_matches(actual.dtype, expected.dtype)
+    return actual.shape == expected.shape and _dtype_matches(
+        cast(pl.DataType, actual.dtype),
+        cast(pl.DataType, expected.dtype),
+    )
 
 
-def _is_array_dtype(dtype: pl.DataType) -> bool:
-    return _is_array_instance(dtype)
+def _is_array_dtype(dtype: PolarsDataType) -> bool:
+    return _is_array_instance(cast(pl.DataType, dtype))
 
 
-def _column_null_expr(column_name: str, dtype: pl.DataType) -> pl.Expr:
+def _column_null_expr(column_name: str, dtype: PolarsDataType) -> pl.Expr:
     column = pl.col(column_name)
     if _is_array_dtype(dtype):
         inner_nulls = column.arr.eval(pl.element().is_null()).arr.any().fill_null(False)
@@ -292,12 +310,13 @@ def _column_null_expr(column_name: str, dtype: pl.DataType) -> pl.Expr:
 
 def _fill_column_null_expr(
     column_name: str,
-    dtype: pl.DataType,
+    dtype: PolarsDataType,
     fill_value: Any,
 ) -> pl.Expr:
     column = pl.col(column_name)
     if _is_array_dtype(dtype):
-        fill_array = [fill_value] * dtype.size
+        array_dtype = cast(pl.Array, dtype)
+        fill_array = [fill_value] * array_dtype.size
         return (
             pl.when(column.is_null())
             .then(pl.lit(fill_array, dtype=dtype))
@@ -379,8 +398,11 @@ class TSFNConfig(abc.ABC):
         return _canonical_json(self.to_dict())
 
 
-class TSFN(abc.ABC):
-    CONFIG_CLS: ClassVar[Type[TSFNConfig]] = TSFNConfig
+ConfigT = TypeVar("ConfigT", bound=TSFNConfig)
+
+
+class TSFN(abc.ABC, Generic[ConfigT]):
+    CONFIG_CLS: ClassVar[type[TSFNConfig]] = TSFNConfig
     VERSION: ClassVar[str]
     REQUIRES_MATERIALIZATION: ClassVar[bool] = False
     DEFAULT_NULL_POLICY: ClassVar[NullPolicy] = NullPolicy.PROPAGATE
@@ -393,7 +415,7 @@ class TSFN(abc.ABC):
     def _freeze_definition(self) -> None:
         object.__setattr__(self, "_node_definition_frozen", True)
 
-    def __init_subclass__(cls, **kwargs) -> None:
+    def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         if not inspect.isabstract(cls):
             cls._validate_config_cls()
@@ -446,16 +468,16 @@ class TSFN(abc.ABC):
 
     def __init__(
         self,
-        parameters: dict[str, Any],
-    ):
+        parameters: Mapping[str, object] | ConfigT,
+    ) -> None:
         self._validate_config_cls()
         self.version = self._validate_version()
         self._validate_materialization_requirement()
         self._validate_default_null_policy()
         self.parameters = self._bind_and_validate_config(parameters)
         self.signature = self._validate_type_signature(self.type_signature())
-        self._input_null_handlers = MappingProxyType({})
-        self._input_null_fill_values = MappingProxyType({})
+        self._input_null_handlers: Mapping[str, NullHandler] = MappingProxyType({})
+        self._input_null_fill_values: Mapping[str, Any] = MappingProxyType({})
 
     def _validate_type_signature(self, signature: Any) -> tuple[
         FrameSignature,
@@ -480,8 +502,29 @@ class TSFN(abc.ABC):
                 )
         return signature
 
-    def _bind_and_validate_config(self, params: dict[str, Any]) -> TSFNConfig:
-        config_fields = fields(self.CONFIG_CLS)
+    def _bind_and_validate_config(
+        self,
+        params: Mapping[str, object] | ConfigT,
+    ) -> ConfigT:
+        config_cls = self._validate_config_cls()
+        if isinstance(params, TSFNConfig):
+            if type(params) is not config_cls:
+                raise TypeError(
+                    f"{self.__class__.__name__} requires config "
+                    f"{config_cls.__name__}, got {type(params).__name__}"
+                )
+            return cast(ConfigT, _normalize_identity_value(params))
+        if not isinstance(params, Mapping):
+            raise TypeError(
+                f"{self.__class__.__name__} parameters must be a mapping or "
+                f"{config_cls.__name__}"
+            )
+
+        normalized_params = cast(
+            Mapping[str, object],
+            _normalize_identity_value(params),
+        )
+        config_fields = fields(config_cls)
         allowed_fields = {f.name for f in config_fields}
 
         # 1. Check for unexpected parameters (prevents silent typos)
@@ -505,7 +548,10 @@ class TSFN(abc.ABC):
                 f"Expected schema: {self.CONFIG_CLS.__annotations__}"
             )
 
-        return self.CONFIG_CLS(**params)
+        return cast(
+            ConfigT,
+            config_cls(**cast(dict[str, Any], dict(normalized_params))),
+        )
 
     @abc.abstractmethod
     def type_signature(self) -> tuple[
@@ -557,7 +603,7 @@ class TSFN(abc.ABC):
         actual_time_type = current_schema[time_axis.column]
         if not _dtype_matches(
             _datetime_dtype_without_timezone(actual_time_type),
-            _datetime_dtype_without_timezone(time_axis.dtype),
+            _datetime_dtype_without_timezone(cast(pl.DataType, time_axis.dtype)),
         ):
             raise TypeError(
                 f"Time column '{time_axis.column}' type mismatch. "
@@ -579,7 +625,7 @@ class TSFN(abc.ABC):
             
             actual_type = current_schema[column.name]
             expected_type = column.physical_dtype
-            if not _dtype_matches(actual_type, expected_type):
+            if not _dtype_matches(actual_type, cast(pl.DataType, expected_type)):
                 raise TypeError(
                     f"Column '{column.name}' type mismatch. "
                     f"Expected {expected_type} ({_format_column_signature(column)}), "
@@ -661,7 +707,7 @@ class TSFN(abc.ABC):
         shape: tuple[int, ...] | None = None,
         *,
         allow_copy: bool = False,
-    ):
+    ) -> npt.NDArray[Any]:
         series = self._prepare_series_for_bridge(series)
         array = series.to_numpy(allow_copy=allow_copy)
         if shape:
@@ -676,9 +722,9 @@ class TSFN(abc.ABC):
     def numpy_to_series(
         self,
         name: str,
-        array,
+        array: npt.NDArray[Any],
         *,
-        dtype: pl.DataType = pl.Float64,
+        dtype: PolarsDataType = pl.Float64,
         shape: tuple[int, ...] | None = None,
         allow_copy: bool = False,
     ) -> pl.Series:
@@ -712,7 +758,7 @@ class TSFN(abc.ABC):
             if not allow_copy:
                 _validate_numpy_arrow_alias(name, flat, arrow_values)
             arrow_array = pa.FixedSizeListArray.from_arrays(arrow_values, width)
-            series = pl.from_arrow(arrow_array).alias(name)
+            series = cast(pl.Series, pl.from_arrow(arrow_array)).alias(name)
             expected_dtype = pl.Array(dtype, width)
             if series.dtype != expected_dtype:
                 if not allow_copy:
@@ -735,7 +781,7 @@ class TSFN(abc.ABC):
         arrow_array = pa.array(array)
         if not allow_copy:
             _validate_numpy_arrow_alias(name, array, arrow_array)
-        series = pl.from_arrow(arrow_array).alias(name)
+        series = cast(pl.Series, pl.from_arrow(arrow_array)).alias(name)
         if series.dtype != dtype:
             if not allow_copy:
                 raise TypeError(
@@ -753,7 +799,7 @@ class TSFN(abc.ABC):
         shape: tuple[int, ...] | None = None,
         *,
         allow_copy: bool = False,
-    ):
+    ) -> torch.Tensor:
         """Expose a Series buffer to Torch; the returned tensor is borrowed input."""
         series = self._prepare_series_for_bridge(series)
 
@@ -772,7 +818,7 @@ class TSFN(abc.ABC):
             else arrow_array
         )
         try:
-            tensor = torch.from_dlpack(arrow_values)
+            tensor = torch_from_dlpack(arrow_values)
         except (BufferError, RuntimeError, TypeError):
             if not allow_copy:
                 raise ValueError(
@@ -796,9 +842,9 @@ class TSFN(abc.ABC):
     def torch_to_series(
         self,
         name: str,
-        tensor,
+        tensor: torch.Tensor,
         *,
-        dtype: pl.DataType = pl.Float64,
+        dtype: PolarsDataType = pl.Float64,
         shape: tuple[int, ...] | None = None,
         allow_copy: bool = False,
     ) -> pl.Series:
@@ -843,7 +889,7 @@ class TSFN(abc.ABC):
         shape: tuple[int, ...] | None = None,
         *,
         allow_copy: bool = False,
-    ):
+    ) -> torch.Tensor:
         return self.series_to_torch(
             series,
             shape,
@@ -853,9 +899,9 @@ class TSFN(abc.ABC):
     def pytorch_to_series(
         self,
         name: str,
-        tensor,
+        tensor: torch.Tensor,
         *,
-        dtype: pl.DataType = pl.Float64,
+        dtype: PolarsDataType = pl.Float64,
         shape: tuple[int, ...] | None = None,
         allow_copy: bool = False,
     ) -> pl.Series:
@@ -943,7 +989,9 @@ class TSFN(abc.ABC):
                     f"{null_count} null value(s) encountered"
                 )
 
-            handled = handler.function(series)
+            function = handler.function
+            assert function is not None
+            handled = function(series)
             if not isinstance(handled, pl.Series):
                 raise TypeError(
                     f"Custom null handler for column '{column.name}' must return a "
@@ -966,7 +1014,7 @@ class TSFN(abc.ABC):
         pass
 
 
-class ItemwiseUnaryTSFN(TSFN, abc.ABC):
+class ItemwiseUnaryTSFN(TSFN[ConfigT], abc.ABC):
     """Base for one-input transforms that operate independently per value."""
 
     @abc.abstractmethod
@@ -1048,7 +1096,7 @@ class ItemwiseUnaryTSFN(TSFN, abc.ABC):
         )
 
 
-class BatchTSFN(TSFN, abc.ABC):
+class BatchTSFN(TSFN[ConfigT], abc.ABC):
     """Base for non-streaming, full-frame batch UDF transformations.
 
     Polars lends the callback a DataFrame backed by its existing buffers. Batch
@@ -1097,7 +1145,7 @@ class BatchTSFN(TSFN, abc.ABC):
         )
 
 
-class ItemwiseStructTSFN(TSFN, abc.ABC):
+class ItemwiseStructTSFN(TSFN[ConfigT], abc.ABC):
     """Base for n-ary itemwise transforms lowered through a struct batch."""
 
     @abc.abstractmethod
@@ -1160,7 +1208,9 @@ class ItemwiseStructTSFN(TSFN, abc.ABC):
         if output_name not in output_columns:
             raise ValueError(f"Itemwise output column '{output_name}' is not declared")
 
-        resolved_input_columns: tuple[ColumnEntry, ...] = input_signature.columns
+        resolved_input_columns = tuple(
+            _column_entry(column) for column in _column_signatures(input_signature)
+        )
         input_shapes = []
         for input_name in self.batch_input_columns():
             if input_name not in input_columns:
@@ -1221,6 +1271,7 @@ __all__ = [
     "ItemwiseUnaryTSFN",
     "NullHandler",
     "NullPolicy",
+    "PolarsDataType",
     "TSFN",
     "TSFNConfig",
     "TimeAxis",

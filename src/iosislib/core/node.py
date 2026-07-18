@@ -3,7 +3,7 @@
 import hashlib
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Generic, TypeVar, cast
 
 import polars as pl
 
@@ -12,6 +12,7 @@ from iosislib.core.tsfn import (
     NullHandler,
     NullPolicy,
     TSFN,
+    TSFNConfig,
     _column_signature_map,
     _column_signatures,
     _normalize_null_handler,
@@ -90,14 +91,17 @@ def _declared_null_handler_version(
     return version
 
 
-def _normalize_function_state(function: TSFN) -> None:
+ConfigT = TypeVar("ConfigT", bound=TSFNConfig)
+
+
+def _normalize_function_state(function: TSFN[Any]) -> None:
     for name, value in tuple(vars(function).items()):
         object.__setattr__(function, name, _normalize_identity_value(value))
 
 
 def _format_function_identity(
-    function_cls: type[TSFN],
-    function: TSFN,
+    function_cls: type[TSFN[Any]],
+    function: TSFN[Any],
 ) -> dict[str, Any]:
     input_signature, output_signature = function.signature
     core_state = {
@@ -124,7 +128,7 @@ def _format_function_identity(
     }
 
 
-class Node:
+class Node(Generic[ConfigT]):
     def __setattr__(self, name: str, value: Any) -> None:
         if object.__getattribute__(self, "__dict__").get("_frozen", False):
             raise AttributeError("Node instances are immutable")
@@ -132,27 +136,38 @@ class Node:
 
     def __init__(
         self,
-        function_cls: type[TSFN],
-        bindings: dict[str, tuple[Node, str]] | None = None,
-        parameters: dict[str, Any] | None = None,
+        function_cls: type[TSFN[ConfigT]],
+        bindings: Mapping[str, tuple[Node[Any], str]] | None = None,
+        parameters: Mapping[str, object] | None = None,
         name: str | None = None,
         materialize: bool | None = None,
-        tolerances: dict[str, AsofTolerance] | None = None,
-        null_handlers: dict[
+        tolerances: Mapping[str, AsofTolerance] | None = None,
+        null_handlers: Mapping[
             str,
             NullHandler | NullPolicy | str | Callable[[pl.Series], pl.Series],
         ]
         | None = None,
-        null_policies: dict[str, NullPolicy | str] | None = None,
-        null_fill_values: dict[str, Any] | None = None,
-        null_handler_versions: dict[str, str] | None = None,
-    ):
+        null_policies: Mapping[str, NullPolicy | str] | None = None,
+        null_fill_values: Mapping[str, object] | None = None,
+        null_handler_versions: Mapping[str, str] | None = None,
+        *,
+        config: ConfigT | None = None,
+    ) -> None:
+        if parameters is not None and config is not None:
+            raise ValueError("Node parameters and config are mutually exclusive")
         if materialize is not None and not isinstance(materialize, bool):
             raise TypeError("Node materialize must be a boolean or None")
         self.name = name
         self.function_cls = function_cls
-        normalized_parameters = _normalize_identity_value(parameters or {})
-        self.function = function_cls(normalized_parameters)
+        function_input: Mapping[str, object] | ConfigT
+        if config is not None:
+            function_input = cast(ConfigT, _normalize_identity_value(config))
+        else:
+            function_input = cast(
+                Mapping[str, object],
+                _normalize_identity_value(parameters or {}),
+            )
+        self.function = function_cls(function_input)
         _normalize_function_state(self.function)
         self.parameters = self.function.parameters
         self.materialize = (
@@ -161,8 +176,21 @@ class Node:
             else materialize
         )
 
-        self.bindings = MappingProxyType(dict(bindings or {}))
-        self.tolerances = MappingProxyType(dict(tolerances or {}))
+        self.bindings = MappingProxyType(dict(sorted((bindings or {}).items())))
+        self.tolerances = MappingProxyType(dict(sorted((tolerances or {}).items())))
+
+        bound_input_columns: dict[str, ColumnSignature] = {}
+        for input_name, (parent, parent_column) in self.bindings.items():
+            parent_outputs = _column_signature_map(parent.function.signature[1])
+            if parent_column in parent_outputs:
+                bound_input_columns[input_name] = parent_outputs[parent_column]
+        self.function.signature = _normalize_identity_value(
+            self.function.resolve_signature(bound_input_columns)
+        )
+        declared_inputs = tuple(
+            sorted(_column_signature_map(self.function.signature[0]))
+        )
+
         configured_handlers = dict(null_handlers or {})
         policy_handlers = dict(null_policies or {})
         duplicated_handlers = set(configured_handlers) & set(policy_handlers)
@@ -172,14 +200,43 @@ class Node:
                 f"{sorted(duplicated_handlers)}"
             )
         configured_handlers.update(policy_handlers)
-        self.null_handlers = MappingProxyType(
+        normalized_handlers = {
+            input_name: _normalize_null_handler(handler)
+            for input_name, handler in configured_handlers.items()
+        }
+        default_handler = NullHandler.from_policy(
+            self.function.DEFAULT_NULL_POLICY
+        )
+        effective_handlers = {
+            input_name: normalized_handlers.get(input_name, default_handler)
+            for input_name in declared_inputs
+        }
+        effective_handlers.update(
             {
-                input_name: _normalize_null_handler(handler)
-                for input_name, handler in configured_handlers.items()
+                input_name: handler
+                for input_name, handler in normalized_handlers.items()
+                if input_name not in effective_handlers
             }
         )
+        self.null_handlers = MappingProxyType(
+            dict(sorted(effective_handlers.items()))
+        )
         self.null_policies = self.null_handlers
-        normalized_fill_values = _normalize_identity_value(null_fill_values or {})
+        configured_fill_values = dict(null_fill_values or {})
+        irrelevant_fill_values = sorted(
+            input_name
+            for input_name in configured_fill_values
+            if input_name in declared_inputs
+            and self.null_handlers[input_name].policy is not NullPolicy.FILL
+        )
+        if irrelevant_fill_values:
+            raise ValueError(
+                "Null fill values are only valid for inputs whose effective "
+                f"handler is NullPolicy.FILL: {irrelevant_fill_values}"
+            )
+        normalized_fill_values = _normalize_identity_value(
+            dict(sorted(configured_fill_values.items()))
+        )
         self.null_fill_values = normalized_fill_values
         configured_versions = dict(null_handler_versions or {})
         unexpected_versions = set(configured_versions) - set(self.null_handlers)
@@ -189,7 +246,7 @@ class Node:
                 f"{sorted(unexpected_versions)}"
             )
         self.null_handler_versions = MappingProxyType(
-            {
+            dict(sorted({
                 input_name: version
                 for input_name, handler in self.null_handlers.items()
                 if (
@@ -200,7 +257,7 @@ class Node:
                     )
                 )
                 is not None
-            }
+            }.items()))
         )
         policy_versions = set(configured_versions) - set(self.null_handler_versions)
         if policy_versions:
@@ -215,16 +272,10 @@ class Node:
             )
 
         self.inputs = tuple(
-            dict.fromkeys(parent for parent, _ in self.bindings.values())
-        )
-
-        bound_input_columns: dict[str, ColumnSignature] = {}
-        for input_name, (parent, parent_column) in self.bindings.items():
-            parent_outputs = _column_signature_map(parent.function.signature[1])
-            if parent_column in parent_outputs:
-                bound_input_columns[input_name] = parent_outputs[parent_column]
-        self.function.signature = _normalize_identity_value(
-            self.function.resolve_signature(bound_input_columns)
+            dict.fromkeys(
+                parent
+                for _, (parent, _) in sorted(self.bindings.items())
+            )
         )
         self.function._configure_input_nulls(
             self.null_handlers,
@@ -243,7 +294,18 @@ class Node:
         self.ID = self._generate_persistent_id()
         self._frozen = True
 
-    def __getattr__(self, name: str) -> tuple[Node, str]:
+    def output(self, name: str) -> tuple[Node[ConfigT], str]:
+        """Return an explicit typed binding for one declared output column."""
+        if not isinstance(name, str):
+            raise TypeError("Node output name must be a string")
+        if name not in self.outputs:
+            raise ValueError(
+                f"Configured TSFN '{self.function_cls.__name__}' does not expose "
+                f"output '{name}'. Available outputs: {sorted(self.outputs)}"
+            )
+        return (self, name)
+
+    def __getattr__(self, name: str) -> tuple[Node[ConfigT], str]:
         """Provide syntactic sugar for output references such as ``node.value``."""
         attrs = object.__getattribute__(self, "__dict__")
         outputs = attrs.get("outputs")
@@ -300,6 +362,7 @@ class Node:
         node_definition = {
             "bindings": serialized_bindings,
             "function": _format_function_identity(self.function_cls, self.function),
+            "materialize": self.materialize,
             "null_fill_values": self.null_fill_values,
             "null_handlers": _format_null_handlers(
                 self.null_handlers,
@@ -308,7 +371,7 @@ class Node:
             "parameters": self.parameters,
             "outputs": tuple(sorted(self.outputs.items())),
         }
-        return _normalize_identity_value(node_definition)
+        return cast(Mapping[str, Any], _normalize_identity_value(node_definition))
 
 
 __all__ = ["Node"]

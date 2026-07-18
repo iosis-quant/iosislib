@@ -148,6 +148,36 @@ def test_validation_aggregates_independent_issues_deterministically() -> None:
         first.issues = ()  # type: ignore[misc]
 
 
+def test_validation_orders_issues_by_canonical_graph_position_then_fields() -> None:
+    invalid_parent = Node(Passthrough, name="invalid_parent")
+    valid_parent = int_source(1, "valid_parent")
+    binding_items = [
+        ("left", invalid_parent.value),
+        ("extra", valid_parent.value),
+    ]
+    first_root = Node(Pair, bindings=dict(binding_items), name="invalid_root")
+    second_root = Node(
+        Pair,
+        bindings=dict(reversed(binding_items)),
+        name="invalid_root",
+    )
+
+    first = Graph.validate(first_root)
+    second = Graph.validate(second_root)
+
+    assert first == second
+    assert [issue.node_name for issue in first.issues] == [
+        "invalid_parent",
+        "invalid_root",
+        "invalid_root",
+    ]
+    assert [issue.code for issue in first.issues] == [
+        "NON_EMPTY_INPUT_WITHOUT_BINDINGS",
+        "MISSING_BINDING",
+        "UNEXPECTED_BINDING",
+    ]
+
+
 def test_invalid_construction_raises_one_error_with_the_complete_report() -> None:
     root = invalid_root(reverse_bindings=False)
     report = Graph.validate(root)
@@ -156,9 +186,64 @@ def test_invalid_construction_raises_one_error_with_the_complete_report() -> Non
         Graph(root)
 
     assert exc_info.value.report == report
+    assert isinstance(exc_info.value, ValueError)
+    assert not isinstance(exc_info.value, TypeError)
     assert "Graph validation failed with 4 issue(s)" in str(exc_info.value)
     assert "Type mismatch" in str(exc_info.value)
     assert "does not expose output 'missing'" in str(exc_info.value)
+
+
+def test_graph_construction_is_the_only_meaningful_validation_pass() -> None:
+    class CountingGraph(Graph):
+        __slots__ = ()
+        validation_passes = 0
+
+        @classmethod
+        def _validated_declaration(
+            cls,
+            root_node: Node,
+        ) -> tuple[tuple[Node, ...], ValidationReport]:
+            cls.validation_passes += 1
+            return super()._validated_declaration(root_node)
+
+    graph = CountingGraph(int_source(1, "source"))
+
+    assert CountingGraph.validation_passes == 1
+    assert graph.verify() is None
+    graph.describe()
+    with pytest.raises(RuntimeError, match="inspection must not execute sources"):
+        graph.execute()
+    assert CountingGraph.validation_passes == 1
+
+
+def test_graph_declaration_state_is_deeply_immutable() -> None:
+    graph = inspectable_graph(reverse_bindings=False)
+    original_id = graph.ID
+    original_nodes = graph.node_list
+    original_materialized = graph.materialized_node_ids
+
+    assert isinstance(graph.node_list, tuple)
+    assert isinstance(graph.materialized_node_ids, frozenset)
+    assert not hasattr(graph, "__dict__")
+
+    with pytest.raises(AttributeError, match="immutable"):
+        graph.root_node = original_nodes[0]
+    with pytest.raises(AttributeError, match="immutable"):
+        graph.node_list = tuple(reversed(original_nodes))
+    with pytest.raises(AttributeError, match="immutable"):
+        graph.materialized_node_ids = frozenset()
+    with pytest.raises(AttributeError, match="immutable"):
+        graph.ID = "changed"
+    with pytest.raises(AttributeError, match="immutable"):
+        graph._validation_report = ValidationReport()
+    with pytest.raises(AttributeError):
+        graph.node_list.clear()  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
+        graph.materialized_node_ids.add("changed")  # type: ignore[attr-defined]
+
+    assert graph.ID == original_id
+    assert graph.node_list == original_nodes
+    assert graph.materialized_node_ids == original_materialized
 
 
 def test_cycles_are_reported_clearly_without_unsafe_downstream_checks() -> None:
@@ -188,6 +273,7 @@ def test_describe_is_canonical_json_data_and_never_executes_tsfns() -> None:
     serialized = json.dumps(first, sort_keys=True, allow_nan=False)
 
     assert first == second
+    assert first_graph.node_list == second_graph.node_list
     assert APPLY_CALLS == 0
     assert "0x" not in serialized
     assert first["id"] == first_graph.ID
@@ -220,7 +306,9 @@ def test_describe_is_canonical_json_data_and_never_executes_tsfns() -> None:
     }
     assert root["null_fill_values"] == {"left": 0}
     assert root["materialization"]["reasons"] == ["root_result"]
+    assert root["materialization"]["effective"] is False
     assert by_name["middle"]["materialization"]["reasons"] == [
         "node_requested"
     ]
+    assert by_name["middle"]["materialization"]["effective"] is True
     assert by_name["left_source"]["materialization"]["boundary"] is False
