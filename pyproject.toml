@@ -82,7 +82,8 @@ extend-exclude = ["temp"]
 select = ["E4", "E7", "E9", "F"]
 
 [tool.mypy]
-python_version = "3.11"
+# CI runs mypy on 3.13; Ruff and the test matrix enforce Python 3.11 compatibility.
+python_version = "3.13"
 explicit_package_bases = true
 follow_imports = "normal"
 mypy_path = ["src"]
