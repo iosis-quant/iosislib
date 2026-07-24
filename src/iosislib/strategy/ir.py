@@ -10,14 +10,21 @@ from types import MappingProxyType
 from typing import Any, Never, TypeAlias, cast
 
 
-STRATEGY_FORMAT = "iosis.strategy/v1"
+STRATEGY_FORMAT = "iosis.strategy"
+STRATEGY_VERSION = "0.1.0"
 
 Scalar: TypeAlias = str | int | float | bool | None
 Value: TypeAlias = Scalar | tuple["Value", ...] | Mapping[str, "Value"]
 Tolerance: TypeAlias = str | int | float | None
 
 _IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
-_OPERATION = re.compile(r"^[a-z][a-z0-9_.-]*/v[1-9][0-9]*$")
+_OPERATION = re.compile(r"^[a-z][a-z0-9_.-]*$")
+_SEMVER = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+)
 _NULL_POLICIES = frozenset({"error", "propagate", "drop", "fill", "pass"})
 
 
@@ -64,6 +71,12 @@ def _identifier(value: object, path: str) -> str:
             "expected an identifier beginning with a letter and containing only "
             "letters, digits, '_' or '-'",
         )
+    return value
+
+
+def _semver(value: object, path: str) -> str:
+    if not isinstance(value, str) or not _SEMVER.fullmatch(value):
+        _fail(path, "expected a semantic version such as '0.1.0'")
     return value
 
 
@@ -207,6 +220,7 @@ class Input:
 @dataclass(frozen=True, slots=True)
 class Node:
     op: str
+    version: str
     inputs: Mapping[str, Input] = field(default_factory=dict)
     params: Mapping[str, Value] = field(default_factory=dict)
     materialize: bool | None = None
@@ -214,9 +228,10 @@ class Node:
     def __post_init__(self) -> None:
         if not isinstance(self.op, str) or not _OPERATION.fullmatch(self.op):
             raise ValueError(
-                "Node.op must be a lowercase, versioned operation such as "
-                "'transform.logit/v1'"
+                "Node.op must be a lowercase operation name such as "
+                "'transform.logit'"
             )
+        _semver(self.version, "node.version")
         inputs = _mapping(self.inputs, "node.inputs")
         normalized_inputs: dict[str, Input] = {}
         for name, input_value in sorted(inputs.items()):
@@ -239,12 +254,13 @@ class Node:
         _check_keys(
             data,
             path,
-            allowed={"op", "inputs", "params", "materialize"},
-            required={"op"},
+            allowed={"op", "version", "inputs", "params", "materialize"},
+            required={"op", "version"},
         )
         op = data["op"]
         if not isinstance(op, str):
             _fail(f"{path}.op", "expected a string")
+        version = _semver(data["version"], f"{path}.version")
         raw_inputs = _mapping(data.get("inputs", {}), f"{path}.inputs")
         inputs = {
             _identifier(name, f"{path}.inputs.{name}"): Input.from_data(
@@ -260,6 +276,7 @@ class Node:
         try:
             return cls(
                 op=op,
+                version=version,
                 inputs=inputs,
                 params=cast(Mapping[str, Value], params),
                 materialize=materialize,
@@ -268,7 +285,7 @@ class Node:
             _fail(path, str(exc))
 
     def to_data(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"op": self.op}
+        result: dict[str, Any] = {"op": self.op, "version": self.version}
         if self.inputs:
             result["inputs"] = {
                 name: input_value.to_data()
@@ -289,11 +306,17 @@ class Strategy:
     description: str | None = None
     metadata: Mapping[str, Value] = field(default_factory=dict)
     format: str = STRATEGY_FORMAT
+    version: str = STRATEGY_VERSION
 
     def __post_init__(self) -> None:
         if self.format != STRATEGY_FORMAT:
             raise ValueError(
                 f"Strategy.format must be {STRATEGY_FORMAT!r}, got {self.format!r}"
+            )
+        _semver(self.version, "strategy.version")
+        if self.version != STRATEGY_VERSION:
+            raise ValueError(
+                f"Strategy.version must be {STRATEGY_VERSION!r}, got {self.version!r}"
             )
         if not isinstance(self.name, str) or not self.name.strip():
             raise ValueError("Strategy.name must be a non-empty string")
@@ -334,13 +357,27 @@ class Strategy:
         _check_keys(
             data,
             "$",
-            allowed={"format", "name", "description", "metadata", "nodes", "outputs"},
-            required={"format", "name", "nodes", "outputs"},
+            allowed={
+                "format",
+                "version",
+                "name",
+                "description",
+                "metadata",
+                "nodes",
+                "outputs",
+            },
+            required={"format", "version", "name", "nodes", "outputs"},
         )
         if data["format"] != STRATEGY_FORMAT:
             _fail(
                 "$.format",
                 f"expected {STRATEGY_FORMAT!r}, got {data['format']!r}",
+            )
+        version = _semver(data["version"], "$.version")
+        if version != STRATEGY_VERSION:
+            _fail(
+                "$.version",
+                f"expected supported version {STRATEGY_VERSION!r}, got {version!r}",
             )
         name = data["name"]
         if not isinstance(name, str) or not name.strip():
@@ -371,6 +408,7 @@ class Strategy:
                 outputs=outputs,
                 description=description,
                 metadata=cast(Mapping[str, Value], metadata),
+                version=version,
             )
         except (TypeError, ValueError) as exc:
             if isinstance(exc, StrategyValidationError):
@@ -450,6 +488,7 @@ class Strategy:
     def to_data(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "format": self.format,
+            "version": self.version,
             "name": self.name,
         }
         if self.description is not None:
@@ -484,6 +523,7 @@ __all__ = [
     "Node",
     "Reference",
     "STRATEGY_FORMAT",
+    "STRATEGY_VERSION",
     "Strategy",
     "StrategyValidationError",
     "Value",

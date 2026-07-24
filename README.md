@@ -74,12 +74,13 @@ distributions in a clean environment outside the checkout.
 
 ## Portable strategy declarations
 
-`iosislib.strategy` provides the backend-independent `iosis.strategy/v1` YAML
+`iosislib.strategy` provides the backend-independent `iosis.strategy` YAML
 representation for storing strategies and passing them between APIs and
-frontends. It uses versioned symbolic operations and readable `node.output`
+frontends. Document and operation versions are explicit SemVer fields. It uses
+stable symbolic operation names and readable `node.output`
 references rather than Python class paths or backend graph IDs. The parser,
 deterministic serializer, fingerprint, and packaged JSON Schema are documented in
-[the strategy format specification](docs/strategy-format-v1.md). A backend
+[the strategy format specification](docs/strategy-format.md). A backend
 operation registry/compiler is intentionally a later layer.
 
 See [TODO.md](TODO.md) for the ordered roadmap and [AGENTS.md](AGENTS.md) for

@@ -1,10 +1,12 @@
-format: iosis.strategy/v1
+format: iosis.strategy
+version: 0.1.0
 name: probability-change
 description: Convert a probability to log odds, then calculate its change.
 
 nodes:
   prices:
-    op: source.csv/v1
+    op: source.csv
+    version: 0.2.0
     params:
       path: prices.csv
       content_sha256: replace-with-the-source-content-sha256
@@ -14,14 +16,16 @@ nodes:
           probability: float64
 
   log_odds:
-    op: transform.logit/v1
+    op: transform.logit
+    version: 0.1.0
     inputs:
       probability: prices.probability
     params:
       output: log_odds
 
   change:
-    op: transform.delta/v1
+    op: transform.delta
+    version: 0.1.0
     inputs:
       value:
         from: log_odds.log_odds

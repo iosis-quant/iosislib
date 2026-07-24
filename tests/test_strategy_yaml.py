@@ -6,6 +6,7 @@ import pytest
 
 from iosislib.strategy import (
     STRATEGY_FORMAT,
+    STRATEGY_VERSION,
     Input,
     Node,
     Reference,
@@ -19,19 +20,23 @@ from iosislib.strategy import (
 
 
 MINIMAL = """\
-format: iosis.strategy/v1
+format: iosis.strategy
+version: 0.1.0
 name: probability-change
 nodes:
   prices:
-    op: source.market/v1
+    op: source.market
+    version: 0.1.0
     params:
       market: election
   log_odds:
-    op: transform.logit/v1
+    op: transform.logit
+    version: 0.1.0
     inputs:
       probability: prices.probability
   change:
-    op: transform.delta/v1
+    op: transform.delta
+    version: 0.1.0
     inputs:
       value:
         from: log_odds.log_odds
@@ -49,6 +54,8 @@ def test_parse_readable_strategy_and_round_trip_deterministically() -> None:
     strategy = loads(MINIMAL)
 
     assert strategy.format == STRATEGY_FORMAT
+    assert strategy.version == STRATEGY_VERSION
+    assert strategy.nodes["prices"].version == "0.1.0"
     assert strategy.topological_order == ("prices", "log_odds", "change")
     assert strategy.nodes["prices"].params["market"] == "election"
     assert strategy.nodes["log_odds"].inputs["probability"] == Input(
@@ -69,7 +76,7 @@ def test_strategy_values_are_immutable_and_fingerprint_is_order_independent() ->
     first = Strategy(
         name="stable",
         nodes={
-            "source": Node("source.market/v1", params={"b": 2, "a": [1]}),
+            "source": Node("source.market", "0.1.0", params={"b": 2, "a": [1]}),
         },
         outputs={"result": Reference("source", "value")},
         metadata={"z": True, "a": "first"},
@@ -77,7 +84,7 @@ def test_strategy_values_are_immutable_and_fingerprint_is_order_independent() ->
     second = Strategy(
         name="stable",
         nodes={
-            "source": Node("source.market/v1", params={"a": [1], "b": 2}),
+            "source": Node("source.market", "0.1.0", params={"a": [1], "b": 2}),
         },
         outputs={"result": Reference("source", "value")},
         metadata={"a": "first", "z": True},
@@ -87,7 +94,7 @@ def test_strategy_values_are_immutable_and_fingerprint_is_order_independent() ->
     assert isinstance(first.nodes, MappingProxyType)
     assert first.nodes["source"].params["a"] == (1,)
     with pytest.raises(TypeError):
-        first.nodes["new"] = Node("source.other/v1")  # type: ignore[index]
+        first.nodes["new"] = Node("source.other", "0.1.0")  # type: ignore[index]
 
 
 def test_yaml_uses_unambiguous_boolean_and_string_rules() -> None:
@@ -161,20 +168,23 @@ def test_validation_errors_point_to_the_bad_declaration(
 
 def test_cycles_and_unused_nodes_are_rejected() -> None:
     cycle = """\
-format: iosis.strategy/v1
+format: iosis.strategy
+version: 0.1.0
 name: cycle
 nodes:
   one:
-    op: transform.one/v1
+    op: transform.one
+    version: 0.1.0
     inputs: {value: two.value}
   two:
-    op: transform.two/v1
+    op: transform.two
+    version: 0.1.0
     inputs: {value: one.value}
 outputs: {result: one.value}
 """
     unused = MINIMAL.replace(
         "outputs:\n",
-        "  abandoned:\n    op: source.other/v1\noutputs:\n",
+        "  abandoned:\n    op: source.other\n    version: 0.1.0\noutputs:\n",
     )
 
     with pytest.raises(StrategyValidationError, match="cycle detected"):
@@ -183,9 +193,44 @@ outputs: {result: one.value}
         loads(unused)
 
 
-def test_packaged_json_schema_describes_v1() -> None:
+def test_packaged_json_schema_describes_current_semver_format() -> None:
     document = schema()
 
     assert document["$schema"].endswith("2020-12/schema")
     assert document["properties"]["format"]["const"] == STRATEGY_FORMAT
-    assert set(document["required"]) == {"format", "name", "nodes", "outputs"}
+    assert document["properties"]["version"]["const"] == STRATEGY_VERSION
+    assert set(document["required"]) == {
+        "format",
+        "version",
+        "name",
+        "nodes",
+        "outputs",
+    }
+    assert set(document["$defs"]["node"]["required"]) == {"op", "version"}
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "path"),
+    [
+        ("version: 0.1.0", "version: v1", "$.version"),
+        (
+            "    version: 0.1.0\n    params:",
+            "    version: v1\n    params:",
+            "$.nodes.prices.version",
+        ),
+        (
+            "    op: source.market\n",
+            "    op: source.market/v1\n",
+            "$.nodes.prices",
+        ),
+    ],
+)
+def test_legacy_or_invalid_versions_are_rejected(
+    old: str,
+    new: str,
+    path: str,
+) -> None:
+    with pytest.raises(StrategyValidationError) as error:
+        loads(MINIMAL.replace(old, new, 1))
+
+    assert error.value.path == path

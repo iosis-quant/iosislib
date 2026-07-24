@@ -1,13 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://iosis.dev/schema/strategy/v1.json",
+  "$id": "https://iosis.dev/schema/strategy/0.1.0.json",
   "title": "iosis strategy",
   "description": "Portable declaration of a time-aware strategy graph.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["format", "name", "nodes", "outputs"],
+  "required": ["format", "version", "name", "nodes", "outputs"],
   "properties": {
-    "format": {"const": "iosis.strategy/v1"},
+    "format": {"const": "iosis.strategy"},
+    "version": {"const": "0.1.0"},
     "name": {"type": "string", "minLength": 1},
     "description": {"type": "string"},
     "metadata": {"$ref": "#/$defs/objectValue"},
@@ -28,6 +29,10 @@
     "identifier": {
       "type": "string",
       "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"
     },
     "reference": {
       "type": "string",
@@ -83,12 +88,13 @@
     "node": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["op"],
+      "required": ["op", "version"],
       "properties": {
         "op": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9_.-]*/v[1-9][0-9]*$"
+          "pattern": "^[a-z][a-z0-9_.-]*$"
         },
+        "version": {"$ref": "#/$defs/semver"},
         "inputs": {
           "type": "object",
           "propertyNames": {"$ref": "#/$defs/identifier"},
