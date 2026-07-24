@@ -37,9 +37,44 @@ the same Node identity. Use `node.output("column")` for an explicit typed bindin
 
 Graphs are immutable after successful validation. Execution strategies are
 runtime choices, supplied with `graph.execute(executor=...)`; they are not part of
-the graph declaration or ID. Local CSV and Parquet sources read, hash, and parse
-the same in-memory byte snapshot. This gives an exact content guarantee at the
-cost of holding the full source bytes and parsed frame at that boundary.
+the graph declaration or ID. CSV and Parquet sources read, hash, and parse the
+same in-memory byte snapshot. This gives an exact content guarantee at the cost
+of holding the full source bytes and parsed frame at that boundary.
+
+## Parquet data sources
+
+`ParquetSource` accepts a local file, a local directory, an S3 object, or an S3
+bucket/prefix. Directories and prefixes are searched recursively for `.parquet`
+files. This source is deliberately non-streaming: it downloads every selected
+object, verifies one deterministic dataset digest, parses the snapshot, and then
+returns a projected `LazyFrame` with the declared time-series schema.
+
+```python
+import polars as pl
+
+from iosislib.core.node import Node
+from iosislib.core.tsfn import FrameSignature
+from iosislib.tsfn.adapters import ParquetSource, sha256_parquet_source
+
+location = "s3://my-bucket/prices/"  # A local pathlib.Path works too.
+signature = FrameSignature(columns=(("price", pl.Float64),))
+source = Node(
+    ParquetSource,
+    parameters={
+        "path": location,
+        "output_signature": signature,
+        "content_sha256": sha256_parquet_source(location),
+    },
+)
+```
+
+S3 access uses PyArrow's standard AWS credential chain; credentials are not graph
+parameters and therefore are not serialized into node identity. Computing the
+digest reads the dataset once, and graph execution reads it again and rejects the
+result if the bytes or selected object manifest changed between those operations.
+The digest identifies the physical snapshot, not only its logical rows, so changing
+a multi-file dataset's partitioning intentionally changes its content address. A
+single-file directory or prefix retains the bare file's SHA-256 for compatibility.
 
 ## Development
 

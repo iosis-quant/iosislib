@@ -4,6 +4,7 @@
     ParquetSource,
     ParquetSourceConfig,
     sha256_file,
+    sha256_parquet_source,
 )
 from iosislib.tsfn.adapters.polymarket import (
     PolymarketPriceHistory,
@@ -24,4 +25,5 @@ __all__ = [
     "YFinanceOHLCV",
     "YFinanceOHLCVConfig",
     "sha256_file",
+    "sha256_parquet_source",
 ]

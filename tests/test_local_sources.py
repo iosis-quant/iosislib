@@ -1,5 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import io
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from iosislib.tsfn.adapters import (
     ParquetSource,
     ParquetSourceConfig,
     sha256_file,
+    sha256_parquet_source,
 )
 from iosislib.tsfn.transforms import Delta, Logit
 
@@ -211,7 +214,7 @@ def test_missing_local_file_retains_execution_context(
 
     with pytest.raises(
         RuntimeError,
-        match=rf"Execution failed at node 'local_prices' \({source_cls.__name__}@0\.2\.0\)",
+        match=rf"Execution failed at node 'local_prices' \({source_cls.__name__}@{re.escape(source_cls.VERSION)}\)",
     ):
         Graph(node).execute()
 
@@ -240,7 +243,7 @@ def test_initial_digest_mismatch_fails_with_execution_context(
         RuntimeError,
         match=(
             rf"Execution failed at node 'snapshot' "
-            rf"\({source_cls.__name__}@0\.2\.0\).*digest mismatch"
+            rf"\({source_cls.__name__}@{re.escape(source_cls.VERSION)}\).*digest mismatch"
         ),
     ):
         Graph(node).execute()
@@ -265,10 +268,8 @@ def test_source_parses_verified_bytes_when_path_mutates_after_snapshot(
     path = tmp_path / f"prices{suffix}"
     writer(path)
     node = Node(source_cls, parameters=source_parameters(path), name="snapshot")
-    read_verified_snapshot = local_sources._read_verified_snapshot
 
-    def read_then_replace(snapshot_path: str, expected_sha256: str) -> bytes:
-        snapshot = read_verified_snapshot(snapshot_path, expected_sha256)
+    def replace_source_file() -> None:
         replacement_frame = pl.DataFrame(
             {
                 "timestamp": TIMESTAMP,
@@ -285,13 +286,36 @@ def test_source_parses_verified_bytes_when_path_mutates_after_snapshot(
             replacement_frame.write_csv(path)
         else:
             replacement_frame.write_parquet(path)
-        return snapshot
 
-    monkeypatch.setattr(
-        local_sources,
-        "_read_verified_snapshot",
-        read_then_replace,
-    )
+    if source_cls is CSVSource:
+        read_verified_snapshot = local_sources._read_verified_snapshot
+
+        def read_then_replace(snapshot_path: str, expected_sha256: str) -> bytes:
+            snapshot = read_verified_snapshot(snapshot_path, expected_sha256)
+            replace_source_file()
+            return snapshot
+
+        monkeypatch.setattr(
+            local_sources,
+            "_read_verified_snapshot",
+            read_then_replace,
+        )
+    else:
+        read_verified_parquet = local_sources._read_verified_parquet_snapshot
+
+        def read_parquet_then_replace(
+            snapshot_path: str,
+            expected_sha256: str,
+        ) -> local_sources.ParquetSnapshot:
+            snapshot = read_verified_parquet(snapshot_path, expected_sha256)
+            replace_source_file()
+            return snapshot
+
+        monkeypatch.setattr(
+            local_sources,
+            "_read_verified_parquet_snapshot",
+            read_parquet_then_replace,
+        )
 
     result = Graph(node).execute()
 
@@ -318,7 +342,7 @@ def test_parquet_schema_mismatch_is_clear_and_contextual(tmp_path: Path) -> None
         RuntimeError,
         match=(
             r"Execution failed at node 'wrong_value' "
-            r"\(ParquetSource@0\.2\.0\).*Column 'value' type mismatch"
+            r"\(ParquetSource@0\.3\.0\).*Column 'value' type mismatch"
         ),
     ):
         Graph(node).execute()
@@ -383,15 +407,171 @@ def test_malformed_source_fails_with_execution_context(
         RuntimeError,
         match=(
             rf"Execution failed at node 'malformed' "
-            rf"\({source_cls.__name__}@0\.2\.0\)"
+            rf"\({source_cls.__name__}@{re.escape(source_cls.VERSION)}\)"
         ),
     ):
         Graph(node).execute()
 
 
+def _parquet_bytes(timestamp: list[datetime], values: list[float]) -> bytes:
+    buffer = io.BytesIO()
+    pl.DataFrame(
+        {"timestamp": timestamp, "value": values},
+        schema={"timestamp": pl.Datetime, "value": pl.Float64},
+    ).write_parquet(buffer)
+    return buffer.getvalue()
+
+
+def test_parquet_source_loads_local_directory_snapshot(tmp_path: Path) -> None:
+    directory = tmp_path / "prices"
+    (directory / "nested").mkdir(parents=True)
+    first = directory / "nested" / "part-000.parquet"
+    second = directory / "part-001.parquet"
+    first.write_bytes(_parquet_bytes(TIMESTAMP[:1], [1.0]))
+    second.write_bytes(_parquet_bytes(TIMESTAMP[1:2], [2.0]))
+    (directory / "README.txt").write_text("ignored", encoding="utf-8")
+
+    node = Node(
+        ParquetSource,
+        parameters={
+            "path": directory,
+            "output_signature": FLOAT_SIGNATURE,
+            "content_sha256": sha256_parquet_source(directory),
+        },
+    )
+
+    result = Graph(node).execute()
+
+    assert result["timestamp"].to_list() == TIMESTAMP[:2]
+    assert result["value"].to_list() == [1.0, 2.0]
+    assert sha256_parquet_source(first) == sha256_file(first)
+
+    single_directory = tmp_path / "single"
+    single_directory.mkdir()
+    only_part = single_directory / "part.parquet"
+    only_part.write_bytes(_parquet_bytes(TIMESTAMP[:1], [3.0]))
+    assert sha256_parquet_source(single_directory) == sha256_file(only_part)
+
+
+def test_parquet_source_loads_s3_prefix_without_network_in_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pyarrow.fs import FileInfo, FileType
+
+    objects = {
+        "market-data/prices/part-001.parquet": _parquet_bytes(TIMESTAMP[1:2], [2.0]),
+        "market-data/prices/nested/part-000.parquet": _parquet_bytes(
+            TIMESTAMP[:1], [1.0]
+        ),
+        "market-data/prices/notes.txt": b"ignored",
+    }
+
+    class FakeS3FileSystem:
+        def __init__(self) -> None:
+            self.opened: list[str] = []
+            self.lookups = 0
+
+        def get_file_info(self, target):
+            self.lookups += 1
+            if isinstance(target, str):
+                return FileInfo(target, FileType.Directory)
+            return [FileInfo(path, FileType.File) for path in reversed(tuple(objects))]
+
+        def open_input_file(self, path: str) -> io.BytesIO:
+            self.opened.append(path)
+            return io.BytesIO(objects[path])
+
+    filesystem = FakeS3FileSystem()
+    monkeypatch.setattr(
+        local_sources,
+        "_open_parquet_filesystem",
+        lambda location: (filesystem, "market-data/prices"),
+    )
+    location = "s3://market-data/prices/"
+    unexecuted = Node(
+        ParquetSource,
+        parameters={
+            "path": location,
+            "output_signature": FLOAT_SIGNATURE,
+            "content_sha256": "0" * 64,
+        },
+    )
+
+    assert unexecuted.parameters.path == "s3://market-data/prices"
+    assert filesystem.lookups == 0
+
+    digest = sha256_parquet_source(location)
+    node = Node(
+        ParquetSource,
+        parameters={
+            "path": location,
+            "output_signature": FLOAT_SIGNATURE,
+            "content_sha256": digest,
+        },
+    )
+    result = Graph(node).execute()
+
+    assert result["timestamp"].to_list() == TIMESTAMP[:2]
+    assert result["value"].to_list() == [1.0, 2.0]
+    assert (
+        filesystem.opened
+        == [
+            "market-data/prices/nested/part-000.parquet",
+            "market-data/prices/part-001.parquet",
+        ]
+        * 2
+    )
+
+
+def test_parquet_source_loads_explicit_s3_object_without_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pyarrow.fs import FileInfo, FileType
+
+    content = _parquet_bytes(TIMESTAMP[:1], [4.0])
+
+    class FakeS3FileSystem:
+        def __init__(self) -> None:
+            self.opened: list[str] = []
+
+        def get_file_info(self, target: str) -> FileInfo:
+            return FileInfo(target, FileType.File)
+
+        def open_input_file(self, path: str) -> io.BytesIO:
+            self.opened.append(path)
+            return io.BytesIO(content)
+
+    filesystem = FakeS3FileSystem()
+    monkeypatch.setattr(
+        local_sources,
+        "_open_parquet_filesystem",
+        lambda location: (filesystem, "market-data/snapshot"),
+    )
+    location = "s3://market-data/snapshot"
+    node = Node(
+        ParquetSource,
+        parameters={
+            "path": location,
+            "output_signature": FLOAT_SIGNATURE,
+            "content_sha256": sha256_parquet_source(location),
+        },
+    )
+
+    result = Graph(node).execute()
+
+    assert result["value"].to_list() == [4.0]
+    assert filesystem.opened == ["market-data/snapshot"] * 2
+
+
+@pytest.mark.parametrize("location", ["s3:///prices", "https://bucket/prices"])
+def test_parquet_source_rejects_invalid_remote_location(location: str) -> None:
+    with pytest.raises(ValueError):
+        ParquetSourceConfig(location, FLOAT_SIGNATURE, "0" * 64)
+
+
 def test_source_versions_describe_verified_snapshot_behavior() -> None:
     assert CSVSource.VERSION == "0.2.0"
-    assert ParquetSource.VERSION == "0.2.0"
+    assert ParquetSource.VERSION == "0.3.0"
 
 
 def test_offline_quickstart_graph(tmp_path: Path) -> None:
