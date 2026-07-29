@@ -1,8 +1,10 @@
-﻿"""Versioned TSFN implementations, transforms, and adapters."""
+"""Versioned TSFN implementations, transforms, and adapters."""
 
 from iosislib.tsfn.transforms import (
     Delta,
     DeltaConfig,
+    Lag,
+    LagConfig,
     Logit,
     LogitConfig,
     Ratio,
@@ -14,6 +16,8 @@ from iosislib.tsfn.transforms import (
 __all__ = [
     "Delta",
     "DeltaConfig",
+    "Lag",
+    "LagConfig",
     "Logit",
     "LogitConfig",
     "Ratio",

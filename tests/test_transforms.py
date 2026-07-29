@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,7 +10,7 @@ import pytest
 from iosislib.core.graph import Graph
 from iosislib.core.node import Node
 from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig
-from iosislib.tsfn.transforms import Delta, DeltaConfig, Logit, Ratio, Spread
+from iosislib.tsfn.transforms import Delta, DeltaConfig, Lag, LagConfig, Logit, Ratio, Spread
 
 
 @dataclass(frozen=True)
@@ -125,6 +125,15 @@ def test_delta_uses_lag_after_sorting_and_never_looks_forward() -> None:
     assert result["delta"].to_list() == pytest.approx([None, 2.0, None, None])
 
 
+def test_lag_uses_earlier_observations_after_sorting() -> None:
+    source = float_source((7.0, 1.0, 5.0), minutes=(3, 0, 2))
+    lag = Node(Lag, bindings={"value": source.value}, parameters={"periods": 2})
+
+    result = Graph(lag).execute()
+
+    assert result["timestamp"].to_list() == [dt(0), dt(2), dt(3)]
+    assert result["lag"].to_list() == [None, None, 1.0]
+
 def test_transform_configs_support_custom_column_names() -> None:
     source = float_source((0.25, 0.75), output_column="probability")
     logit = Node(
@@ -151,3 +160,8 @@ def test_delta_config_validation_is_explicit() -> None:
 
     with pytest.raises(ValueError, match="periods must be at least 1"):
         DeltaConfig(periods=0)
+    with pytest.raises(TypeError, match="periods must be an integer"):
+        LagConfig(periods=True)
+
+    with pytest.raises(ValueError, match="periods must be at least 1"):
+        LagConfig(periods=0)
