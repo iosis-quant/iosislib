@@ -99,8 +99,8 @@ class VectorMean(BatchTSFN):
         )
 
     def batch(self, frame: pl.DataFrame) -> pl.DataFrame:
-        tensor = self.series_to_torch(frame["value"], shape=(2,))
-        mean = self.torch_to_series(
+        tensor = series_to_torch(frame["value"], shape=(2,))
+        mean = torch_to_series(
             "mean",
             tensor.mean(dim=1),
             dtype=pl.Float64,
@@ -125,9 +125,9 @@ class VectorStats(BatchTSFN):
 
     def batch(self, frame: pl.DataFrame) -> pl.DataFrame:
         assert frame.columns == ["timestamp", "value"]
-        tensor = self.series_to_torch(frame["value"], shape=(2,))
-        mean = self.torch_to_series("mean", tensor.mean(dim=1))
-        difference = self.torch_to_series(
+        tensor = series_to_torch(frame["value"], shape=(2,))
+        mean = torch_to_series("mean", tensor.mean(dim=1))
+        difference = torch_to_series(
             "difference",
             tensor[:, 1] - tensor[:, 0],
         )
@@ -574,10 +574,9 @@ def test_fill_null_policy_requires_a_fill_value() -> None:
 
 
 def test_numpy_to_series_prefers_pyarrow_for_shaped_outputs() -> None:
-    fn = VectorMean({})
     array = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
 
-    series = fn.numpy_to_series(
+    series = numpy_to_series(
         "value",
         array,
         dtype=pl.Float64,
@@ -591,14 +590,13 @@ def test_numpy_to_series_prefers_pyarrow_for_shaped_outputs() -> None:
 
 
 def test_series_to_torch_uses_the_arrow_buffer_through_dlpack() -> None:
-    fn = VectorMean({})
     series = pl.Series(
         "value",
         [[1.0, 2.0], [3.0, 4.0]],
         dtype=pl.Array(pl.Float64, 2),
     )
 
-    tensor = fn.series_to_torch(series, shape=(2,))
+    tensor = series_to_torch(series, shape=(2,))
     arrow_address = series.to_arrow().values.buffers()[1].address
 
     assert tensor.shape == (2, 2)
@@ -606,20 +604,18 @@ def test_series_to_torch_uses_the_arrow_buffer_through_dlpack() -> None:
 
 
 def test_scalar_series_to_torch_uses_the_arrow_buffer_through_dlpack() -> None:
-    fn = VectorMean({})
     series = pl.Series("value", [1.0, 2.0], dtype=pl.Float64)
 
-    tensor = fn.series_to_torch(series)
+    tensor = series_to_torch(series)
 
     assert tensor.data_ptr() == series.to_arrow().buffers()[1].address
     assert tensor.tolist() == [1.0, 2.0]
 
 
 def test_torch_to_series_preserves_the_tensor_buffer() -> None:
-    fn = VectorMean({})
     tensor = torch.tensor([1.0, 2.0], dtype=torch.float64)
 
-    series = fn.torch_to_series("value", tensor)
+    series = torch_to_series("value", tensor)
     tensor[0] = 9.0
 
     assert series.to_arrow().buffers()[1].address == tensor.data_ptr()
@@ -627,18 +623,17 @@ def test_torch_to_series_preserves_the_tensor_buffer() -> None:
 
 
 def test_zero_copy_bridges_reject_inputs_that_require_materialization() -> None:
-    fn = VectorMean({})
 
     with pytest.raises(TypeError, match="expected a NumPy ndarray"):
-        fn.numpy_to_series("value", [1.0, 2.0])
+        numpy_to_series("value", [1.0, 2.0])
 
     non_contiguous = torch.arange(4, dtype=torch.float64).reshape(2, 2).T
     with pytest.raises(ValueError, match="non-contiguous tensor"):
-        fn.torch_to_series("value", non_contiguous, shape=(2,))
+        torch_to_series("value", non_contiguous, shape=(2,))
 
     wrong_dtype = np.array([1.0, 2.0], dtype=np.float32)
     with pytest.raises(TypeError, match="without copying or casting"):
-        fn.numpy_to_series("value", wrong_dtype, dtype=pl.Float64)
+        numpy_to_series("value", wrong_dtype, dtype=pl.Float64)
 
     chunked = pl.concat(
         [
@@ -649,13 +644,12 @@ def test_zero_copy_bridges_reject_inputs_that_require_materialization() -> None:
     )
     assert chunked.n_chunks() == 2
     with pytest.raises(ValueError, match="multi-chunk Series"):
-        fn.series_to_torch(chunked)
+        series_to_torch(chunked)
 
 
 def test_bridge_copying_requires_an_explicit_opt_in() -> None:
-    fn = VectorMean({})
 
-    series = fn.numpy_to_series(
+    series = numpy_to_series(
         "value",
         [1.0, 2.0],
         dtype=pl.Float64,
@@ -672,16 +666,15 @@ def test_bridge_copying_requires_an_explicit_opt_in() -> None:
         ],
         rechunk=False,
     )
-    tensor = fn.series_to_torch(chunked, allow_copy=True)
+    tensor = series_to_torch(chunked, allow_copy=True)
     assert tensor.tolist() == [1.0, 2.0]
 
 
 def test_numpy_to_series_strict_mode_rejects_non_contiguous_outputs() -> None:
-    fn = VectorMean({})
     array = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64).T
 
     with pytest.raises(ValueError, match="not C-contiguous"):
-        fn.numpy_to_series(
+        numpy_to_series(
             "value",
             array,
             dtype=pl.Float64,

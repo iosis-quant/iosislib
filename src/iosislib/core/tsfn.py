@@ -10,8 +10,6 @@ import inspect
 from types import MappingProxyType
 
 import polars as pl
-import numpy.typing as npt
-import torch
 
 from iosislib.core.utils import (
     _canonical_json,
@@ -25,17 +23,13 @@ from iosislib.core.utils import (
     _normalize_shape,
     _serialize_value,
     _series_null_count,
-    numpy_to_series as _numpy_to_series,
-    series_to_numpy as _series_to_numpy,
-    series_to_torch as _series_to_torch,
-    torch_to_series as _torch_to_series,
 )
 
 
+PolarsDataType: TypeAlias = pl.DataType | type[pl.DataType]
+
 _MISSING_FILL_VALUE = object()
 
-
-PolarsDataType: TypeAlias = pl.DataType | type[pl.DataType]
 
 
 class NullPolicy(str, Enum):
@@ -701,83 +695,6 @@ class TSFN(abc.ABC, Generic[ConfigT]):
         self.validate_output_schema(output_lf)
         return output_lf
 
-    def series_to_numpy(
-        self,
-        series: pl.Series,
-        shape: tuple[int, ...] | None = None,
-        *,
-        allow_copy: bool = False,
-    ) -> npt.NDArray[Any]:
-        return _series_to_numpy(series, shape, allow_copy=allow_copy)
-
-    def numpy_to_series(
-        self,
-        name: str,
-        array: npt.NDArray[Any],
-        *,
-        dtype: PolarsDataType = pl.Float64,
-        shape: tuple[int, ...] | None = None,
-        allow_copy: bool = False,
-    ) -> pl.Series:
-        return _numpy_to_series(
-            name,
-            array,
-            dtype=dtype,
-            shape=shape,
-            allow_copy=allow_copy,
-        )
-
-    def series_to_torch(
-        self,
-        series: pl.Series,
-        shape: tuple[int, ...] | None = None,
-        *,
-        allow_copy: bool = False,
-    ) -> torch.Tensor:
-        return _series_to_torch(series, shape, allow_copy=allow_copy)
-
-    def torch_to_series(
-        self,
-        name: str,
-        tensor: torch.Tensor,
-        *,
-        dtype: PolarsDataType = pl.Float64,
-        shape: tuple[int, ...] | None = None,
-        allow_copy: bool = False,
-    ) -> pl.Series:
-        return _torch_to_series(
-            name,
-            tensor,
-            dtype=dtype,
-            shape=shape,
-            allow_copy=allow_copy,
-        )
-
-    def series_to_pytorch(
-        self,
-        series: pl.Series,
-        shape: tuple[int, ...] | None = None,
-        *,
-        allow_copy: bool = False,
-    ) -> torch.Tensor:
-        return self.series_to_torch(series, shape, allow_copy=allow_copy)
-
-    def pytorch_to_series(
-        self,
-        name: str,
-        tensor: torch.Tensor,
-        *,
-        dtype: PolarsDataType = pl.Float64,
-        shape: tuple[int, ...] | None = None,
-        allow_copy: bool = False,
-    ) -> pl.Series:
-        return self.torch_to_series(
-            name,
-            tensor,
-            dtype=dtype,
-            shape=shape,
-            allow_copy=allow_copy,
-        )
     def _prepare_input_nulls(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         """Apply every configured input null policy before subclass execution."""
         input_columns = _column_signature_map(self.signature[0])
