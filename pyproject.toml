@@ -39,6 +39,9 @@ Issues = "https://github.com/Chris2Rich/iosislib/issues"
 Repository = "https://github.com/Chris2Rich/iosislib.git"
 
 [project.optional-dependencies]
+acceleration = [
+    "numba>=0.61",
+]
 lightgbm = [
     "lightgbm>=4.0",
 ]
@@ -55,6 +58,7 @@ dev = [
     "check-wheel-contents>=0.6",
     "lightgbm>=4.0",
     "mypy>=1.11",
+    "numba>=0.61",
     "pandas>=2.0",
     "pytest>=8",
     "ruff>=0.6",
