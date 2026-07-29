@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -6,9 +6,11 @@ from math import log, prod
 import numpy as np
 import polars as pl
 import pytest
+import torch
 
 from iosislib.core.graph import Graph
 from iosislib.core.node import Node
+from iosislib.core.utils import numpy_to_series, series_to_torch, torch_to_series
 from iosislib.core.tsfn import (
     BatchTSFN,
     ColumnSignature,
@@ -614,7 +616,6 @@ def test_scalar_series_to_torch_uses_the_arrow_buffer_through_dlpack() -> None:
 
 
 def test_torch_to_series_preserves_the_tensor_buffer() -> None:
-    torch = pytest.importorskip("torch")
     fn = VectorMean({})
     tensor = torch.tensor([1.0, 2.0], dtype=torch.float64)
 
@@ -626,7 +627,6 @@ def test_torch_to_series_preserves_the_tensor_buffer() -> None:
 
 
 def test_zero_copy_bridges_reject_inputs_that_require_materialization() -> None:
-    torch = pytest.importorskip("torch")
     fn = VectorMean({})
 
     with pytest.raises(TypeError, match="expected a NumPy ndarray"):
@@ -688,3 +688,13 @@ def test_numpy_to_series_strict_mode_rejects_non_contiguous_outputs() -> None:
             shape=(2,),
             allow_copy=False,
         )
+
+def test_core_bridge_functions_are_directly_usable() -> None:
+    values = np.array([[1.0, 2.0]], dtype=np.float64)
+
+    series = numpy_to_series("value", values, shape=(2,))
+    tensor = series_to_torch(series, shape=(2,))
+    rebuilt = torch_to_series("value", tensor, shape=(2,))
+
+    assert tensor.data_ptr() == series.to_arrow().values.buffers()[1].address
+    assert rebuilt.to_list() == [[1.0, 2.0]]
