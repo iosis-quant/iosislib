@@ -39,6 +39,9 @@ Issues = "https://github.com/Chris2Rich/iosislib/issues"
 Repository = "https://github.com/Chris2Rich/iosislib.git"
 
 [project.optional-dependencies]
+charting = [
+    "matplotlib>=3.8",
+]
 acceleration = [
     "numba>=0.61",
 ]
