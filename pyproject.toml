@@ -53,6 +53,7 @@ yfinance = [
     "yfinance>=0.2.40",
 ]
 test = [
+    "matplotlib>=3.8",
     "pandas>=2.0",
     "pytest>=8",
 ]
@@ -60,6 +61,7 @@ dev = [
     "build>=1.2",
     "check-wheel-contents>=0.6",
     "lightgbm>=4.0",
+    "matplotlib>=3.8",
     "mypy>=1.11",
     "numba>=0.61",
     "pandas>=2.0",
