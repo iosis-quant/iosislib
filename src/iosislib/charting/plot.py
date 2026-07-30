@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -194,10 +196,12 @@ def _matplotlib() -> tuple[Any, Any]:
 
 __all__ = [
     "ChartTheme",
+    "figure_to_png_data_uri",
     "figure_to_svg",
     "figure_to_svg_data_uri",
     "plot_frame",
     "plot_graph",
+    "to_png",
 ]
 
 def to_png(source: Any, *, dpi: int = 300, **kwargs: Any) -> bytes:
@@ -225,20 +229,11 @@ def to_png(source: Any, *, dpi: int = 300, **kwargs: Any) -> bytes:
             plt.close(figure)
 
 
-def write_png(source: Any, path: Any, *, dpi: int = 300, **kwargs: Any) -> None:
-    """Render a frame or graph directly to a PNG file."""
+def figure_to_png_data_uri(figure: Any) -> str:
+    """Return a high-resolution Matplotlib figure as a PNG data URI."""
 
-    if not isinstance(dpi, int) or isinstance(dpi, bool) or dpi <= 0:
-        raise ValueError("dpi must be a positive integer")
-    plt, _ = _matplotlib()
-    owns_figure = kwargs.get("ax") is None
-    if hasattr(source, "execute"):
-        figure, _ = plot_graph(source, **kwargs)
-    else:
-        figure, _ = plot_frame(source, **kwargs)
-    try:
-        figure.savefig(path, format="png", dpi=dpi, bbox_inches="tight")
-    finally:
-        if owns_figure:
-            plt.close(figure)
+    buffer = BytesIO()
+    figure.savefig(buffer, format="png", dpi=300, bbox_inches="tight")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return "data:image/png;base64," + encoded
 

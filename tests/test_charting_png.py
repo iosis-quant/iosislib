@@ -6,7 +6,7 @@ import matplotlib.image as mpimg
 import polars as pl
 import pytest
 
-from iosislib.charting import to_png, write_png
+from iosislib.charting import figure_to_png_data_uri, to_png
 
 
 matplotlib.use("Agg")
@@ -38,11 +38,17 @@ def test_to_png_accepts_graph_like_sources() -> None:
     assert to_png(FakeGraph()).startswith(b"\x89PNG\r\n\x1a\n")
 
 
-def test_write_png_writes_the_same_public_format(tmp_path: object) -> None:
-    path = tmp_path / "chart.png"
-    write_png(_frame(), path)
+def test_figure_to_png_data_uri_is_base64_encoded() -> None:
+    figure_bytes = to_png(_frame(), dpi=100)
+    import matplotlib.pyplot as plt
 
-    assert path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    figure = plt.figure()
+    figure_to_png_data_uri(figure)
+    uri = figure_to_png_data_uri(figure)
+    assert uri.startswith("data:image/png;base64,")
+    assert uri.split(",", 1)[1]
+    assert figure_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    plt.close(figure)
 
 
 def test_to_png_rejects_invalid_dpi() -> None:
