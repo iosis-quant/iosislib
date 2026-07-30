@@ -14,6 +14,16 @@ from iosislib.strategy.ir import (
     StrategyValidationError,
     Value,
 )
+from iosislib.strategy.lowering import (
+    LoweredStrategy,
+    OperationKey,
+    OperationRegistry,
+    OutputBinding,
+    StrategyLoweringError,
+    builtin_registry,
+    lower,
+    registry_from_exports,
+)
 from iosislib.strategy.parser import StrategySyntaxError, dump, dumps, load, loads
 
 
@@ -27,17 +37,25 @@ def schema() -> dict[str, Any]:
 
 __all__ = [
     "Input",
+    "LoweredStrategy",
     "Node",
+    "OperationKey",
+    "OperationRegistry",
+    "OutputBinding",
     "Reference",
     "STRATEGY_FORMAT",
     "STRATEGY_VERSION",
     "Strategy",
+    "StrategyLoweringError",
     "StrategySyntaxError",
     "StrategyValidationError",
     "Value",
+    "builtin_registry",
     "dump",
     "dumps",
     "load",
+    "lower",
     "loads",
+    "registry_from_exports",
     "schema",
 ]

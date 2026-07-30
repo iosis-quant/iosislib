@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from io import BytesIO
 from numbers import Number
 from typing import Any
+from urllib.parse import quote
 
 import polars as pl
 
@@ -45,12 +47,14 @@ def plot_frame(
     time_column: str | None = None,
     theme: ChartTheme | None = None,
     legend: bool = True,
+    max_points: int | None = 5000,
 ) -> tuple[Any, Any]:
     """Plot numeric columns from a time-first Polars frame.
 
     The first frame column is the time axis. Scalar numeric columns become one
     line each; list and fixed-size array columns become one line per element.
     Null values are rendered as gaps and rows are sorted chronologically.
+    ``max_points`` bounds the x-axis rows, retaining the first and last points.
     """
 
     plt, dates = _matplotlib()
@@ -68,6 +72,10 @@ def plot_frame(
         raise ValueError("The time column must be the first frame column")
     if frame.schema[time_name] not in (pl.Date, pl.Datetime, pl.Time):
         raise TypeError("The first frame column must contain date/time values")
+    if max_points is not None and (
+        not isinstance(max_points, int) or isinstance(max_points, bool) or max_points < 2
+    ):
+        raise ValueError("max_points must be None or an integer greater than or equal to 2")
 
     selected = list(frame.columns[1:] if columns is None else columns)
     missing = [name for name in selected if name not in frame.columns]
@@ -77,6 +85,12 @@ def plot_frame(
         raise ValueError("plot_frame requires at least one value column")
 
     frame = frame.sort(time_name).drop_nulls(time_name)
+    if max_points is not None and frame.height > max_points:
+        indices = [
+            round(index * (frame.height - 1) / (max_points - 1))
+            for index in range(max_points)
+        ]
+        frame = frame.gather(indices)
     times = frame.get_column(time_name).to_list()
     series = _numeric_series(frame, selected)
     if not series:
@@ -115,6 +129,23 @@ def plot_frame(
             dates.ConciseDateFormatter(axes.xaxis.get_major_locator())
         )
     return figure, axes
+
+
+def figure_to_svg(figure: Any, *, data_uri: bool = False) -> str:
+    """Serialize a Matplotlib figure as SVG or a URI-safe SVG data URI."""
+
+    buffer = BytesIO()
+    figure.savefig(buffer, format="svg", bbox_inches="tight")
+    svg = buffer.getvalue().decode("utf-8")
+    if not data_uri:
+        return svg
+    return "data:image/svg+xml;charset=utf-8," + quote(svg, safe="~()*!.'-_")
+
+
+def figure_to_svg_data_uri(figure: Any) -> str:
+    """Return ``figure`` as an embeddable ``data:image/svg+xml`` URI."""
+
+    return figure_to_svg(figure, data_uri=True)
 
 
 def _numeric_series(frame: pl.DataFrame, columns: Sequence[str]) -> dict[str, list[float]]:
@@ -156,9 +187,58 @@ def _matplotlib() -> tuple[Any, Any]:
         import matplotlib.pyplot as plt
     except ImportError as exc:
         raise ImportError(
-            "Matplotlib is required for iosislib.charting; install the 'charting' extra"
+            "Matplotlib is required for iosislib.charting; install matplotlib to use it"
         ) from exc
     return plt, dates
 
 
-__all__ = ["ChartTheme", "plot_frame", "plot_graph"]
+__all__ = [
+    "ChartTheme",
+    "figure_to_svg",
+    "figure_to_svg_data_uri",
+    "plot_frame",
+    "plot_graph",
+]
+
+def to_png(source: Any, *, dpi: int = 300, **kwargs: Any) -> bytes:
+    """Render a frame or graph to high-resolution PNG bytes.
+
+    ``source`` may be a Polars DataFrame/LazyFrame or any graph-like object
+    exposing ``execute()``. Plotting options, including ``max_points``, are
+    forwarded to the existing chart helpers.
+    """
+
+    if not isinstance(dpi, int) or isinstance(dpi, bool) or dpi <= 0:
+        raise ValueError("dpi must be a positive integer")
+    plt, _ = _matplotlib()
+    owns_figure = kwargs.get("ax") is None
+    if hasattr(source, "execute"):
+        figure, _ = plot_graph(source, **kwargs)
+    else:
+        figure, _ = plot_frame(source, **kwargs)
+    try:
+        buffer = BytesIO()
+        figure.savefig(buffer, format="png", dpi=dpi, bbox_inches="tight")
+        return buffer.getvalue()
+    finally:
+        if owns_figure:
+            plt.close(figure)
+
+
+def write_png(source: Any, path: Any, *, dpi: int = 300, **kwargs: Any) -> None:
+    """Render a frame or graph directly to a PNG file."""
+
+    if not isinstance(dpi, int) or isinstance(dpi, bool) or dpi <= 0:
+        raise ValueError("dpi must be a positive integer")
+    plt, _ = _matplotlib()
+    owns_figure = kwargs.get("ax") is None
+    if hasattr(source, "execute"):
+        figure, _ = plot_graph(source, **kwargs)
+    else:
+        figure, _ = plot_frame(source, **kwargs)
+    try:
+        figure.savefig(path, format="png", dpi=dpi, bbox_inches="tight")
+    finally:
+        if owns_figure:
+            plt.close(figure)
+
