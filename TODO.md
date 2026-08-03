@@ -1,17 +1,19 @@
-# Roadmap
+# graph
+- handle caching
+- make the system able to deal with data that is too large to fit into memory
 
-The core graph, causal alignment, null policies, materialization boundaries,
-walk-forward model lifecycle, transforms, local CSV/Parquet sources, and
-Polymarket/yfinance adapters are implemented. Current work is ordered by the
-contracts needed before a release:
+# backtester
+- improve accuracy of backtester
+- add validation metrics
+- improve risk modelling and make it more modular
 
-1. Rework definition IDs only when cache freshness/dirty semantics have concrete
-   requirements; current Node IDs remain authoritative.
-2. Add content-addressed result caching, then dependency-depth and Ray executor
-   implementations.
-3. Expand adapter coverage and domain transforms as concrete workflows require
-   them.
-4. Build backtesting and richer observability as layers above the graph core.
+# nodes
+- add more tsfns. murex, scipy, are good starting points
+- create better "categories" of tsfn where shared interfaces are actually abstracted hierarchically
 
-The numbered design briefs in `temp/todo/` are local coordination material and
-are intentionally not part of the published package.
+# charting
+- make the charts more visually appealing
+
+# testing
+- test that errors are found throughout the program with a single pass of the verifier
+- test performance more rigorously (different graph complexities, backtest sample sizes etc)
