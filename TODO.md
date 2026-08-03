@@ -11,6 +11,9 @@
 - add more tsfns. murex, scipy, are good starting points
 - create better "categories" of tsfn where shared interfaces are actually abstracted hierarchically
 
+# adapters
+- adapters should fetch content adressed material with calver/semver pointers. we basically have some table in s3 that we 
+
 # charting
 - make the charts more visually appealing
 
