@@ -125,4 +125,9 @@ class EwmStd(EwmTransform):
         min_samples: int,
         adjust: bool,
     ) -> pl.Expr:
-        return value.ewm_std(alpha=alpha, adjust=adjust, min_samples=min_samples)
+        # A sample standard deviation is undefined until two observations exist.
+        return value.ewm_std(
+            alpha=alpha,
+            adjust=adjust,
+            min_samples=max(min_samples, 2),
+        )

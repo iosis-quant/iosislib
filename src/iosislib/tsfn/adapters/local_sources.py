@@ -288,8 +288,8 @@ def _project_declared_columns(
 @dataclass(frozen=True)
 class CSVSourceConfig(TSFNConfig):
     path: PathLike
-    content_sha256: str
     output_signature: FrameSignature = _UNRESOLVED_SIGNATURE
+    content_sha256: str = ""
     schema: Mapping[str, object] | None = None
     separator: str = ","
 
@@ -343,8 +343,8 @@ class CSVSource(TSFN):
 @dataclass(frozen=True)
 class ParquetSourceConfig(TSFNConfig):
     path: PathLike
-    content_sha256: str
     output_signature: FrameSignature = _UNRESOLVED_SIGNATURE
+    content_sha256: str = ""
     schema: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
