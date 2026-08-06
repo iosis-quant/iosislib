@@ -29,6 +29,14 @@ def test_to_png_returns_high_resolution_png_bytes() -> None:
     assert image.shape[0] >= 1200
 
 
+def test_to_png_default_dark_background() -> None:
+    image = mpimg.imread(BytesIO(to_png(_frame(), dpi=100)), format="png")
+
+    corner = image[0, 0, :3]
+    assert corner.max() < 0.2
+    assert image.mean(axis=(0, 1))[:3].max() < 0.25
+
+
 def test_to_png_accepts_graph_like_sources() -> None:
     class FakeGraph:
         def execute(self, *, executor: object = None) -> pl.DataFrame:

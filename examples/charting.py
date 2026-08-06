@@ -1,7 +1,9 @@
 """Create a bounded SVG chart from an iosislib graph.
 
 Run with ``py -3 examples/charting.py``. The example prints a data URI that
-can be assigned directly to an HTML ``<img src=...>`` attribute.
+can be assigned directly to an HTML ``<img src=...>`` attribute. Charts use
+the dark Iosis styleguide by default; pass ``theme="light"`` for the light
+preset.
 """
 
 from __future__ import annotations

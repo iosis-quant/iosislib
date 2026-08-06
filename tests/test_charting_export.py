@@ -43,3 +43,12 @@ def test_svg_and_data_uri_exports_are_embeddable() -> None:
     assert uri.startswith("data:image/svg+xml;charset=utf-8,")
     assert "%3Csvg" in uri or "%3C%3Fxml" in uri
     figure.clear()
+
+
+def test_dark_svg_export_carries_the_theme_background() -> None:
+    figure, _ = plot_frame(_frame(3), max_points=None)
+
+    svg = figure_to_svg(figure)
+
+    assert "#101010" in svg or "rgb(16,16,16)" in svg
+    figure.clear()

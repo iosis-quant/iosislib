@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -10,6 +11,7 @@ import polars as pl
 
 from iosislib.core.tsfn import (
     FrameSignature,
+    TimeAxis,
     TSFN,
     TSFNConfig,
     _column_signatures,
@@ -86,6 +88,65 @@ def _validate_output_signature(output_signature: FrameSignature) -> None:
         raise TypeError("output_signature must be a FrameSignature")
     if output_signature.is_empty():
         raise ValueError("output_signature must declare a time axis")
+
+
+_STRING_DTYPES = {
+    "bool": pl.Boolean,
+    "float32": pl.Float32,
+    "float64": pl.Float64,
+    "int32": pl.Int32,
+    "int64": pl.Int64,
+    "string": pl.String,
+}
+
+
+def _dtype_from_string(value: object) -> pl.DataType:
+    if not isinstance(value, str) or value not in _STRING_DTYPES:
+        raise ValueError(
+            f"Unsupported schema dtype {value!r}; expected one of "
+            f"{sorted(_STRING_DTYPES)}"
+        )
+    return _STRING_DTYPES[value]
+
+
+def _signature_from_schema(schema: Mapping[str, object]) -> FrameSignature:
+    """Build a FrameSignature from the portable source DSL schema form.
+
+    The portable form is ``{"time": <time column name>, "columns":
+    {<name>: <dtype string>}}`` and matches the source nodes emitted by the
+    web strategy model.
+    """
+    extra = sorted(schema.keys() - {"time", "columns"})
+    if extra:
+        raise ValueError(f"Unsupported schema field(s): {extra}")
+    time_value = schema.get("time")
+    if not isinstance(time_value, str) or not time_value.strip():
+        raise ValueError("schema.time must be the time column name")
+    columns_value = schema.get("columns", {})
+    if not isinstance(columns_value, Mapping):
+        raise TypeError("schema.columns must be a mapping")
+    columns = tuple(
+        (name, _dtype_from_string(dtype_value))
+        for name, dtype_value in sorted(columns_value.items())
+    )
+    return FrameSignature(time=TimeAxis(column=time_value), columns=columns)
+
+
+_UNRESOLVED_SIGNATURE = FrameSignature(time=None, columns=())
+
+
+def _resolve_output_signature(
+    output_signature: FrameSignature,
+    schema: Mapping[str, object] | None,
+) -> FrameSignature:
+    if (output_signature is _UNRESOLVED_SIGNATURE) == (schema is None):
+        raise ValueError(
+            "Source configuration requires exactly one of 'output_signature' or 'schema'"
+        )
+    if output_signature is not _UNRESOLVED_SIGNATURE:
+        return output_signature
+    assert schema is not None
+    return _signature_from_schema(schema)
 
 
 def _verify_content_sha256(
@@ -227,13 +288,17 @@ def _project_declared_columns(
 @dataclass(frozen=True)
 class CSVSourceConfig(TSFNConfig):
     path: PathLike
-    output_signature: FrameSignature
     content_sha256: str
+    output_signature: FrameSignature = _UNRESOLVED_SIGNATURE
+    schema: Mapping[str, object] | None = None
     separator: str = ","
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "path", _normalize_path(self.path))
-        _validate_output_signature(self.output_signature)
+        signature = _resolve_output_signature(self.output_signature, self.schema)
+        _validate_output_signature(signature)
+        object.__setattr__(self, "output_signature", signature)
+        object.__setattr__(self, "schema", None)
         object.__setattr__(
             self,
             "content_sha256",
@@ -243,7 +308,7 @@ class CSVSourceConfig(TSFNConfig):
             raise TypeError("separator must be a string")
         if len(self.separator.encode("utf-8")) != 1:
             raise ValueError("separator must be a single-byte character")
-        if any(column.shape for column in _column_signatures(self.output_signature)):
+        if any(column.shape for column in _column_signatures(signature)):
             raise ValueError(
                 "CSVSource does not support shaped columns; use ParquetSource"
             )
@@ -278,12 +343,16 @@ class CSVSource(TSFN):
 @dataclass(frozen=True)
 class ParquetSourceConfig(TSFNConfig):
     path: PathLike
-    output_signature: FrameSignature
     content_sha256: str
+    output_signature: FrameSignature = _UNRESOLVED_SIGNATURE
+    schema: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "path", _normalize_parquet_location(self.path))
-        _validate_output_signature(self.output_signature)
+        signature = _resolve_output_signature(self.output_signature, self.schema)
+        _validate_output_signature(signature)
+        object.__setattr__(self, "output_signature", signature)
+        object.__setattr__(self, "schema", None)
         object.__setattr__(
             self,
             "content_sha256",

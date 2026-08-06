@@ -1,4 +1,8 @@
-"""Plot a time-first Polars frame and export raw SVG."""
+"""Plot a time-first Polars frame and export raw SVG.
+
+Charts use the dark Iosis styleguide by default; pass ``theme="light"`` for
+the light preset.
+"""
 
 from __future__ import annotations
 

@@ -1033,15 +1033,146 @@ class ItemwiseStructTSFN(TSFN[ConfigT], abc.ABC):
         return first_shape
 
 
+class RollingUnaryTSFN(TSFN[ConfigT], abc.ABC):
+    """Base for unary transforms computed over a fixed rolling window.
+
+    Concrete subclasses name the scalar input/output columns, expose the fixed
+    window size and minimum sample count, and build the lazy windowed
+    expression. Inputs are scalar Float64; windowed operations over shaped
+    Array columns are out of scope. The base sorts by the declared time axis
+    before applying the window, matching ``Delta`` and ``Lag``.
+    """
+
+    @abc.abstractmethod
+    def rolling_input_column(self) -> str:
+        pass
+
+    @abc.abstractmethod
+    def rolling_output_column(self) -> str:
+        pass
+
+    @abc.abstractmethod
+    def rolling_periods(self) -> int:
+        pass
+
+    @abc.abstractmethod
+    def rolling_min_samples(self) -> int:
+        pass
+
+    @abc.abstractmethod
+    def rolling_expr(
+        self,
+        value: pl.Expr,
+        *,
+        periods: int,
+        min_samples: int,
+    ) -> pl.Expr:
+        pass
+
+    def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
+        if lf is None:
+            raise ValueError("RollingUnaryTSFN requires an input frame")
+
+        input_signature, output_signature = self.signature
+        if input_signature.time is None:
+            raise ValueError(
+                "RollingUnaryTSFN input signature must declare a time axis"
+            )
+
+        input_column = _column_signature_map(input_signature)[
+            self.rolling_input_column()
+        ]
+        output_column = _column_signature_map(output_signature)[
+            self.rolling_output_column()
+        ]
+        result = self.rolling_expr(
+            pl.col(input_column.name),
+            periods=self.rolling_periods(),
+            min_samples=self.rolling_min_samples(),
+        )
+        return lf.sort(input_signature.time.column).select(
+            input_signature.time.column,
+            result.cast(output_column.physical_dtype).alias(output_column.name),
+        )
+
+
+class EwmUnaryTSFN(TSFN[ConfigT], abc.ABC):
+    """Base for unary exponentially-weighted transforms.
+
+    Concrete subclasses name the scalar input/output columns, expose the decay
+    ``alpha`` and adjustment mode, and build the lazy exponentially-weighted
+    expression. The base sorts by the declared time axis before applying the
+    window.
+    """
+
+    @abc.abstractmethod
+    def ewm_input_column(self) -> str:
+        pass
+
+    @abc.abstractmethod
+    def ewm_output_column(self) -> str:
+        pass
+
+    @abc.abstractmethod
+    def ewm_alpha(self) -> float:
+        pass
+
+    @abc.abstractmethod
+    def ewm_min_samples(self) -> int:
+        pass
+
+    @abc.abstractmethod
+    def ewm_adjust(self) -> bool:
+        pass
+
+    @abc.abstractmethod
+    def ewm_expr(
+        self,
+        value: pl.Expr,
+        *,
+        alpha: float,
+        min_samples: int,
+        adjust: bool,
+    ) -> pl.Expr:
+        pass
+
+    def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
+        if lf is None:
+            raise ValueError("EwmUnaryTSFN requires an input frame")
+
+        input_signature, output_signature = self.signature
+        if input_signature.time is None:
+            raise ValueError("EwmUnaryTSFN input signature must declare a time axis")
+
+        input_column = _column_signature_map(input_signature)[
+            self.ewm_input_column()
+        ]
+        output_column = _column_signature_map(output_signature)[
+            self.ewm_output_column()
+        ]
+        result = self.ewm_expr(
+            pl.col(input_column.name),
+            alpha=self.ewm_alpha(),
+            min_samples=self.ewm_min_samples(),
+            adjust=self.ewm_adjust(),
+        )
+        return lf.sort(input_signature.time.column).select(
+            input_signature.time.column,
+            result.cast(output_column.physical_dtype).alias(output_column.name),
+        )
+
+
 __all__ = [
     "BatchTSFN",
     "ColumnSignature",
+    "EwmUnaryTSFN",
     "FrameSignature",
     "ItemwiseStructTSFN",
     "ItemwiseUnaryTSFN",
     "NullHandler",
     "NullPolicy",
     "PolarsDataType",
+    "RollingUnaryTSFN",
     "TSFN",
     "TSFNConfig",
     "TimeAxis",
