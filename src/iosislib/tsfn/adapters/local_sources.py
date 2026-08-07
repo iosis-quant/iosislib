@@ -17,6 +17,7 @@ from iosislib.core.tsfn import (
     _column_signatures,
     _frame_physical_schema,
 )
+from iosislib.core.utils import current_s3_credentials
 
 if TYPE_CHECKING:
     from pyarrow.fs import FileInfo, FileSystem
@@ -176,9 +177,17 @@ def _read_verified_snapshot(path: str, expected_sha256: str) -> bytes:
 
 
 def _open_parquet_filesystem(location: str) -> tuple[FileSystem, str]:
-    from pyarrow.fs import FileSystem, LocalFileSystem
+    from pyarrow.fs import FileSystem, LocalFileSystem, S3FileSystem
 
     if location.startswith("s3://"):
+        credentials = current_s3_credentials()
+        if credentials is not None:
+            return S3FileSystem(
+                access_key=credentials.access_key,
+                secret_key=credentials.secret_key,
+                session_token=credentials.session_token,
+                region=credentials.region,
+            ), location.removeprefix("s3://")
         return FileSystem.from_uri(location)
     filesystem = LocalFileSystem()
     return filesystem, filesystem.normalize_path(location)

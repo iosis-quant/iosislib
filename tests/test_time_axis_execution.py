@@ -149,6 +149,7 @@ def source_node(
 
 class RecordingExecutor(LocalExecutor):
     def __init__(self) -> None:
+        super().__init__()
         self.aligned_nodes: list[str] = []
         self.lowered_nodes: list[str] = []
         self.materialized_nodes: list[str] = []

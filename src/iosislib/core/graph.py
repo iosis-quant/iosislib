@@ -21,8 +21,10 @@ from iosislib.core.tsfn import (
 )
 from iosislib.core.utils import (
     AsofTolerance,
+    S3CredentialsProvider,
     _dtype_matches,
     _format_tolerance,
+    _s3_credentials_scope,
     _serialize_value,
 )
 
@@ -112,9 +114,24 @@ class GraphValidationError(ValueError):
 class Executor(abc.ABC):
     """Lower and execute a verified graph with time-aware input alignment."""
 
+    def __init__(
+        self,
+        s3_credentials: S3CredentialsProvider | None = None,
+    ) -> None:
+        """Optionally scope explicit S3 credentials for the whole execution.
+
+        ``s3_credentials`` may be an ``S3Credentials`` value or a provider
+        callable that returns fresh credentials (or ``None``) each execution,
+        so a long-running process can keep temporary task-role credentials
+        valid. Credentials are execution state only and never contribute to
+        node or graph identity.
+        """
+        self._s3_credentials: S3CredentialsProvider | None = s3_credentials
+
     def execute(self, graph: Graph) -> pl.DataFrame:
-        root_lf = self._evaluate_to_root(graph)
-        return self.materialize(graph.root_node, root_lf)
+        with _s3_credentials_scope(self._s3_credentials):
+            root_lf = self._evaluate_to_root(graph)
+            return self.materialize(graph.root_node, root_lf)
 
     def _evaluate_to_root(self, graph: Graph) -> pl.LazyFrame:
         """Evaluate required boundaries and return the root lazy value."""

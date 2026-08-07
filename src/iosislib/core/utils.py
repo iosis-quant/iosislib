@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from copy import copy
-from collections.abc import Mapping
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import date, datetime, time, timedelta
 from enum import Enum
 from math import isfinite, prod
@@ -21,6 +23,67 @@ from torch.utils.dlpack import from_dlpack as torch_from_dlpack
 
 AsofTolerance = str | int | float | timedelta | None
 PolarsDataType: TypeAlias = pl.DataType | type[pl.DataType]
+
+
+@dataclass(frozen=True, slots=True)
+class S3Credentials:
+    """Explicit temporary AWS credentials for reading S3 objects at execution time.
+
+    Credentials are execution-plane state only: they never enter TSFN configs,
+    node definitions, or persistent graph identity. ``region`` may be omitted so
+    the AWS SDK resolves it; ``session_token`` is required for temporary
+    credentials such as an ECS/Fargate task role.
+    """
+
+    access_key: str
+    secret_key: str
+    session_token: str | None = None
+    region: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.access_key, str) or not self.access_key.strip():
+            raise ValueError("S3Credentials.access_key must be a non-empty string")
+        if not isinstance(self.secret_key, str) or not self.secret_key.strip():
+            raise ValueError("S3Credentials.secret_key must be a non-empty string")
+        if self.session_token is not None and (
+            not isinstance(self.session_token, str) or not self.session_token.strip()
+        ):
+            raise ValueError(
+                "S3Credentials.session_token must be a string or None"
+            )
+        if self.region is not None and (
+            not isinstance(self.region, str) or not self.region.strip()
+        ):
+            raise ValueError("S3Credentials.region must be a string or None")
+
+
+S3CredentialsProvider: TypeAlias = S3Credentials | Callable[[], S3Credentials | None]
+
+_CURRENT_S3_CREDENTIALS: ContextVar[S3Credentials | None] = ContextVar(
+    "current_s3_credentials", default=None
+)
+
+
+def current_s3_credentials() -> S3Credentials | None:
+    """Return the S3 credentials scoped to the current execution, if any."""
+    return _CURRENT_S3_CREDENTIALS.get()
+
+
+@contextmanager
+def _s3_credentials_scope(
+    credentials: S3Credentials | Callable[[], S3Credentials | None] | None,
+) -> Iterator[None]:
+    """Resolve an optional provider/callable and scope it for one execution."""
+    resolved = credentials() if callable(credentials) else credentials
+    if resolved is not None and not isinstance(resolved, S3Credentials):
+        raise TypeError(
+            "S3 credentials provider must return S3Credentials or None"
+        )
+    token: Token[S3Credentials | None] = _CURRENT_S3_CREDENTIALS.set(resolved)
+    try:
+        yield
+    finally:
+        _CURRENT_S3_CREDENTIALS.reset(token)
 
 
 def _normalize_shape(shape: tuple[int, ...]) -> tuple[int, ...]:
@@ -620,4 +683,9 @@ def _serialize_value(value: Any) -> Any:
     raise TypeError(f"Type {type(value)} not serializable")
 
 
-__all__ = ["AsofTolerance"]
+__all__ = [
+    "AsofTolerance",
+    "S3Credentials",
+    "S3CredentialsProvider",
+    "current_s3_credentials",
+]
