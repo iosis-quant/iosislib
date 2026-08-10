@@ -64,6 +64,98 @@ def source() -> Node:
     return Node(PackerSource, parameters={"rows": 12})
 
 
+@dataclass(frozen=True)
+class MixedSourceConfig(TSFNConfig):
+    rows: int = 4
+
+
+class MixedSource(TSFN):
+    VERSION = "1.0.0"
+    CONFIG_CLS = MixedSourceConfig
+
+    def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
+        return (
+            FrameSignature.empty(),
+            FrameSignature(
+                time=TimeAxis(column="timestamp"),
+                columns=(
+                    ("count", pl.Int64),
+                    ("ratio", pl.Float32),
+                    ("flag", pl.Boolean),
+                    ("label", pl.Utf8),
+                    ("outcome", pl.Float64),
+                ),
+            ),
+        )
+
+    def apply(self) -> pl.LazyFrame:
+        rows = self.parameters.rows
+        timestamps = [datetime(2026, 2, 1) + timedelta(hours=index) for index in range(rows)]
+        return pl.DataFrame(
+            {
+                "timestamp": timestamps,
+                "count": [1, 2, 3, 4],
+                "ratio": [0.5, 0.25, 0.125, 0.0625],
+                "flag": [True, False, True, False],
+                "label": ["a", "b", "c", "d"],
+                "outcome": [0.0, 1.0, 0.0, 1.0],
+            },
+            schema={
+                "timestamp": pl.Datetime,
+                "count": pl.Int64,
+                "ratio": pl.Float32,
+                "flag": pl.Boolean,
+                "label": pl.Utf8,
+                "outcome": pl.Float64,
+            },
+        ).lazy()
+
+
+@dataclass(frozen=True)
+class ShapedSourceConfig(TSFNConfig):
+    rows: int = 3
+
+
+class ShapedSource(TSFN):
+    VERSION = "1.0.0"
+    CONFIG_CLS = ShapedSourceConfig
+
+    def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
+        return (
+            FrameSignature.empty(),
+            FrameSignature(
+                time=TimeAxis(column="timestamp"),
+                columns=(
+                    ("vec", pl.Float64, (2,)),
+                    ("mat", pl.Float64, (2, 2)),
+                    ("scalar", pl.Float64),
+                ),
+            ),
+        )
+
+    def apply(self) -> pl.LazyFrame:
+        rows = self.parameters.rows
+        timestamps = [datetime(2026, 3, 1) + timedelta(hours=index) for index in range(rows)]
+        return pl.DataFrame(
+            {
+                "timestamp": timestamps,
+                "vec": [[1.0, 2.0], [None, 4.0], [5.0, 6.0]],
+                "mat": [
+                    [1.0, 2.0, 3.0, 4.0],
+                    [5.0, 6.0, 7.0, 8.0],
+                    [9.0, 10.0, 11.0, 12.0],
+                ],
+                "scalar": [7.0, 8.0, 9.0],
+            },
+            schema={
+                "timestamp": pl.Datetime,
+                "vec": pl.Array(pl.Float64, 2),
+                "mat": pl.Array(pl.Float64, 4),
+                "scalar": pl.Float64,
+            },
+        ).lazy()
+
+
 def test_feature_packer_emits_exact_array_schema_and_values() -> None:
     src = source()
     packer = Node(
@@ -117,6 +209,10 @@ def test_feature_packer_config_validation_is_explicit() -> None:
         FeaturePackerConfig(input_columns=("features", "second"))
     with pytest.raises(ValueError, match="timestamp_column must not be"):
         FeaturePackerConfig(input_columns=("first",), timestamp_column="first")
+    with pytest.raises(TypeError, match="output_dtype must be"):
+        FeaturePackerConfig(input_columns=("first",), output_dtype=pl.Utf8)
+    with pytest.raises(TypeError, match="output_dtype must be"):
+        FeaturePackerConfig(input_columns=("first",), output_dtype="float64")
     with pytest.raises(ValueError, match="Unexpected parameters"):
         Node(FeaturePacker, parameters={"input_columns": ("first",), "bogus": 1})
 
@@ -184,3 +280,90 @@ def test_feature_packer_is_discovered_by_the_builtin_registry() -> None:
 
     assert registry.resolve("transform.feature_packer", FeaturePacker.VERSION) is FeaturePacker
     assert registry.resolve("transform.rolling_mean", RollingMean.VERSION) is RollingMean
+
+
+def test_feature_packer_mixed_dtypes_produce_float_vector() -> None:
+    src = Node(MixedSource, parameters={"rows": 4})
+    packer = Node(
+        FeaturePacker,
+        bindings={"count": src.count, "ratio": src.ratio, "flag": src.flag},
+        parameters={"input_columns": ("count", "ratio", "flag")},
+    )
+
+    result = Graph(packer).execute()
+
+    assert packer.outputs == {"features": pl.Array(pl.Float64, 3)}
+    assert result.schema["features"] == pl.Array(pl.Float64, 3)
+    assert result["features"].to_list()[0] == [1.0, 0.5, 1.0]
+    assert result["features"].to_list()[1] == [2.0, 0.25, 0.0]
+    assert result["features"].to_list()[3] == [4.0, 0.0625, 0.0]
+
+
+def test_feature_packer_output_dtype_float32() -> None:
+    src = Node(MixedSource, parameters={"rows": 4})
+    packer = Node(
+        FeaturePacker,
+        bindings={"count": src.count, "ratio": src.ratio},
+        parameters={"input_columns": ("count", "ratio"), "output_dtype": pl.Float32},
+    )
+
+    result = Graph(packer).execute()
+
+    assert packer.outputs == {"features": pl.Array(pl.Float32, 2)}
+    assert result.schema["features"] == pl.Array(pl.Float32, 2)
+    assert result["features"].to_list()[0] == [1.0, 0.5]
+
+
+def test_feature_packer_flattens_shaped_inputs_into_a_vector() -> None:
+    src = Node(ShapedSource, parameters={"rows": 3})
+    packer = Node(
+        FeaturePacker,
+        bindings={"vec": src.vec, "mat": src.mat, "scalar": src.scalar},
+        parameters={"input_columns": ("vec", "mat", "scalar")},
+    )
+
+    result = Graph(packer).execute()
+
+    assert packer.outputs == {"features": pl.Array(pl.Float64, 7)}
+    assert result.schema["features"] == pl.Array(pl.Float64, 7)
+    assert result["features"].to_list()[0] == [1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 7.0]
+    assert result["features"].to_list()[2] == [5.0, 6.0, 9.0, 10.0, 11.0, 12.0, 9.0]
+
+
+def test_feature_packer_propagates_nulls_from_shaped_inputs() -> None:
+    src = Node(ShapedSource, parameters={"rows": 3})
+    packer = Node(
+        FeaturePacker,
+        bindings={"vec": src.vec, "mat": src.mat, "scalar": src.scalar},
+        parameters={"input_columns": ("vec", "mat", "scalar")},
+    )
+
+    result = Graph(packer).execute()
+
+    assert result["features"].to_list()[1] == [None, 4.0, 5.0, 6.0, 7.0, 8.0, 8.0]
+
+
+def test_feature_packer_rejects_non_numeric_input_dtype() -> None:
+    src = Node(MixedSource, parameters={"rows": 4})
+    with pytest.raises(TypeError, match="must be numeric or boolean"):
+        Node(
+            FeaturePacker,
+            bindings={"count": src.count, "label": src.label},
+            parameters={"input_columns": ("count", "label")},
+        )
+
+
+def test_feature_packer_output_dtype_changes_identity() -> None:
+    src = source()
+    default = Node(
+        FeaturePacker,
+        bindings={"first": src.first, "second": src.second},
+        parameters={"input_columns": ("first", "second")},
+    )
+    float32 = Node(
+        FeaturePacker,
+        bindings={"first": src.first, "second": src.second},
+        parameters={"input_columns": ("first", "second"), "output_dtype": pl.Float32},
+    )
+
+    assert default.ID != float32.ID
