@@ -298,7 +298,9 @@ class LightGBM(SupervisedModelTSFN):
             ),
             FrameSignature(
                 time=time,
-                columns=(("prediction", pl.Float64, (shape_width(target_shape),)),),
+                columns=(
+                    ("prediction", pl.Float64, (max(shape_width(target_shape), 1),)),
+                ),
             ),
         )
 
@@ -340,8 +342,8 @@ class LightGBM(SupervisedModelTSFN):
 
     def _resolved_widths(self) -> tuple[int, int]:
         columns = _column_signature_map(self.signature[0])
-        return shape_width(columns["features"].shape), shape_width(
-            columns["target"].shape
+        return max(shape_width(columns["features"].shape), 1), max(
+            shape_width(columns["target"].shape), 1
         )
 
     def scheduler(self) -> Scheduler:

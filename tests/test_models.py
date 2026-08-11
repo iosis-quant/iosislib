@@ -118,6 +118,42 @@ class VectorSource(TSFN):
         ).lazy()
 
 
+@dataclass(frozen=True)
+class ScalarSourceConfig(TSFNConfig):
+    rows: int = 12
+
+
+class ScalarSource(TSFN):
+    VERSION = "1.0.0"
+    CONFIG_CLS = ScalarSourceConfig
+
+    def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
+        return (
+            FrameSignature.empty(),
+            FrameSignature(
+                time=TimeAxis(column="timestamp"),
+                columns=(
+                    ("features", pl.Float64),
+                    ("target", pl.Float64),
+                ),
+            ),
+        )
+
+    def apply(self) -> pl.LazyFrame:
+        rows = self.parameters.rows
+        timestamps = [
+            datetime(2026, 1, 1) + timedelta(hours=index)
+            for index in range(rows)
+        ]
+        return pl.DataFrame(
+            {
+                "timestamp": timestamps,
+                "features": [float(row % 7) for row in range(rows)],
+                "target": [float(row) for row in range(rows)],
+            }
+        ).lazy()
+
+
 def test_dense_mlp_tsfn_declares_vector_regression() -> None:
     function = DenseMLP(
         {
@@ -243,6 +279,67 @@ def test_model_widths_derive_from_bound_columns() -> None:
     result = Graph(model).execute()
 
     assert result.schema["prediction"] == pl.Array(pl.Float64, 2)
+    assert result.height == 12
+
+
+def test_dense_mlp_scalar_bindings_resolve_to_width_one() -> None:
+    src = Node(ScalarSource)
+    model = Node(
+        DenseMLP,
+        bindings={"features": src.features, "target": src.target},
+        parameters={
+            "hidden_layers": [4],
+            "epochs": 1,
+            "scheduler": {"every": 4},
+            "splitter": {"test_size": 2},
+        },
+        name="dense_mlp",
+    )
+
+    input_columns = {
+        entry[0]: (entry[1], entry[2]) for entry in model.function.signature[0].columns
+    }
+    output_columns = {
+        entry[0]: (entry[1], entry[2]) for entry in model.function.signature[1].columns
+    }
+    assert input_columns["features"] == (pl.Float64, ())
+    assert input_columns["target"] == (pl.Float64, ())
+    assert output_columns["prediction"] == (pl.Float64, (1,))
+
+    result = Graph(model).execute()
+
+    assert result.schema["prediction"] == pl.Array(pl.Float64, 1)
+    assert result.height == 12
+
+
+def test_lightgbm_scalar_bindings_resolve_to_width_one() -> None:
+    pytest.importorskip("lightgbm")
+    src = Node(ScalarSource)
+    model = Node(
+        LightGBM,
+        bindings={"features": src.features, "target": src.target},
+        parameters={
+            "scheduler": {"every": 4},
+            "splitter": {"test_size": 2},
+            "num_boost_round": 2,
+            "min_data_in_leaf": 1,
+        },
+        name="lightgbm",
+    )
+
+    input_columns = {
+        entry[0]: (entry[1], entry[2]) for entry in model.function.signature[0].columns
+    }
+    output_columns = {
+        entry[0]: (entry[1], entry[2]) for entry in model.function.signature[1].columns
+    }
+    assert input_columns["features"] == (pl.Float64, ())
+    assert input_columns["target"] == (pl.Float64, ())
+    assert output_columns["prediction"] == (pl.Float64, (1,))
+
+    result = Graph(model).execute()
+
+    assert result.schema["prediction"] == pl.Array(pl.Float64, 1)
     assert result.height == 12
 
 

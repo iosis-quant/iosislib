@@ -14,6 +14,8 @@ FloatMatrix = npt.NDArray[np.float64]
 
 def feature_matrix(features: pl.Series, *, width: int) -> FloatMatrix:
     values = np.asarray(features.to_list(), dtype=np.float64)
+    if values.ndim == 1 and width == 1:
+        values = values.reshape(-1, 1)
     if values.ndim != 2 or values.shape != (len(features), width):
         raise ValueError(
             f"Expected {width} features per row, got array shape {values.shape}"
