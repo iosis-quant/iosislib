@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import polars as pl
 
 from iosislib.core.model import (
@@ -40,7 +41,7 @@ def _import_lightgbm() -> Any:
 
 @dataclass(frozen=True, kw_only=True)
 class LightGBMModel(SupervisedModel):
-    """Immutable LightGBM multi-output regression checkpoint."""
+    """Immutable LightGBM single-output regression checkpoint."""
 
     VERSION = "0.2.0"
 
@@ -60,6 +61,10 @@ class LightGBMModel(SupervisedModel):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        if self.target_width != 1:
+            raise ValueError(
+                "LightGBM regression supports a single output; target_width must be 1"
+            )
         if (
             isinstance(self.max_depth, bool)
             or not isinstance(self.max_depth, int)
@@ -102,7 +107,7 @@ class LightGBMModel(SupervisedModel):
         )
         train_data = lightgbm.Dataset(
             train_features,
-            label=train_target,
+            label=train_target.ravel(),
             free_raw_data=False,
         )
         valid_sets = None
@@ -117,7 +122,7 @@ class LightGBMModel(SupervisedModel):
             )
             validation_data = lightgbm.Dataset(
                 validation_features,
-                label=validation_target,
+                label=validation_target.ravel(),
                 reference=train_data,
                 free_raw_data=False,
             )
@@ -177,7 +182,10 @@ class LightGBMModel(SupervisedModel):
         lightgbm = _import_lightgbm()
         values = feature_matrix(features, width=self.feature_width)
         booster = lightgbm.Booster(model_str=self.model_text)
-        prediction = booster.predict(values)
+        prediction = np.asarray(
+            booster.predict(values),
+            dtype=np.float64,
+        ).reshape(-1, self.target_width)
         return pl.Series(
             "prediction",
             prediction,
@@ -251,20 +259,20 @@ class LightGBM(SupervisedModelTSFN):
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
         params = self.parameters
-        feature_width = params.feature_width or 0
-        target_width = params.target_width or 0
+        feature_shape = (params.feature_width,) if params.feature_width else ()
+        target_shape = (params.target_width,) if params.target_width else ()
         time = TimeAxis(params.timestamp_column)
         return (
             FrameSignature(
                 time=time,
                 columns=(
-                    ("features", pl.Float64, (feature_width,)),
-                    ("target", pl.Float64, (target_width,)),
+                    ("features", pl.Float64, feature_shape),
+                    ("target", pl.Float64, target_shape),
                 ),
             ),
             FrameSignature(
                 time=time,
-                columns=(("prediction", pl.Float64, (target_width,)),),
+                columns=(("prediction", pl.Float64, target_shape),),
             ),
         )
 
@@ -273,10 +281,10 @@ class LightGBM(SupervisedModelTSFN):
         bound_input_columns: Mapping[str, object],
     ) -> tuple[FrameSignature, FrameSignature]:
         params = self.parameters
-        feature_width = self._derive_width(
+        feature_shape = self._resolve_shape(
             "features", bound_input_columns, params.feature_width
         )
-        target_width = self._derive_width(
+        target_shape = self._resolve_shape(
             "target", bound_input_columns, params.target_width
         )
         time = self.signature[0].time
@@ -284,33 +292,34 @@ class LightGBM(SupervisedModelTSFN):
             FrameSignature(
                 time=time,
                 columns=(
-                    ("features", pl.Float64, (feature_width,)),
-                    ("target", pl.Float64, (target_width,)),
+                    ("features", pl.Float64, feature_shape),
+                    ("target", pl.Float64, target_shape),
                 ),
             ),
             FrameSignature(
                 time=time,
-                columns=(("prediction", pl.Float64, (target_width,)),),
+                columns=(("prediction", pl.Float64, (shape_width(target_shape),)),),
             ),
         )
 
     @staticmethod
-    def _derive_width(
+    def _resolve_shape(
         name: str,
         bound_input_columns: Mapping[str, object],
         configured: int | None,
-    ) -> int:
+    ) -> tuple[int, ...]:
         bound = bound_input_columns.get(name)
         if bound is not None:
-            width = shape_width(getattr(bound, "shape", None))
+            shape = getattr(bound, "shape", None) or ()
+            width = shape_width(shape)
             if configured is not None and configured != width:
                 raise ValueError(
                     f"Configured {name} width {configured} does not match the "
                     f"bound width {width}"
                 )
-            return width
+            return shape
         if configured is not None:
-            return configured
+            return (configured,)
         raise ValueError(
             f"{name} must be connected in the graph or have a configured width"
         )
@@ -331,14 +340,9 @@ class LightGBM(SupervisedModelTSFN):
 
     def _resolved_widths(self) -> tuple[int, int]:
         columns = _column_signature_map(self.signature[0])
-        feature_width = shape_width(columns["features"].shape)
-        target_width = shape_width(columns["target"].shape)
-        if feature_width == 0 or target_width == 0:
-            raise ValueError(
-                "features and target widths must be resolved from the graph "
-                "before fitting"
-            )
-        return feature_width, target_width
+        return shape_width(columns["features"].shape), shape_width(
+            columns["target"].shape
+        )
 
     def scheduler(self) -> Scheduler:
         return self.parameters.scheduler

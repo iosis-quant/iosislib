@@ -166,7 +166,7 @@ def test_dense_mlp_fit_is_deterministic_and_returns_immutable_state() -> None:
 
 
 def test_dense_mlp_scalar_target_widens_to_width_one() -> None:
-    initial = DenseMLPModel(layers=(2, 1), epochs=5)
+    initial = DenseMLPModel(layers=(2, 1), epochs=200, learning_rate=0.1)
     checkpoint = initial.fit(dataset_split(), seed=3)
 
     prediction = checkpoint.predict(
@@ -230,8 +230,12 @@ def test_model_widths_derive_from_bound_columns() -> None:
         name="dense_mlp",
     )
 
-    input_columns = dict(model.function.signature[0].columns)
-    output_columns = dict(model.function.signature[1].columns)
+    input_columns = {
+        entry[0]: (entry[1], entry[2]) for entry in model.function.signature[0].columns
+    }
+    output_columns = {
+        entry[0]: (entry[1], entry[2]) for entry in model.function.signature[1].columns
+    }
     assert input_columns["features"] == (pl.Float64, (3,))
     assert input_columns["target"] == (pl.Float64, (2,))
     assert output_columns["prediction"] == (pl.Float64, (2,))
@@ -257,19 +261,19 @@ def test_model_rejects_configured_width_mismatch() -> None:
         )
 
 
-def test_lightgbm_fit_is_deterministic_multioutput_with_serializable_booster() -> None:
+def test_lightgbm_fit_is_deterministic_with_serializable_booster() -> None:
     pytest.importorskip("lightgbm")
-    frame = regression_frame(target_width=2)
+    frame = regression_frame(target_width=1)
     initial = LightGBMModel(
         feature_width=2,
-        target_width=2,
+        target_width=1,
         num_boost_round=30,
         learning_rate=0.1,
         min_data_in_leaf=1,
     )
 
-    first = initial.fit(dataset_split(target_width=2), seed=11)
-    repeated = initial.fit(dataset_split(target_width=2), seed=11)
+    first = initial.fit(dataset_split(target_width=1), seed=11)
+    repeated = initial.fit(dataset_split(target_width=1), seed=11)
 
     assert isinstance(first, LightGBMModel)
     assert first is not initial
@@ -280,11 +284,20 @@ def test_lightgbm_fit_is_deterministic_multioutput_with_serializable_booster() -
     assert json.loads(str(first))["state"]["model_text"].startswith("tree")
 
 
+def test_lightgbm_rejects_multi_output_targets() -> None:
+    with pytest.raises(ValueError, match="single output"):
+        LightGBMModel(
+            feature_width=2,
+            target_width=2,
+            num_boost_round=2,
+        )
+
+
 def test_lightgbm_tsfn_declares_widths_and_mse_metric() -> None:
     function = LightGBM(
         {
             "feature_width": 3,
-            "target_width": 2,
+            "target_width": 1,
             "scheduler": {"every": 4},
             "splitter": {"test_size": 3},
             "num_boost_round": 2,
@@ -294,9 +307,9 @@ def test_lightgbm_tsfn_declares_widths_and_mse_metric() -> None:
     input_signature, output_signature = function.signature
     assert input_signature.columns == (
         ("features", pl.Float64, (3,)),
-        ("target", pl.Float64, (2,)),
+        ("target", pl.Float64, (1,)),
     )
-    assert output_signature.columns == (("prediction", pl.Float64, (2,)),)
+    assert output_signature.columns == (("prediction", pl.Float64, (1,)),)
     assert function.parameters.scheduler == EveryNTicksScheduler(4)
     assert function.parameters.splitter == ChronologicalSplitter(test_size=3)
 
@@ -308,7 +321,7 @@ def test_lightgbm_tsfn_declares_widths_and_mse_metric() -> None:
             dtype=pl.Array(pl.Float64, 3),
         )
     )
-    assert prediction.to_list() == [[0.0, 0.0]]
+    assert prediction.to_list() == [[0.0]]
     assert function.segment_metrics(
         pl.Series([1.0, 3.0]),
         pl.Series([2.0, 1.0]),

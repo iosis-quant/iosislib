@@ -73,6 +73,19 @@ def collect_dataset(
 def mean_squared_error(target: pl.Series, prediction: pl.Series) -> float:
     target_values = np.asarray(target.to_list(), dtype=np.float64)
     prediction_values = np.asarray(prediction.to_list(), dtype=np.float64)
+    if target_values.ndim != prediction_values.ndim:
+        if (
+            target_values.ndim == 1
+            and prediction_values.ndim == 2
+            and prediction_values.shape[1] == 1
+        ):
+            target_values = target_values.reshape(-1, 1)
+        elif (
+            prediction_values.ndim == 1
+            and target_values.ndim == 2
+            and target_values.shape[1] == 1
+        ):
+            prediction_values = prediction_values.reshape(-1, 1)
     if target_values.shape != prediction_values.shape:
         raise ValueError("target and prediction must have the same shape")
     if target_values.size == 0:

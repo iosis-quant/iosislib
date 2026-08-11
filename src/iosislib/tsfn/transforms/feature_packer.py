@@ -175,29 +175,22 @@ class FeaturePacker(TSFN[FeaturePackerConfig]):
         if lf is None:
             raise ValueError("FeaturePacker requires an input frame")
         params = self.parameters
-        input_signature, output_signature = self.signature
+        input_signature, _ = self.signature
         if input_signature.time is None:
             raise ValueError("FeaturePacker input signature must declare a time axis")
 
         input_columns = _column_signature_map(input_signature)
-        output_column = _column_signature_map(output_signature)[params.output_column]
         output_dtype = cast(pl.DataType, params.output_dtype)
-        output_width = _flat_size(output_column.shape)
 
         packed = []
         for name in params.input_columns:
             column = input_columns[name]
             if column.shape:
-                packed.append(pl.col(name).cast(pl.List(output_dtype)))
-            else:
-                # pl.list wraps each scalar into a per-row single-element list.
                 packed.append(
-                    pl.list(pl.col(name).cast(output_dtype))  # pyright: ignore[reportAttributeAccessIssue]
+                    pl.col(name).cast(pl.Array(output_dtype, _flat_size(column.shape)))
                 )
+            else:
+                packed.append(pl.col(name).cast(output_dtype))
 
-        features = (
-            pl.concat_list(packed)
-            .cast(pl.Array(output_dtype, output_width))
-            .alias(params.output_column)
-        )
+        features = pl.concat_arr(*packed).alias(params.output_column)
         return lf.select(params.timestamp_column, features)

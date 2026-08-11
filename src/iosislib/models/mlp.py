@@ -299,20 +299,20 @@ class DenseMLP(SupervisedModelTSFN):
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
         params = self.parameters
-        feature_width = params.feature_width or 0
-        target_width = params.target_width or 0
+        feature_shape = (params.feature_width,) if params.feature_width else ()
+        target_shape = (params.target_width,) if params.target_width else ()
         time = TimeAxis(params.timestamp_column)
         return (
             FrameSignature(
                 time=time,
                 columns=(
-                    ("features", pl.Float64, (feature_width,)),
-                    ("target", pl.Float64, (target_width,)),
+                    ("features", pl.Float64, feature_shape),
+                    ("target", pl.Float64, target_shape),
                 ),
             ),
             FrameSignature(
                 time=time,
-                columns=(("prediction", pl.Float64, (target_width,)),),
+                columns=(("prediction", pl.Float64, target_shape),),
             ),
         )
 
@@ -321,10 +321,10 @@ class DenseMLP(SupervisedModelTSFN):
         bound_input_columns: Mapping[str, object],
     ) -> tuple[FrameSignature, FrameSignature]:
         params = self.parameters
-        feature_width = self._derive_width(
+        feature_shape = self._resolve_shape(
             "features", bound_input_columns, params.feature_width
         )
-        target_width = self._derive_width(
+        target_shape = self._resolve_shape(
             "target", bound_input_columns, params.target_width
         )
         time = self.signature[0].time
@@ -332,33 +332,34 @@ class DenseMLP(SupervisedModelTSFN):
             FrameSignature(
                 time=time,
                 columns=(
-                    ("features", pl.Float64, (feature_width,)),
-                    ("target", pl.Float64, (target_width,)),
+                    ("features", pl.Float64, feature_shape),
+                    ("target", pl.Float64, target_shape),
                 ),
             ),
             FrameSignature(
                 time=time,
-                columns=(("prediction", pl.Float64, (target_width,)),),
+                columns=(("prediction", pl.Float64, (shape_width(target_shape),)),),
             ),
         )
 
     @staticmethod
-    def _derive_width(
+    def _resolve_shape(
         name: str,
         bound_input_columns: Mapping[str, object],
         configured: int | None,
-    ) -> int:
+    ) -> tuple[int, ...]:
         bound = bound_input_columns.get(name)
         if bound is not None:
-            width = shape_width(getattr(bound, "shape", None))
+            shape = getattr(bound, "shape", None) or ()
+            width = shape_width(shape)
             if configured is not None and configured != width:
                 raise ValueError(
                     f"Configured {name} width {configured} does not match the "
                     f"bound width {width}"
                 )
-            return width
+            return shape
         if configured is not None:
-            return configured
+            return (configured,)
         raise ValueError(
             f"{name} must be connected in the graph or have a configured width"
         )
@@ -375,14 +376,9 @@ class DenseMLP(SupervisedModelTSFN):
 
     def _resolved_widths(self) -> tuple[int, int]:
         columns = _column_signature_map(self.signature[0])
-        feature_width = shape_width(columns["features"].shape)
-        target_width = shape_width(columns["target"].shape)
-        if feature_width == 0 or target_width == 0:
-            raise ValueError(
-                "features and target widths must be resolved from the graph "
-                "before fitting"
-            )
-        return feature_width, target_width
+        return shape_width(columns["features"].shape), shape_width(
+            columns["target"].shape
+        )
 
     def scheduler(self) -> Scheduler:
         return self.parameters.scheduler
