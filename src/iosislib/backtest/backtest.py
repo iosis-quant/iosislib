@@ -19,6 +19,12 @@ from iosislib.backtest.policy import (
     PolicyState,
     StatefulPolicy,
 )
+from iosislib.backtest.risk import (
+    RiskDecision,
+    RiskPolicy,
+    RiskReason,
+    StatefulRiskPolicy,
+)
 from iosislib.core.tsfn import BatchTSFN, FrameSignature, TSFNConfig, _column_signatures
 from iosislib.core.utils import (
     _datetime_dtype_without_timezone,
@@ -35,6 +41,7 @@ class BacktestConfig(TSFNConfig):
     feed: Feed
     policy: Policy
     initial_cash: float
+    risk_policy: RiskPolicy | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.feed, Feed):
@@ -43,6 +50,10 @@ class BacktestConfig(TSFNConfig):
             raise TypeError("policy must be a Policy")
         if not isfinite(self.initial_cash):
             raise ValueError("initial_cash must be finite")
+        if self.risk_policy is not None and not isinstance(
+            self.risk_policy, RiskPolicy
+        ):
+            raise TypeError("risk_policy must be a RiskPolicy or None")
 
 
 class _History:
@@ -54,12 +65,16 @@ class _History:
         self.equity = np.empty(rows, dtype=np.float64)
         self.balances = np.empty((rows, width), dtype=np.float64)
         self.orders = np.empty((rows, width), dtype=np.float64)
+        self.proposed_orders = np.empty((rows, width), dtype=np.float64)
+        self.reasons = np.empty(rows, dtype=np.int8)
 
     def append(
         self,
         cash: float,
         balances: Array,
         quantities: Array,
+        proposed_quantities: Array,
+        reason: RiskReason,
         bid: Array,
         market_row: int,
     ) -> None:
@@ -69,6 +84,8 @@ class _History:
         self.equity[self._row] = cash + float(np.dot(balances, bid[market_row]))
         self.balances[self._row] = balances
         self.orders[self._row] = quantities
+        self.proposed_orders[self._row] = proposed_quantities
+        self.reasons[self._row] = int(reason)
         self._row += 1
 
     def assert_complete(self) -> None:
@@ -79,7 +96,7 @@ class _History:
 class BacktestTSFN(BatchTSFN[BacktestConfig]):
     """Simulate policy orders against a feed's executable quotes, row by row."""
 
-    VERSION = "1.0.0"
+    VERSION = "1.1.0"
     CONFIG_CLS = BacktestConfig
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
@@ -112,6 +129,8 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
                     ("equity", pl.Float64),
                     ("balance", pl.Float64, (width,)),
                     ("order", pl.Float64, (width,)),
+                    ("proposed_order", pl.Float64, (width,)),
+                    ("risk_reason", pl.Int8),
                 ),
             ),
         )
@@ -143,13 +162,27 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         history = _History(frame.height, width)
         state = MarketState(information, bid, ask, target)
         policy_state = self._initial_policy_state(config.policy)
+        risk_state = self._initial_risk_state(config.risk_policy)
         for row, timestamp in enumerate(timestamps):
             state.move_to(timestamp, row)
             order, policy_state = self._decide(
                 config.policy, policy_state, state, cash, balances, width
             )
+            proposed = order
+            decision, risk_state = self._apply_risk(
+                config.risk_policy, risk_state, order, state, cash, balances, width
+            )
+            order = decision.order
             cash = self._execute(cash, balances, order, bid, ask, row)
-            history.append(cash, balances, order.quantities, bid, row)
+            history.append(
+                cash,
+                balances,
+                order.quantities,
+                proposed.quantities,
+                decision.reason,
+                bid,
+                row,
+            )
         history.assert_complete()
         return pl.DataFrame(
             [
@@ -158,6 +191,10 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
                 numpy_to_series("equity", history.equity),
                 self._history_array_series("balance", history.balances, width),
                 self._history_array_series("order", history.orders, width),
+                self._history_array_series(
+                    "proposed_order", history.proposed_orders, width
+                ),
+                pl.Series("risk_reason", history.reasons, dtype=pl.Int8),
             ]
         )
 
@@ -230,6 +267,19 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
             raise TypeError("StatefulPolicy.initial_state must return a PolicyState")
         return policy_state
 
+    @staticmethod
+    def _initial_risk_state(
+        risk_policy: RiskPolicy | None,
+    ) -> PolicyState | None:
+        if not isinstance(risk_policy, StatefulRiskPolicy):
+            return None
+        risk_state = risk_policy.initial_state()
+        if not isinstance(risk_state, PolicyState):
+            raise TypeError(
+                "StatefulRiskPolicy.initial_state must return a PolicyState"
+            )
+        return risk_state
+
     @classmethod
     def _decide(
         cls,
@@ -261,6 +311,55 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         finally:
             balances.setflags(write=True)
         return cls._order(order, width), next_state
+
+    @classmethod
+    def _apply_risk(
+        cls,
+        risk_policy: RiskPolicy | None,
+        risk_state: PolicyState | None,
+        order: Order,
+        state: MarketState,
+        cash: float,
+        balances: Array,
+        width: int,
+    ) -> tuple[RiskDecision, PolicyState | None]:
+        if risk_policy is None:
+            return RiskDecision(order=order, reason=RiskReason.NO_CHANGE), None
+        balances.setflags(write=False)
+        try:
+            if isinstance(risk_policy, StatefulRiskPolicy):
+                if risk_state is None:
+                    raise RuntimeError(
+                        "StatefulRiskPolicy requires an initial PolicyState"
+                    )
+                result = risk_policy.derisk_stateful(
+                    risk_state, order, state, cash, balances
+                )
+                if not isinstance(result, tuple) or len(result) != 2:
+                    raise TypeError(
+                        "StatefulRiskPolicy.derisk_stateful must return "
+                        "(RiskDecision, PolicyState)"
+                    )
+                decision, next_state = result
+                if not isinstance(next_state, PolicyState):
+                    raise TypeError(
+                        "StatefulRiskPolicy.derisk_stateful must return a "
+                        "PolicyState"
+                    )
+            else:
+                decision = risk_policy.derisk(order, state, cash, balances)
+                next_state = None
+        finally:
+            balances.setflags(write=True)
+        return cls._risk_decision(decision, width), next_state
+
+    @staticmethod
+    def _risk_decision(value: RiskDecision, width: int) -> RiskDecision:
+        if not isinstance(value, RiskDecision):
+            raise TypeError("RiskPolicy.derisk must return a RiskDecision")
+        if len(value.order.quantities) != width:
+            raise ValueError(f"RiskDecision order width must be {width}")
+        return value
 
     @staticmethod
     def _order(value: Order, width: int) -> Order:

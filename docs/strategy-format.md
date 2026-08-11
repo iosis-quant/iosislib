@@ -95,6 +95,74 @@ An expanded input accepts:
 - `nulls`: `error`, `propagate`, `drop`, `fill`, or `pass`;
 - `fill`: a scalar, required only when `nulls` is `fill`.
 
+## Model operations
+
+`model.light_gbm@0.2.0` and `model.dense_mlp@0.2.0` consume exactly two
+inputs and produce one output:
+
+- `features`: a `Vector[Float64]` column, normally the output of a
+  `transform.feature_packer`;
+- `target`: a `Vector[Float64]` column (a scalar series is treated as a
+  width-1 vector);
+- `prediction`: a `Vector[Float64]` column whose width matches `target`.
+
+Feature and target widths are derived from the bound columns; they can be
+declared explicitly, in which case they must match the bindings.
+
+A model regresses the target on the features in walk-forward segments. The
+`params` for `model.light_gbm` are:
+
+- `num_boost_round`, `learning_rate`, `num_leaves`, `max_depth`,
+  `min_data_in_leaf`, `early_stopping_rounds`: LightGBM hyperparameters;
+- `scheduler`: when to retrain (see below);
+- `splitter`: how the historical prefix is split for training (see below).
+
+The `params` for `model.dense_mlp` are:
+
+- `hidden_layers`: a list of interior layer widths;
+- `epochs`, `learning_rate`, `weight_decay`: training hyperparameters;
+- `scheduler` and `splitter`: as above.
+
+Both models emit an `mse` segment metric that later scheduler decisions can
+observe.
+
+### Scheduler declarations
+
+`scheduler` is omitted, an instance, or one of the following mappings:
+
+```yaml
+scheduler: { every: 100 }              # retrain every 100 rows
+scheduler: { frozen: true }            # train once on the initial prefix
+scheduler:                              # retrain when mse exceeds 0.5
+  metric: { name: mse, threshold: 0.5, check_every: 50 }
+scheduler:                              # retrain when any sub-scheduler does
+  any:
+    - { every: 250 }
+    - { metric: { name: mse, threshold: 0.5, check_every: 50 } }
+```
+
+A `metric` scheduler accepts `name` or `metric_name`, plus `threshold` and
+`check_every`. An omitted `scheduler` uses the operation's default
+(`{ every: 100 }`).
+
+### Splitter declarations
+
+`splitter` is omitted, an instance, or a mapping of `ChronologicalSplitter`
+fields:
+
+```yaml
+splitter:
+  validation_size: 0.2    # float fraction or integer count
+  test_size: 0.0
+  gap: 0
+  batch_size: null
+  shuffle_train: false
+  drop_last: false
+```
+
+An omitted `splitter` uses the operation's default
+(`{ validation_size: 0.2 }`).
+
 ## Stability boundary
 
 The top-level version controls document structure. Each node version controls that

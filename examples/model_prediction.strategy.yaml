@@ -1,0 +1,59 @@
+format: iosis.strategy
+version: 0.1.0
+name: model-prediction
+description: Pack price-derived features, regress a forward return with LightGBM, and expose the vector prediction.
+
+nodes:
+  prices:
+    op: source.csv_source
+    version: 0.2.0
+    params:
+      path: prices.csv
+      content_sha256: replace-with-the-source-content-sha256
+      schema:
+        time: timestamp
+        columns:
+          close: float64
+          volume: float64
+          forward_return: float64
+
+  features:
+    op: transform.feature_packer
+    version: 0.2.0
+    inputs:
+      close: prices.close
+      volume: prices.volume
+    params:
+      input_columns: [close, volume]
+      output_column: features
+
+  target:
+    op: transform.feature_packer
+    version: 0.2.0
+    inputs:
+      forward_return: prices.forward_return
+    params:
+      input_columns: [forward_return]
+      output_column: target
+
+  model:
+    op: model.light_gbm
+    version: 0.2.0
+    inputs:
+      features: features.features
+      target: target.target
+    params:
+      output_column: prediction
+      num_boost_round: 100
+      learning_rate: 0.05
+      num_leaves: 31
+      max_depth: -1
+      min_data_in_leaf: 20
+      early_stopping_rounds: 0
+      scheduler:
+        every: 100
+      splitter:
+        validation_size: 0.2
+
+outputs:
+  prediction: model.prediction

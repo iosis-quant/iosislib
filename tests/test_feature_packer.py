@@ -258,7 +258,7 @@ def test_feature_packer_binds_into_a_supervised_model_graph() -> None:
         DenseMLP,
         bindings={"features": features.features, "target": src.outcome},
         parameters={
-            "layers": (2, 1),
+            "hidden_layers": (),
             "epochs": 1,
             "scheduler": EveryNTicksScheduler(4),
             "splitter": ChronologicalSplitter(test_size=2),
@@ -269,7 +269,7 @@ def test_feature_packer_binds_into_a_supervised_model_graph() -> None:
     result = Graph(model).execute()
 
     assert result.columns == ["timestamp", "prediction"]
-    assert result["prediction"].dtype == pl.Float64
+    assert result["prediction"].dtype == pl.Array(pl.Float64, 1)
     assert result.height == 12
     assert result["prediction"].null_count() < result.height
     assert result["prediction"].drop_nulls().to_list() != []

@@ -6,7 +6,7 @@ import inspect
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, fields
 from math import ceil, isfinite
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import polars as pl
 
@@ -14,6 +14,7 @@ from iosislib.core.tsfn import BatchTSFN, _frame_physical_schema
 from iosislib.core.utils import (
     _canonical_json,
     _dtype_matches,
+    _flat_size,
     _qualified_type_name,
     _serialize_value,
     _series_null_count,
@@ -602,6 +603,126 @@ class AnyScheduler(Scheduler):
         )
 
 
+def _reject_keys(declaration: Mapping[str, object], allowed: set[str], name: str) -> None:
+    unexpected = set(declaration) - allowed
+    if unexpected:
+        raise ValueError(f"Unexpected keys for {name}: {sorted(unexpected)}")
+
+
+def scheduler_from_declaration(value: object, *, default: Scheduler) -> Scheduler:
+    """Normalize a scheduler declaration into a concrete ``Scheduler``.
+
+    Accepts a ``Scheduler`` instance, ``None`` (returns ``default``), or a
+    declarative mapping selecting one of ``frozen``, ``every``, ``metric``, or
+    ``any``.
+    """
+    if value is None:
+        return default
+    if isinstance(value, Scheduler):
+        return value
+    if not isinstance(value, Mapping):
+        raise TypeError("scheduler must be a Scheduler or a declarative mapping")
+
+    if "frozen" in value:
+        _reject_keys(value, {"frozen"}, "scheduler.frozen")
+        if value["frozen"] is not True:
+            raise ValueError("scheduler.frozen must declare 'frozen': true")
+        return FrozenScheduler()
+
+    if "every" in value:
+        _reject_keys(value, {"every"}, "scheduler.every")
+        every = value["every"]
+        if isinstance(every, bool) or not isinstance(every, int):
+            raise TypeError("scheduler.every must be an integer")
+        return EveryNTicksScheduler(every)
+
+    if "metric" in value:
+        _reject_keys(value, {"metric"}, "scheduler.metric")
+        return metric_threshold_scheduler_from_declaration(value["metric"])
+
+    if "any" in value:
+        _reject_keys(value, {"any"}, "scheduler.any")
+        entries = value["any"]
+        if not isinstance(entries, (list, tuple)) or not entries:
+            raise ValueError("scheduler.any must be a non-empty list of schedulers")
+        return AnyScheduler(
+            tuple(
+                scheduler_from_declaration(entry, default=default)
+                for entry in entries
+            )
+        )
+
+    raise ValueError(
+        "scheduler declaration must declare exactly one of 'frozen', 'every', "
+        "'metric', or 'any'"
+    )
+
+
+def metric_threshold_scheduler_from_declaration(
+    value: object,
+) -> MetricThresholdScheduler:
+    if not isinstance(value, Mapping):
+        raise TypeError("scheduler.metric must be a mapping")
+    allowed = {"name", "metric_name", "threshold", "check_every"}
+    _reject_keys(value, allowed, "scheduler.metric")
+    if "metric_name" in value and "name" in value:
+        raise ValueError(
+            "scheduler.metric must declare exactly one of 'metric_name' or 'name'"
+        )
+    metric_name = value.get("metric_name", value.get("name"))
+    return MetricThresholdScheduler(
+        metric_name=metric_name,
+        threshold=cast(Any, value.get("threshold")),
+        check_every=cast(Any, value.get("check_every")),
+    )
+
+
+def splitter_from_declaration(
+    value: object,
+    *,
+    default: DatasetSplitter,
+) -> DatasetSplitter:
+    """Normalize a splitter declaration into a concrete ``DatasetSplitter``.
+
+    Accepts a ``DatasetSplitter`` instance, ``None`` (returns ``default``), or
+    a declarative mapping of ``ChronologicalSplitter`` fields.
+    """
+    if value is None:
+        return default
+    if isinstance(value, DatasetSplitter):
+        return value
+    if not isinstance(value, Mapping):
+        raise TypeError("splitter must be a DatasetSplitter or a declarative mapping")
+    allowed = {
+        "validation_size",
+        "test_size",
+        "gap",
+        "batch_size",
+        "shuffle_train",
+        "drop_last",
+    }
+    _reject_keys(value, allowed, "splitter")
+    return ChronologicalSplitter(
+        validation_size=value.get("validation_size", 0),
+        test_size=value.get("test_size", 0),
+        gap=value.get("gap", 0),
+        batch_size=value.get("batch_size"),
+        shuffle_train=value.get("shuffle_train", False),
+        drop_last=value.get("drop_last", False),
+    )
+
+
+def validate_optional_width(name: str, value: object) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer or None")
+
+
+def shape_width(shape: tuple[int, ...] | None) -> int:
+    return _flat_size(shape or ())
+
+
 class SupervisedModelTSFN(BatchTSFN, abc.ABC):
     """Batched walk-forward orchestration for supervised checkpoints.
 
@@ -768,4 +889,9 @@ __all__ = [
     "Scheduler",
     "SupervisedModel",
     "SupervisedModelTSFN",
+    "metric_threshold_scheduler_from_declaration",
+    "scheduler_from_declaration",
+    "shape_width",
+    "splitter_from_declaration",
+    "validate_optional_width",
 ]

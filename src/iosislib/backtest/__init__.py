@@ -14,6 +14,14 @@ from iosislib.backtest.policy import (
     PolicyState,
     StatefulPolicy,
 )
+from iosislib.backtest.risk import (
+    FractionalKellyPolicy,
+    FractionalLimitPolicy,
+    RiskDecision,
+    RiskPolicy,
+    RiskReason,
+    StatefulRiskPolicy,
+)
 from iosislib.backtest.venue import Venue
 
 __all__ = [
@@ -22,6 +30,8 @@ __all__ = [
     "BacktestTSFN",
     "FeatureBuffer",
     "Feed",
+    "FractionalKellyPolicy",
+    "FractionalLimitPolicy",
     "L1Feed",
     "MarketState",
     "ModelPolicy",
@@ -30,6 +40,10 @@ __all__ = [
     "OrderModelPolicy",
     "Policy",
     "PolicyState",
+    "RiskDecision",
+    "RiskPolicy",
+    "RiskReason",
     "StatefulPolicy",
+    "StatefulRiskPolicy",
     "Venue",
 ]
