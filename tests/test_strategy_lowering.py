@@ -20,7 +20,7 @@ from iosislib.strategy import (
 from iosislib.backtest import BacktestTSFN
 from iosislib.models import DenseMLP
 from iosislib.tsfn.adapters import CSVSource
-from iosislib.tsfn.transforms import Delta
+from iosislib.tsfn.transforms import Delta, Lead
 
 
 @dataclass(frozen=True)
@@ -175,6 +175,7 @@ def test_builtin_registry_discovers_public_library_tsfns() -> None:
     registry = builtin_registry()
 
     assert registry.resolve("transform.delta", Delta.VERSION) is Delta
+    assert registry.resolve("transform.lead", Lead.VERSION) is Lead
     assert registry.resolve("source.csv_source", CSVSource.VERSION) is CSVSource
     assert registry.resolve("model.dense_mlp", DenseMLP.VERSION) is DenseMLP
     assert registry.resolve("backtest.backtest", BacktestTSFN.VERSION) is BacktestTSFN

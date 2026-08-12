@@ -26,6 +26,15 @@ from iosislib.models.lightgbm import LightGBM, LightGBMModel
 from iosislib.models.mlp import DenseMLP, DenseMLPModel
 
 
+def _column_shapes(
+    signature: FrameSignature,
+) -> dict[str, tuple[pl.DataType, tuple[int, ...]]]:
+    return {
+        entry[0]: (entry[1], entry[2] if len(entry) == 3 else ())
+        for entry in signature.columns
+    }
+
+
 def regression_frame(rows: int = 20, target_width: int = 1) -> pl.DataFrame:
     features = [
         [float(index), float(index % 3)]
@@ -266,12 +275,8 @@ def test_model_widths_derive_from_bound_columns() -> None:
         name="dense_mlp",
     )
 
-    input_columns = {
-        entry[0]: (entry[1], entry[2]) for entry in model.function.signature[0].columns
-    }
-    output_columns = {
-        entry[0]: (entry[1], entry[2]) for entry in model.function.signature[1].columns
-    }
+    input_columns = _column_shapes(model.function.signature[0])
+    output_columns = _column_shapes(model.function.signature[1])
     assert input_columns["features"] == (pl.Float64, (3,))
     assert input_columns["target"] == (pl.Float64, (2,))
     assert output_columns["prediction"] == (pl.Float64, (2,))
@@ -296,12 +301,8 @@ def test_dense_mlp_scalar_bindings_resolve_to_width_one() -> None:
         name="dense_mlp",
     )
 
-    input_columns = {
-        entry[0]: (entry[1], entry[2]) for entry in model.function.signature[0].columns
-    }
-    output_columns = {
-        entry[0]: (entry[1], entry[2]) for entry in model.function.signature[1].columns
-    }
+    input_columns = _column_shapes(model.function.signature[0])
+    output_columns = _column_shapes(model.function.signature[1])
     assert input_columns["features"] == (pl.Float64, ())
     assert input_columns["target"] == (pl.Float64, ())
     assert output_columns["prediction"] == (pl.Float64, (1,))
@@ -327,12 +328,8 @@ def test_lightgbm_scalar_bindings_resolve_to_width_one() -> None:
         name="lightgbm",
     )
 
-    input_columns = {
-        entry[0]: (entry[1], entry[2]) for entry in model.function.signature[0].columns
-    }
-    output_columns = {
-        entry[0]: (entry[1], entry[2]) for entry in model.function.signature[1].columns
-    }
+    input_columns = _column_shapes(model.function.signature[0])
+    output_columns = _column_shapes(model.function.signature[1])
     assert input_columns["features"] == (pl.Float64, ())
     assert input_columns["target"] == (pl.Float64, ())
     assert output_columns["prediction"] == (pl.Float64, (1,))

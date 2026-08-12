@@ -4,7 +4,12 @@ from iosislib.tsfn.transforms.feature_packer import (
     FeaturePacker,
     FeaturePackerConfig,
 )
+from iosislib.tsfn.transforms.feature_unpacker import (
+    FeatureUnpacker,
+    FeatureUnpackerConfig,
+)
 from iosislib.tsfn.transforms.lag import Lag, LagConfig
+from iosislib.tsfn.transforms.lead import Lead, LeadConfig
 from iosislib.tsfn.transforms.log import Exp, ExpConfig, Log, LogConfig
 from iosislib.tsfn.transforms.log_ratio import LogRatio, LogRatioConfig
 from iosislib.tsfn.transforms.log_return import LogReturn, LogReturnConfig
@@ -40,8 +45,12 @@ __all__ = [
     "ExpConfig",
     "FeaturePacker",
     "FeaturePackerConfig",
+    "FeatureUnpacker",
+    "FeatureUnpackerConfig",
     "Lag",
     "LagConfig",
+    "Lead",
+    "LeadConfig",
     "Log",
     "LogConfig",
     "LogRatio",

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -18,9 +18,9 @@ from iosislib.tsfn.transforms._validation import validate_column_name, validate_
 
 
 @dataclass(frozen=True)
-class DeltaConfig(TSFNConfig):
+class LeadConfig(TSFNConfig):
     input_column: str = "value"
-    output_column: str = "delta"
+    output_column: str = "lead"
     timestamp_column: str = "timestamp"
     periods: int = 1
 
@@ -36,9 +36,16 @@ class DeltaConfig(TSFNConfig):
             raise ValueError("periods must be at least 1")
 
 
-class Delta(TSFN[DeltaConfig]):
-    VERSION = "0.2.0"
-    CONFIG_CLS = DeltaConfig
+class Lead(TSFN[LeadConfig]):
+    """Forward-shift a value to expose a future observation.
+
+    Lead is look-ahead by construction; graph verification only allows its
+    output to feed a declared target/label input of a supervised model.
+    """
+
+    VERSION = "0.1.0"
+    CONFIG_CLS = LeadConfig
+    LOOKAHEAD = True
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
         params = self.parameters
@@ -89,21 +96,15 @@ class Delta(TSFN[DeltaConfig]):
 
     def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         if lf is None:
-            raise ValueError("Delta requires an input frame")
+            raise ValueError("Lead requires an input frame")
         params = self.parameters
         input_signature, output_signature = self.signature
         if input_signature.time is None:
-            raise ValueError("Delta input signature must declare a time axis")
+            raise ValueError("Lead input signature must declare a time axis")
         output_column = _column_signature_map(output_signature)[params.output_column]
 
-        value = pl.col(params.input_column)
-        lag = value.shift(params.periods)
-        if output_column.shape:
-            null_fill = pl.lit([None] * output_column.shape[0], dtype=output_column.physical_dtype)
-            lag = pl.when(lag.is_null()).then(null_fill).otherwise(lag)
-
-        delta = value - lag
+        lead = pl.col(params.input_column).shift(-params.periods)
         return lf.sort(params.timestamp_column).select(
             params.timestamp_column,
-            delta.cast(output_column.physical_dtype).alias(params.output_column),
+            lead.cast(output_column.physical_dtype).alias(params.output_column),
         )

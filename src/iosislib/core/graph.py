@@ -338,8 +338,9 @@ class Graph:
                 )
 
         node_ids = {node.ID for node in ordered_nodes}
+        lookahead_tainted = cls._lookahead_taint(ordered_nodes)
         for node in ordered_nodes:
-            cls._collect_node_issues(node, node_ids, issues)
+            cls._collect_node_issues(node, node_ids, issues, lookahead_tainted)
 
         positions = {node.ID: index for index, node in enumerate(ordered_nodes)}
         positioned_issues = tuple(
@@ -409,11 +410,36 @@ class Graph:
         )
 
     @classmethod
+    def _lookahead_taint(
+        cls,
+        ordered_nodes: tuple[Node, ...],
+    ) -> dict[str, bool]:
+        """Mark nodes whose output frame contains future-derived values.
+
+        A node is tainted when it is itself a look-ahead transform, or when any
+        of its parents is tainted, unless the node declares look-ahead inputs
+        (a supervised boundary) and therefore converts labels into predictions.
+        """
+        tainted: dict[str, bool] = {}
+        for node in ordered_nodes:
+            if node.function_cls.LOOKAHEAD:
+                tainted[node.ID] = True
+                continue
+            if node.function_cls.ALLOW_LOOKAHEAD_INPUTS:
+                tainted[node.ID] = False
+                continue
+            tainted[node.ID] = any(
+                tainted[parent.ID] for parent in node.inputs
+            )
+        return tainted
+
+    @classmethod
     def _collect_node_issues(
         cls,
         node: Node,
         node_ids: set[str],
         issues: list[ValidationIssue],
+        lookahead_tainted: Mapping[str, bool],
     ) -> None:
         input_signature = node.function.signature[0]
         input_columns = _column_signature_map(input_signature)
@@ -587,6 +613,35 @@ class Graph:
                     input_name,
                     parent_column,
                     issues,
+                )
+
+        allowed_lookahead = node.function_cls.ALLOW_LOOKAHEAD_INPUTS
+        if allowed_lookahead and node.bindings:
+            for input_name, (parent_node, parent_column) in sorted(
+                node.bindings.items()
+            ):
+                if parent_node.ID not in node_ids:
+                    continue
+                if not lookahead_tainted[parent_node.ID]:
+                    continue
+                if input_name in allowed_lookahead:
+                    continue
+                issues.append(
+                    cls._issue(
+                        node,
+                        code="LOOKAHEAD_INTO_FEATURES",
+                        category="lookahead",
+                        message=(
+                            f"Look-ahead validation failed for node "
+                            f"'{node.name or node.ID}'. Input '{input_name}' receives "
+                            f"future-derived values from "
+                            f"'{parent_node.name or parent_node.ID}', which may only "
+                            f"feed a declared target/label input: "
+                            f"{sorted(allowed_lookahead)}."
+                        ),
+                        input_name=input_name,
+                        output_name=parent_column,
+                    )
                 )
 
     @classmethod

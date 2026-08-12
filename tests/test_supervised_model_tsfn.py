@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import polars as pl
 import pytest
 
-from iosislib.core.graph import Graph
+from iosislib.core.graph import Graph, GraphValidationError
 from iosislib.core.model import (
     AnyScheduler,
     ChronologicalSplitter,
@@ -33,6 +33,7 @@ from iosislib.core.tsfn import (
     TSFNConfig,
     TimeAxis,
 )
+from iosislib.tsfn.transforms import Lag, Lead
 
 
 def supervised_frame(rows: int = 10) -> pl.DataFrame:
@@ -767,3 +768,117 @@ def test_scheduler_and_splitter_configuration_participate_in_node_identity() -> 
 
     assert every_three.ID == repeated.ID
     assert every_three.ID != every_four.ID
+
+
+def _lead_target_model(observations: Node) -> Node:
+    features = Node(
+        PackFeatures,
+        bindings={
+            "factor_a": observations.factor_a,
+            "factor_b": observations.factor_b,
+        },
+        name="features",
+    )
+    target = Node(
+        Lead,
+        bindings={"outcome": observations.outcome},
+        parameters={
+            "input_column": "outcome",
+            "output_column": "target",
+            "periods": 1,
+        },
+        name="target",
+    )
+    return Node(
+        MeanModelTSFN,
+        bindings={"features": features.features, "target": target.target},
+        parameters={
+            "scheduler": FrozenScheduler(),
+            "splitter": ChronologicalSplitter(),
+        },
+        null_policies={"target": "drop"},
+        name="walk_forward_mean",
+    )
+
+
+def test_lead_generated_target_feeds_the_supervised_model() -> None:
+    data = example_data()
+    observations = Node(
+        ObservationSource,
+        parameters={
+            "timestamps": data.timestamps,
+            "factor_a": data.factor_a,
+            "factor_b": data.factor_b,
+            "outcomes": data.outcomes,
+        },
+        name="observations",
+    )
+    model = _lead_target_model(observations)
+    graph = Graph(model)
+
+    assert graph.verify() is None
+    result = graph.execute()
+
+    assert result.columns == ["timestamp", "prediction"]
+    assert result.height == 8
+
+
+def test_lookahead_cannot_feed_supervised_features() -> None:
+    data = example_data()
+    observations = Node(
+        ObservationSource,
+        parameters={
+            "timestamps": data.timestamps,
+            "factor_a": data.factor_a,
+            "factor_b": data.factor_b,
+            "outcomes": data.outcomes,
+        },
+        name="observations",
+    )
+    lead = Node(Lead, bindings={"value": observations.outcome}, name="lead")
+    model = Node(
+        MeanModelTSFN,
+        bindings={"features": lead.lead, "target": observations.outcome},
+        parameters={
+            "scheduler": FrozenScheduler(),
+            "splitter": ChronologicalSplitter(),
+        },
+        name="walk_forward_mean",
+    )
+
+    report = Graph.validate(model)
+
+    assert not report.is_valid
+    assert "LOOKAHEAD_INTO_FEATURES" in {issue.code for issue in report.issues}
+    with pytest.raises(GraphValidationError, match="LOOKAHEAD_INTO_FEATURES"):
+        Graph(model)
+
+
+def test_lookahead_taint_propagates_through_transforms() -> None:
+    data = example_data()
+    observations = Node(
+        ObservationSource,
+        parameters={
+            "timestamps": data.timestamps,
+            "factor_a": data.factor_a,
+            "factor_b": data.factor_b,
+            "outcomes": data.outcomes,
+        },
+        name="observations",
+    )
+    lead = Node(Lead, bindings={"value": observations.outcome}, name="lead")
+    lag = Node(Lag, bindings={"value": lead.lead}, name="lag")
+    model = Node(
+        MeanModelTSFN,
+        bindings={"features": lag.lag, "target": observations.outcome},
+        parameters={
+            "scheduler": FrozenScheduler(),
+            "splitter": ChronologicalSplitter(),
+        },
+        name="walk_forward_mean",
+    )
+
+    report = Graph.validate(model)
+
+    assert not report.is_valid
+    assert "LOOKAHEAD_INTO_FEATURES" in {issue.code for issue in report.issues}

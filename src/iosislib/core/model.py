@@ -734,6 +734,7 @@ class SupervisedModelTSFN(BatchTSFN, abc.ABC):
     FEATURE_COLUMN: ClassVar[str] = "features"
     TARGET_COLUMN: ClassVar[str] = "target"
     PREDICTION_COLUMN: ClassVar[str] = "prediction"
+    ALLOW_LOOKAHEAD_INPUTS: ClassVar[frozenset[str]] = frozenset({TARGET_COLUMN})
 
     def __init__(self, parameters: dict[str, Any]) -> None:
         super().__init__(parameters)

@@ -400,6 +400,8 @@ class TSFN(abc.ABC, Generic[ConfigT]):
     VERSION: ClassVar[str]
     REQUIRES_MATERIALIZATION: ClassVar[bool] = False
     DEFAULT_NULL_POLICY: ClassVar[NullPolicy] = NullPolicy.PROPAGATE
+    LOOKAHEAD: ClassVar[bool] = False
+    ALLOW_LOOKAHEAD_INPUTS: ClassVar[frozenset[str]] = frozenset()
 
     def __setattr__(self, name: str, value: Any) -> None:
         if self.__dict__.get("_node_definition_frozen", False):
@@ -416,6 +418,7 @@ class TSFN(abc.ABC, Generic[ConfigT]):
             cls._validate_version()
             cls._validate_materialization_requirement()
             cls._validate_default_null_policy()
+            cls._validate_lookahead_contract()
 
     @classmethod
     def _validate_version(cls) -> str:
@@ -455,6 +458,20 @@ class TSFN(abc.ABC, Generic[ConfigT]):
                 f"{cls.__name__}.DEFAULT_NULL_POLICY must be a NullPolicy"
             )
         return policy
+
+    @classmethod
+    def _validate_lookahead_contract(cls) -> None:
+        lookahead = cls.LOOKAHEAD
+        if not isinstance(lookahead, bool):
+            raise TypeError(f"{cls.__name__}.LOOKAHEAD must be a boolean")
+        allowed = cls.ALLOW_LOOKAHEAD_INPUTS
+        if not isinstance(allowed, frozenset) or not all(
+            isinstance(name, str) and name for name in allowed
+        ):
+            raise TypeError(
+                f"{cls.__name__}.ALLOW_LOOKAHEAD_INPUTS must be a frozenset of "
+                "non-empty strings"
+            )
 
     @property
     def requires_materialization(self) -> bool:

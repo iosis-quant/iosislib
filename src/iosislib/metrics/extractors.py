@@ -8,7 +8,6 @@ non-finite values, or insufficient rows all raise ``ValueError``/``TypeError``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isfinite
 
 import numpy as np
 import polars as pl

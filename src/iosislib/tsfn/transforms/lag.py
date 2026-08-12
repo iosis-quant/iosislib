@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import polars as pl
 
-from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
+from iosislib.core.tsfn import (
+    ColumnSignature,
+    FrameSignature,
+    TSFN,
+    TSFNConfig,
+    TimeAxis,
+    _column_signature_map,
+    _replace_column,
+)
 from iosislib.tsfn.transforms._validation import validate_column_name, validate_distinct_columns
 
 
@@ -28,7 +37,7 @@ class LagConfig(TSFNConfig):
 
 
 class Lag(TSFN[LagConfig]):
-    VERSION = "0.1.0"
+    VERSION = "0.2.0"
     CONFIG_CLS = LagConfig
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
@@ -43,11 +52,57 @@ class Lag(TSFN[LagConfig]):
         )
         return input_frame, output_frame
 
+    def resolve_signature(
+        self,
+        bound_input_columns: Mapping[str, ColumnSignature],
+    ) -> tuple[FrameSignature, FrameSignature]:
+        input_signature, output_signature = self.signature
+        input_columns = _column_signature_map(input_signature)
+        output_columns = _column_signature_map(output_signature)
+        input_name = self.parameters.input_column
+        output_name = self.parameters.output_column
+
+        bound_input = bound_input_columns.get(input_name)
+        if bound_input is None:
+            return self.signature
+
+        resolved_input = ColumnSignature(
+            input_columns[input_name].name,
+            input_columns[input_name].dtype,
+            bound_input.shape,
+        )
+        resolved_output = ColumnSignature(
+            output_columns[output_name].name,
+            output_columns[output_name].dtype,
+            bound_input.shape,
+        )
+        return (
+            FrameSignature(
+                time=input_signature.time,
+                columns=_replace_column(input_signature, input_name, resolved_input),
+            ),
+            FrameSignature(
+                time=output_signature.time,
+                columns=_replace_column(output_signature, output_name, resolved_output),
+            ),
+        )
+
     def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         if lf is None:
             raise ValueError("Lag requires an input frame")
         params = self.parameters
-        lag = pl.col(params.input_column).shift(params.periods).cast(pl.Float64).alias(
-            params.output_column
+        input_signature, output_signature = self.signature
+        if input_signature.time is None:
+            raise ValueError("Lag input signature must declare a time axis")
+        output_column = _column_signature_map(output_signature)[params.output_column]
+
+        val = pl.col(params.input_column)
+        lag = val.shift(params.periods)
+        if output_column.shape:
+            null_fill = pl.lit([None] * output_column.shape[0], dtype=output_column.physical_dtype)
+            lag = pl.when(lag.is_null()).then(null_fill).otherwise(lag)
+
+        return lf.sort(params.timestamp_column).select(
+            params.timestamp_column,
+            lag.cast(output_column.physical_dtype).alias(params.output_column),
         )
-        return lf.sort(params.timestamp_column).select(params.timestamp_column, lag)
