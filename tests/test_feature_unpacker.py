@@ -92,10 +92,12 @@ class VectorSource(TSFN):
                     [[float(row + column) for column in range(width)] for row in range(rows)],
                     dtype=pl.Array(pl.Float64, width),
                 ),
+                "outcome": [1.0 if row % 2 == 0 else 0.0 for row in range(rows)],
             },
             schema={
                 "timestamp": pl.Datetime,
                 "features": pl.Array(pl.Float64, width),
+                "outcome": pl.Float64,
             },
         ).lazy()
 
@@ -179,9 +181,9 @@ def test_feature_unpacker_config_validation_is_explicit() -> None:
         FeatureUnpackerConfig(features=True)
     with pytest.raises(ValueError, match="features must be a positive integer"):
         FeatureUnpackerConfig(features=0)
-    with pytest.raises(TypeError, match="input_column"):
+    with pytest.raises(ValueError, match="input_column must be non-empty"):
         FeatureUnpackerConfig(input_column="")
-    with pytest.raises(ValueError, match="distinct"):
+    with pytest.raises(ValueError, match="Duplicate column names"):
         FeatureUnpackerConfig(timestamp_column="features")
 
 
