@@ -242,6 +242,30 @@ def test_model_policy_retrains_only_on_earlier_resolved_labels() -> None:
     assert result.get_column("order").to_list()[:3] == [[0.0], [0.0], [0.2]]
 
 
+def test_model_policy_purges_trailing_labels_at_retraining_boundaries() -> None:
+    def run(purge_window: int) -> list[list[float]]:
+        model_policy = OrderModelPolicy(
+            model=VectorWeightModel(weights=(0.0,)),
+            scheduler=EveryNTicksScheduler(3),
+            splitter=ChronologicalSplitter(purge_window=purge_window),
+            feature_shape=(1,),
+            target_shape=(1,),
+            history_rows=100,
+            seed=11,
+        )
+        values = labelled_frame(
+            [[1.0], [1.0], [1.0], [1.0]],
+            [[1.0], [2.0], [3.0], [4.0]],
+        )
+        return function(model_policy).batch(values).get_column("order").to_list()
+
+    # At the row-3 boundary the buffer holds targets [1, 2, 3]. Purge drops the
+    # trailing row (label realized only at the boundary) so the fitted mean is
+    # 1.5; without a purge the model trains on all three and sizes 2.0.
+    assert run(purge_window=1) == [[0.0], [0.0], [0.0], [1.5]]
+    assert run(purge_window=0) == [[0.0], [0.0], [0.0], [2.0]]
+
+
 def test_model_policy_uses_metrics_at_scheduler_check_boundaries() -> None:
     model_policy = OrderModelPolicy(
         model=VectorWeightModel(weights=(0.0,)),

@@ -223,7 +223,12 @@ class DatasetSplitter(abc.ABC):
 
 @dataclass(frozen=True)
 class ChronologicalSplitter(DatasetSplitter):
-    """Tail holdouts over the row order established by the feature graph."""
+    """Tail holdouts over the row order established by the feature graph.
+
+    ``purge_window`` treats the final rows of the input as label-unavailable:
+    they are excluded from the whole split because their targets only become
+    observable after a retraining boundary.
+    """
 
     validation_size: int | float = 0
     test_size: int | float = 0
@@ -231,6 +236,7 @@ class ChronologicalSplitter(DatasetSplitter):
     batch_size: int | None = None
     shuffle_train: bool = False
     drop_last: bool = False
+    purge_window: int = 0
 
     def __post_init__(self) -> None:
         for name in ("validation_size", "test_size"):
@@ -243,6 +249,12 @@ class ChronologicalSplitter(DatasetSplitter):
                 raise ValueError(f"{name} fraction must be in [0, 1)")
         if isinstance(self.gap, bool) or not isinstance(self.gap, int) or self.gap < 0:
             raise ValueError("gap must be a non-negative integer")
+        if (
+            isinstance(self.purge_window, bool)
+            or not isinstance(self.purge_window, int)
+            or self.purge_window < 0
+        ):
+            raise ValueError("purge_window must be a non-negative integer")
         if self.batch_size is not None and (
             isinstance(self.batch_size, bool)
             or not isinstance(self.batch_size, int)
@@ -264,6 +276,10 @@ class ChronologicalSplitter(DatasetSplitter):
 
     def _split(self, frame: pl.DataFrame, *, seed: int) -> DatasetSplit:
         del seed
+        if self.purge_window >= frame.height:
+            raise ValueError("purge_window leaves no training rows")
+        if self.purge_window:
+            frame = frame.slice(0, frame.height - self.purge_window)
         validation_size = self._size(self.validation_size, frame.height)
         test_size = self._size(self.test_size, frame.height)
         cursor = frame.height
@@ -700,6 +716,7 @@ def splitter_from_declaration(
         "batch_size",
         "shuffle_train",
         "drop_last",
+        "purge_window",
     }
     _reject_keys(value, allowed, "splitter")
     return ChronologicalSplitter(
@@ -709,6 +726,7 @@ def splitter_from_declaration(
         batch_size=value.get("batch_size"),
         shuffle_train=value.get("shuffle_train", False),
         drop_last=value.get("drop_last", False),
+        purge_window=value.get("purge_window", 0),
     )
 
 

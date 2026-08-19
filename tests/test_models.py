@@ -470,6 +470,10 @@ def test_splitter_declarations_normalize_to_objects() -> None:
         ChronologicalSplitter(test_size=2),
         default=ChronologicalSplitter(),
     ) == ChronologicalSplitter(test_size=2)
+    assert splitter_from_declaration(
+        {"validation_size": 0.1, "purge_window": 3},
+        default=ChronologicalSplitter(),
+    ) == ChronologicalSplitter(validation_size=0.1, purge_window=3)
     with pytest.raises(ValueError, match="Unexpected keys"):
         splitter_from_declaration(
             {"validation_size": 0.2, "bogus": 1},

@@ -158,7 +158,15 @@ splitter:
   batch_size: null
   shuffle_train: false
   drop_last: false
+  purge_window: 0         # rows excluded from the split: their targets are
+                          # not yet observable at the retraining boundary
 ```
+
+`purge_window` drops the final rows of the historical prefix before the split.
+It must equal the number of rows the `target` column looks ahead (for example
+the horizon of a `transform.lead` producing a forward return); those rows'
+labels are only realized after the retraining boundary, so the model training
+on them would leak the future. A value of `0` disables purging.
 
 An omitted `splitter` uses the operation's default
 (`{ validation_size: 0.2 }`).

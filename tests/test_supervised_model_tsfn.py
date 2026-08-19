@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from collections.abc import Mapping
@@ -184,6 +184,37 @@ def test_chronological_splitter_rejects_destructive_splits() -> None:
         )
     with pytest.raises(ValueError, match="finite batch_size"):
         ChronologicalSplitter(drop_last=True)
+
+
+def test_chronological_splitter_purges_the_trailing_label_window() -> None:
+    datasets = ChronologicalSplitter(
+        validation_size=2,
+        test_size=2,
+        gap=1,
+        purge_window=2,
+    ).split(supervised_frame(10))
+
+    assert collect(datasets.train)["target"].to_list() == [0.0, 2.0]
+    assert collect(datasets.validation)["target"].to_list() == [6.0, 8.0]
+    assert collect(datasets.test)["target"].to_list() == [12.0, 14.0]
+
+
+def test_chronological_splitter_purge_applies_to_train_only_splits() -> None:
+    datasets = ChronologicalSplitter(purge_window=2).split(supervised_frame(5))
+
+    assert collect(datasets.train)["target"].to_list() == [0.0, 2.0, 4.0]
+    assert datasets.train.row_count == 3
+
+
+def test_chronological_splitter_rejects_an_exhaustive_purge_window() -> None:
+    with pytest.raises(ValueError, match="purge_window leaves no training rows"):
+        ChronologicalSplitter(purge_window=5).split(supervised_frame(5))
+
+
+@pytest.mark.parametrize("purge_window", [True, -1, 1.5, "2"])
+def test_chronological_splitter_rejects_invalid_purge_window(purge_window) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        ChronologicalSplitter(purge_window=purge_window)
 
 
 class BadSplitter(DatasetSplitter):
@@ -770,7 +801,26 @@ def test_scheduler_and_splitter_configuration_participate_in_node_identity() -> 
     assert every_three.ID != every_four.ID
 
 
-def _lead_target_model(observations: Node) -> Node:
+def test_splitter_purge_window_participates_in_node_identity() -> None:
+    default = build_graph()
+    purged = build_graph(
+        splitter=ChronologicalSplitter(
+            validation_size=1,
+            test_size=1,
+            batch_size=2,
+            purge_window=1,
+        )
+    )
+
+    assert default.ID != purged.ID
+
+
+def _lead_target_model(
+    observations: Node,
+    *,
+    scheduler: Scheduler = None,
+    splitter: DatasetSplitter = None,
+) -> Node:
     features = Node(
         PackFeatures,
         bindings={
@@ -793,8 +843,8 @@ def _lead_target_model(observations: Node) -> Node:
         MeanModelTSFN,
         bindings={"features": features.features, "target": target.target},
         parameters={
-            "scheduler": FrozenScheduler(),
-            "splitter": ChronologicalSplitter(),
+            "scheduler": FrozenScheduler() if scheduler is None else scheduler,
+            "splitter": ChronologicalSplitter() if splitter is None else splitter,
         },
         null_policies={"target": "drop"},
         name="walk_forward_mean",
@@ -821,6 +871,32 @@ def test_lead_generated_target_feeds_the_supervised_model() -> None:
 
     assert result.columns == ["timestamp", "prediction"]
     assert result.height == 8
+
+
+def test_walk_forward_purges_the_lead_window_at_retrain_boundaries() -> None:
+    data = example_data()
+    observations = Node(
+        ObservationSource,
+        parameters={
+            "timestamps": data.timestamps,
+            "factor_a": data.factor_a,
+            "factor_b": data.factor_b,
+            "outcomes": data.outcomes,
+        },
+        name="observations",
+    )
+    model = _lead_target_model(
+        observations,
+        scheduler=EveryNTicksScheduler(4),
+        splitter=ChronologicalSplitter(purge_window=1),
+    )
+    result = Graph(model).execute()
+
+    # The lead target drains to 8 rows: indices 0..7 with targets
+    # outcome[1..8] = [1, 1, 1, 9, 9, 9, 9, 9]. Retraining at row 4 must
+    # exclude row 3 (whose label is outcome[4]) because it is only realized
+    # at the boundary, so the segment-4 predictions use the mean of [1, 1, 1].
+    assert result["prediction"].to_list() == [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
 
 
 def test_lookahead_cannot_feed_supervised_features() -> None:

@@ -54,6 +54,9 @@ nodes:
         every: 100
       splitter:
         validation_size: 0.2
+        # The target is a forward return realized `purge_window` rows later;
+        # those rows must not be used for training at each retrain boundary.
+        purge_window: 1
 
 outputs:
   prediction: model.prediction
