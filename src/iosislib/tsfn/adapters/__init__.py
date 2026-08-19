@@ -1,10 +1,19 @@
-﻿from iosislib.tsfn.adapters.local_sources import (
+from iosislib.tsfn.adapters.local_sources import (
     CSVSource,
     CSVSourceConfig,
     ParquetSource,
     ParquetSourceConfig,
     sha256_file,
     sha256_parquet_source,
+)
+from iosislib.tsfn.adapters.parquet_stream import (
+    ChunkManifest,
+    ParquetChunk,
+    StreamingParquetSource,
+    StreamingParquetSourceConfig,
+    build_parquet_chunk_manifest,
+    chunk_merkle_root,
+    merkle_sha256_parquet_source,
 )
 from iosislib.tsfn.adapters.polymarket import (
     PolymarketPriceHistory,
@@ -18,12 +27,19 @@ from iosislib.tsfn.adapters.yfinance import (
 __all__ = [
     "CSVSource",
     "CSVSourceConfig",
+    "ChunkManifest",
+    "ParquetChunk",
     "ParquetSource",
     "ParquetSourceConfig",
     "PolymarketPriceHistory",
     "PolymarketPriceHistoryConfig",
+    "StreamingParquetSource",
+    "StreamingParquetSourceConfig",
     "YFinanceOHLCV",
     "YFinanceOHLCVConfig",
+    "build_parquet_chunk_manifest",
+    "chunk_merkle_root",
+    "merkle_sha256_parquet_source",
     "sha256_file",
     "sha256_parquet_source",
 ]
