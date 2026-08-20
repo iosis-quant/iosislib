@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+import numpy as np
 import polars as pl
 import torch
 from torch import nn
@@ -98,6 +99,7 @@ def _validation_mse(
             target_width=target_width,
             seed=seed,
         ):
+            _require_finite_tensors(features, target)
             feature_tensor = torch.from_numpy(features)
             target_tensor = torch.from_numpy(target)
             prediction = model(feature_tensor)
@@ -110,6 +112,13 @@ def _validation_mse(
     return total_squared_error / total_values
 
 
+def _require_finite_tensors(features: np.ndarray, target: np.ndarray) -> None:
+    if not np.isfinite(features).all() or not np.isfinite(target).all():
+        raise ValueError(
+            "DenseMLP training data must contain only finite values"
+        )
+
+
 @dataclass(frozen=True, kw_only=True)
 class DenseMLPModel(SupervisedModel):
     """Immutable PyTorch dense-regression checkpoint.
@@ -119,13 +128,17 @@ class DenseMLPModel(SupervisedModel):
     from the bound target.
     """
 
-    VERSION = "0.2.0"
+    VERSION = "0.3.0"
 
     layers: tuple[int, ...]
     epochs: int = 100
     learning_rate: float = 1e-3
     weight_decay: float = 0.0
     state: ParameterState | None = None
+
+    @property
+    def is_trained(self) -> bool:
+        return self.state is not None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -180,6 +193,7 @@ class DenseMLPModel(SupervisedModel):
                     epoch=epoch,
                     seed=seed,
                 ):
+                    _require_finite_tensors(features, target)
                     saw_batch = True
                     feature_tensor = torch.from_numpy(features)
                     target_tensor = torch.from_numpy(target)
@@ -220,7 +234,7 @@ class DenseMLPModel(SupervisedModel):
         if self.state is None:
             return pl.Series(
                 "prediction",
-                [[0.0] * output_width for _ in range(len(features))],
+                [[float("nan")] * output_width for _ in range(len(features))],
                 dtype=pl.Array(pl.Float64, output_width),
             )
         values = feature_matrix(features, width=self.layers[0])
@@ -229,6 +243,8 @@ class DenseMLPModel(SupervisedModel):
         model.eval()
         with torch.no_grad():
             prediction = model(torch.from_numpy(values)).numpy()
+        if not np.isfinite(prediction).all():
+            raise ValueError("DenseMLPModel produced non-finite predictions")
         return pl.Series(
             "prediction",
             prediction,
@@ -294,7 +310,7 @@ class DenseMLPConfig(TSFNConfig):
 class DenseMLP(SupervisedModelTSFN):
     """Walk-forward PyTorch dense regression trained with MSE loss."""
 
-    VERSION = "0.2.0"
+    VERSION = "0.3.0"
     CONFIG_CLS = DenseMLPConfig
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:

@@ -378,6 +378,21 @@ class ModelPolicy(StatefulPolicy, ABC):
             self.feature_shape,
             "ModelPolicy features",
         )
+        target = _row_vector(state.target, self.target_shape, "ModelPolicy targets")
+        if not active_model.is_trained:
+            policy_state.buffer.append(feature_vector, target)
+            return (
+                Order(np.zeros(len(state.bid), dtype=np.float64)),
+                ModelPolicyState(
+                    active_model=active_model,
+                    buffer=policy_state.buffer,
+                    rows_seen=policy_state.rows_seen + 1,
+                    last_retrain_at=last_retrain_at,
+                    retrain_count=retrain_count,
+                    next_schedule_at=next_schedule_at,
+                    metrics=policy_state.metrics,
+                ),
+            )
         feature_values = (
             feature_vector.reshape((1, *self.feature_shape))
             if self.feature_shape

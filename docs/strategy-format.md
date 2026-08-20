@@ -97,7 +97,7 @@ An expanded input accepts:
 
 ## Model operations
 
-`model.light_gbm@0.2.0` and `model.dense_mlp@0.2.0` consume exactly two
+`model.light_gbm@0.3.0` and `model.dense_mlp@0.3.0` consume exactly two
 inputs and produce one output:
 
 - `features`: a `Vector[Float64]` column, normally the output of a

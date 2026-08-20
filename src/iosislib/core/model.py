@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import abc
 import hashlib
@@ -352,6 +352,16 @@ class Model(abc.ABC):
     @property
     def version(self) -> str:
         return self._validate_version()
+
+    @property
+    def is_trained(self) -> bool:
+        """Whether this checkpoint can produce a real prediction.
+
+        Checkpoints that have not been trained yet return ``False`` so a
+        walk-forward loop can refuse to emit model metrics for rows it has no
+        model for, instead of scoring against a placeholder prediction.
+        """
+        return True
 
     def predict(self, features: pl.Series) -> pl.Series:
         if not isinstance(features, pl.Series):
@@ -848,12 +858,14 @@ class SupervisedModelTSFN(BatchTSFN, abc.ABC):
                     f"{expected_prediction}, got {prediction.dtype}"
                 )
 
-            metrics = _normalize_metrics(
-                self.segment_metrics(
-                    segment.get_column(self.TARGET_COLUMN),
-                    prediction,
+            metrics = ()
+            if active_model.is_trained:
+                metrics = _normalize_metrics(
+                    self.segment_metrics(
+                        segment.get_column(self.TARGET_COLUMN),
+                        prediction,
+                    )
                 )
-            )
             outputs.append(
                 pl.DataFrame(
                     [

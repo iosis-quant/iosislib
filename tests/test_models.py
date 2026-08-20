@@ -387,6 +387,57 @@ def test_lightgbm_rejects_multi_output_targets() -> None:
         )
 
 
+def test_dense_mlp_rejects_nonfinite_checkpoint_predictions() -> None:
+    nan = float("nan")
+    model = DenseMLPModel(
+        layers=(1, 1),
+        epochs=1,
+        state=((nan,), (nan,)),
+    )
+    with pytest.raises(ValueError, match="non-finite predictions"):
+        model.predict(
+            pl.Series(
+                "features",
+                [[1.0], [2.0]],
+                dtype=pl.Array(pl.Float64, 1),
+            )
+        )
+
+
+def test_dense_mlp_rejects_nonfinite_training_data() -> None:
+    frame = regression_frame(rows=5).with_columns(
+        pl.Series(
+            "target",
+            [[float("nan")], [1.0], [2.0], [3.0], [4.0]],
+            dtype=pl.Array(pl.Float64, 1),
+        )
+    )
+    split = DatasetSplit(FrameDataset(frame, batch_size=5, shuffle=False))
+    model = DenseMLPModel(layers=(2, 1), epochs=1)
+    with pytest.raises(ValueError, match="finite values"):
+        model.fit(split, seed=0)
+
+
+def test_lightgbm_rejects_nonfinite_training_data() -> None:
+    pytest.importorskip("lightgbm")
+    frame = regression_frame(rows=5).with_columns(
+        pl.Series(
+            "target",
+            [[float("nan")], [1.0], [2.0], [3.0], [4.0]],
+            dtype=pl.Array(pl.Float64, 1),
+        )
+    )
+    split = DatasetSplit(FrameDataset(frame, batch_size=5, shuffle=False))
+    initial = LightGBMModel(
+        feature_width=2,
+        target_width=1,
+        num_boost_round=2,
+        min_data_in_leaf=1,
+    )
+    with pytest.raises(ValueError, match="finite values"):
+        initial.fit(split, seed=0)
+
+
 def test_lightgbm_tsfn_declares_widths_and_mse_metric() -> None:
     function = LightGBM(
         {
@@ -415,7 +466,7 @@ def test_lightgbm_tsfn_declares_widths_and_mse_metric() -> None:
             dtype=pl.Array(pl.Float64, 3),
         )
     )
-    assert prediction.to_list() == [[0.0]]
+    assert np.isnan(prediction.to_list()[0][0])
     assert function.segment_metrics(
         pl.Series([1.0, 3.0]),
         pl.Series([2.0, 1.0]),

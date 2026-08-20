@@ -39,11 +39,18 @@ def _import_lightgbm() -> Any:
     return lightgbm
 
 
+def _require_finite_arrays(features: np.ndarray, target: np.ndarray) -> None:
+    if not np.isfinite(features).all() or not np.isfinite(target).all():
+        raise ValueError(
+            "LightGBM training data must contain only finite values"
+        )
+
+
 @dataclass(frozen=True, kw_only=True)
 class LightGBMModel(SupervisedModel):
     """Immutable LightGBM single-output regression checkpoint."""
 
-    VERSION = "0.2.0"
+    VERSION = "0.3.0"
 
     feature_width: int
     target_width: int
@@ -54,6 +61,10 @@ class LightGBMModel(SupervisedModel):
     min_data_in_leaf: int = 20
     early_stopping_rounds: int = 0
     model_text: str | None = None
+
+    @property
+    def is_trained(self) -> bool:
+        return self.model_text is not None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -105,6 +116,7 @@ class LightGBMModel(SupervisedModel):
             target_width=self.target_width,
             seed=seed,
         )
+        _require_finite_arrays(train_features, train_target)
         train_data = lightgbm.Dataset(
             train_features,
             label=train_target.ravel(),
@@ -120,6 +132,7 @@ class LightGBMModel(SupervisedModel):
                 target_width=self.target_width,
                 seed=seed,
             )
+            _require_finite_arrays(validation_features, validation_target)
             validation_data = lightgbm.Dataset(
                 validation_features,
                 label=validation_target.ravel(),
@@ -176,7 +189,7 @@ class LightGBMModel(SupervisedModel):
         if self.model_text is None:
             return pl.Series(
                 "prediction",
-                [[0.0] * self.target_width for _ in range(len(features))],
+                [[float("nan")] * self.target_width for _ in range(len(features))],
                 dtype=pl.Array(pl.Float64, self.target_width),
             )
         lightgbm = _import_lightgbm()
@@ -186,6 +199,8 @@ class LightGBMModel(SupervisedModel):
             booster.predict(values),
             dtype=np.float64,
         ).reshape(-1, self.target_width)
+        if not np.isfinite(prediction).all():
+            raise ValueError("LightGBMModel produced non-finite predictions")
         return pl.Series(
             "prediction",
             prediction,
@@ -254,7 +269,7 @@ class LightGBMConfig(TSFNConfig):
 class LightGBM(SupervisedModelTSFN):
     """Walk-forward LightGBM regression using the L2/MSE objective."""
 
-    VERSION = "0.2.0"
+    VERSION = "0.3.0"
     CONFIG_CLS = LightGBMConfig
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
