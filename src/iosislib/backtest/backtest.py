@@ -121,13 +121,11 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         timestamps = frame.get_column(config.feed.time_axis.column)
 
         policy = config.policy
-        policy_stateful = isinstance(policy, StatefulPolicy)
         policy_state = self._initial_policy_state(policy)
 
         risk_policy = (
             config.risk_policy if config.risk_policy is not None else NO_OP_RISK
         )
-        risk_stateful = isinstance(risk_policy, StatefulRiskPolicy)
         risk_state = self._initial_risk_state(risk_policy)
 
         proposed_order = np.empty((rows, width), dtype=np.float64)
@@ -144,42 +142,24 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         running_balances = np.zeros(width, dtype=np.float64)
 
         _move_to = state.move_to
-        if policy_stateful:
-            _policy_decide = policy.decide_stateful
-        else:
-            _policy_decide = policy.decide
-        if risk_stateful:
-            _risk_decide = risk_policy.decide_stateful
-        else:
-            _risk_decide = risk_policy.decide
+        _policy_decide = policy.decide
+        _risk_decide = risk_policy.decide
         _execute = self._execute
 
         for row, timestamp in enumerate(timestamps):
             _move_to(timestamp, row)
-            if policy_stateful:
-                policy_state = _policy_decide(
-                    policy_state, state, running_cash, running_balances,
-                    proposed_order, row,
-                )
-            else:
-                _policy_decide(
-                    state, running_cash, running_balances, proposed_order, row,
-                )
-
-            if risk_stateful:
-                risk_reason, risk_state = _risk_decide(
-                    risk_state, state, proposed_order, running_cash,
-                    running_balances, order, row,
-                )
-            else:
-                risk_reason = _risk_decide(
-                    proposed_order, state, running_cash, running_balances,
-                    order, row,
-                )
+            policy_state = _policy_decide(
+                policy_state, state, running_cash, running_balances,
+                proposed_order, row,
+            )
+            risk_reason, risk_state = _risk_decide(
+                risk_state, state, proposed_order, running_cash,
+                running_balances, order, row,
+            )
             reason[row] = int(risk_reason)
 
             running_cash = _execute(
-                running_cash, running_balances, order[row], bid, ask,
+                running_cash, running_balances, order, bid, ask,
                 row, price, price_mask,
             )
             cash_col[row] = running_cash
@@ -284,26 +264,27 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
     def _execute(
         cash: float,
         balances: Array,
-        quantities: Array,
+        orders: Array,
         bid: Array,
         ask: Array,
         row: int,
         price: Array,
         price_mask: npt.NDArray[np.bool_],
     ) -> float:
-        if quantities.size < 8:
-            for asset, quantity in enumerate(quantities):
+        if orders.shape[1] < 8:
+            for asset in range(orders.shape[1]):
+                quantity = orders[row, asset]
                 if quantity >= 0.0:
                     cash -= quantity * ask[row, asset]
                 else:
                     cash -= quantity * bid[row, asset]
                 balances[asset] += quantity
             return cash
-        np.greater_equal(quantities, 0.0, out=price_mask)
+        np.greater_equal(orders[row], 0.0, out=price_mask)
         np.copyto(price, bid[row])
         np.copyto(price, ask[row], where=price_mask)
-        cash -= float(np.dot(quantities, price))
-        balances += quantities
+        cash -= float(np.dot(orders[row], price))
+        balances += orders[row]
         return cash
 
     def _validate_frame(self, frame: pl.DataFrame) -> None:

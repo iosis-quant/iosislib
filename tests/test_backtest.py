@@ -74,8 +74,8 @@ class InvalidQuoteFeed(Feed):
 class SignalOrderPolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
-        del cash, balances
+    def decide(self, policy_state, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
+        del policy_state, cash, balances
         orders[row] = state.information
 
 
@@ -83,8 +83,8 @@ class SignalOrderPolicy(Policy):
 class CashAwarePolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
-        del state, balances
+    def decide(self, policy_state, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
+        del policy_state, state, balances
         orders[row] = np.array([1.0 if cash == 100.0 else 2.0], dtype=np.float64)
 
 
@@ -92,8 +92,8 @@ class CashAwarePolicy(Policy):
 class WrongWidthPolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
-        del state, cash, balances
+    def decide(self, policy_state, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
+        del policy_state, state, cash, balances
         orders[row] = np.array([1.0, 2.0], dtype=np.float64)
 
 
@@ -101,8 +101,8 @@ class WrongWidthPolicy(Policy):
 class MixedEightAssetPolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
-        del state, cash, balances
+    def decide(self, policy_state, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
+        del policy_state, state, cash, balances
         orders[row] = np.array([1.0, -1.0] * 4, dtype=np.float64)
 
 
@@ -118,15 +118,7 @@ class CounterPolicy(StatefulPolicy):
     def initial_state(self) -> PolicyState:
         return CounterState()
 
-    def decide_stateful(
-        self,
-        policy_state: PolicyState,
-        state: MarketState,
-        cash: float,
-        balances: Array,
-        orders: Array,
-        row: int,
-    ) -> PolicyState:
+    def decide(self, policy_state, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> PolicyState:
         del state, cash, balances
         assert isinstance(policy_state, CounterState)
         orders[row] = float(policy_state.tick + 1)
@@ -140,15 +132,7 @@ class InvalidStatePolicy(StatefulPolicy):
     def initial_state(self) -> PolicyState:
         return None  # type: ignore[return-value]
 
-    def decide_stateful(
-        self,
-        policy_state: PolicyState,
-        state: MarketState,
-        cash: float,
-        balances: Array,
-        orders: Array,
-        row: int,
-    ) -> PolicyState:
+    def decide(self, policy_state, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> PolicyState:
         del policy_state, state, cash, balances, orders, row
         return PolicyState()
 
@@ -160,15 +144,7 @@ class InvalidNextStatePolicy(StatefulPolicy):
     def initial_state(self) -> PolicyState:
         return PolicyState()
 
-    def decide_stateful(
-        self,
-        policy_state: PolicyState,
-        state: MarketState,
-        cash: float,
-        balances: Array,
-        orders: Array,
-        row: int,
-    ) -> PolicyState:
+    def decide(self, policy_state, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> PolicyState:
         del policy_state, state, cash, balances, orders, row
         return None  # type: ignore[return-value]
 
@@ -177,8 +153,8 @@ class InvalidNextStatePolicy(StatefulPolicy):
 class MutatingBalancePolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
-        del state, cash
+    def decide(self, policy_state, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
+        del policy_state, state, cash
         balances[0] = 1.0
 
 
@@ -186,8 +162,8 @@ class MutatingBalancePolicy(Policy):
 class MutatingMarketPolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
-        del cash, balances
+    def decide(self, policy_state, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
+        del policy_state, cash, balances
         state.bid[0] = 1.0
 
 

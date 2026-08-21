@@ -33,9 +33,9 @@ class SignalPolicy(Policy):
     VERSION = "1.0.0"
 
     def decide(
-        self, state: MarketState, cash: float, balances: Array, orders: Array, row: int
+        self, policy_state, state: MarketState, cash: float, balances: Array, orders: Array, row: int
     ) -> None:
-        del cash, balances
+        del policy_state, cash, balances
         orders[row] = state.information
 
 

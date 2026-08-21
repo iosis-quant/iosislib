@@ -64,17 +64,18 @@ class RiskPolicy(ABC):
     @abstractmethod
     def decide(
         self,
-        proposed: Array,
+        risk_state: PolicyState | None,
         state: MarketState,
+        proposed: Array,
         cash: float,
         balances: Array,
         orders: Array,
         row: int,
-    ) -> RiskReason:
-        """Write the effective order into ``orders[row]`` and classify what changed.
+    ) -> tuple[RiskReason, PolicyState | None]:
+        """Write the effective order into ``orders[row]``.
 
         ``proposed`` is the full batch buffer of policy-requested quantities.
-        Implementations must not retain ``state``, ``balances``, or ``orders``.
+        Returns ``(reason, new_risk_state_or_None)``.
         """
 
     def to_dict(self) -> dict[str, Any]:
@@ -104,16 +105,17 @@ class NoOpRiskPolicy(RiskPolicy):
 
     def decide(
         self,
-        proposed: Array,
+        risk_state: PolicyState | None,
         state: MarketState,
+        proposed: Array,
         cash: float,
         balances: Array,
         orders: Array,
         row: int,
-    ) -> RiskReason:
-        del state, cash, balances
+    ) -> tuple[RiskReason, PolicyState | None]:
+        del risk_state, state, cash, balances
         orders[row] = proposed[row]
-        return RiskReason.NO_CHANGE
+        return (RiskReason.NO_CHANGE, None)
 
 
 NO_OP_RISK = NoOpRiskPolicy()
@@ -127,9 +129,9 @@ class StatefulRiskPolicy(RiskPolicy, ABC):
         """Return fresh state for one run; never retain it on the policy."""
 
     @abstractmethod
-    def decide_stateful(
+    def decide(
         self,
-        policy_state: PolicyState,
+        risk_state: PolicyState | None,
         state: MarketState,
         proposed: Array,
         cash: float,
@@ -137,19 +139,7 @@ class StatefulRiskPolicy(RiskPolicy, ABC):
         orders: Array,
         row: int,
     ) -> tuple[RiskReason, PolicyState]:
-        """Write the effective order into ``orders[row]`` and return reason plus state."""
-
-    def decide(
-        self,
-        proposed: Array,
-        state: MarketState,
-        cash: float,
-        balances: Array,
-        orders: Array,
-        row: int,
-    ) -> RiskReason:
-        del proposed, state, cash, balances, orders, row
-        raise TypeError("StatefulRiskPolicy must be driven via decide_stateful")
+        """Write effective order into ``orders[row]`` and return (reason, new_state)."""
 
 
 @dataclass(frozen=True)
@@ -168,31 +158,31 @@ class FractionalLimitPolicy(RiskPolicy):
 
     def decide(
         self,
-        proposed: Array,
+        risk_state: PolicyState | None,
         state: MarketState,
+        proposed: Array,
         cash: float,
         balances: Array,
         orders: Array,
         row: int,
-    ) -> RiskReason:
+    ) -> tuple[RiskReason, PolicyState | None]:
         equity = cash + float(np.dot(balances, state.bid))
         max_notional = self.fraction * equity
         target = orders[row]
         target[:] = proposed[row]
-        for index, quantity in enumerate(target):
-            if quantity == 0.0:
-                continue
-            price = state.ask[index] if quantity > 0.0 else state.bid[index]
-            if price <= 0.0:
-                raise ValueError("quote price must be positive")
-            if max_notional <= 0.0:
-                target[index] = 0.0
-                continue
-            projected = balances[index] + quantity
-            if abs(projected) * price > max_notional:
-                target_position = np.copysign(max_notional / price, projected)
-                target[index] = float(target_position - balances[index])
-        return _reason_for(proposed[row], target)
+        if max_notional <= 0.0:
+            target[:] = 0.0
+            return (_reason_for(proposed[row], target), None)
+        prices = np.where(target > 0.0, state.ask, state.bid)
+        projected = balances + target
+        notional = np.abs(projected) * prices
+        exceeds = (target != 0.0) & (notional > max_notional)
+        if exceeds.any():
+            target[exceeds] = (
+                np.copysign(max_notional / prices[exceeds], projected[exceeds])
+                - balances[exceeds]
+            )
+        return (_reason_for(proposed[row], target), None)
 
 
 @dataclass(frozen=True)
@@ -211,13 +201,14 @@ class FractionalKellyPolicy(RiskPolicy):
 
     def decide(
         self,
-        proposed: Array,
+        risk_state: PolicyState | None,
         state: MarketState,
+        proposed: Array,
         cash: float,
         balances: Array,
         orders: Array,
         row: int,
-    ) -> RiskReason:
+    ) -> tuple[RiskReason, PolicyState | None]:
         probabilities = np.asarray(state.information, dtype=np.float64)
         prices = np.asarray(state.ask, dtype=np.float64)
         if probabilities.shape != prices.shape:
@@ -239,7 +230,7 @@ class FractionalKellyPolicy(RiskPolicy):
             kelly = np.where((denominator > 0.0) & (kelly > 0.0), kelly, 0.0)
             stake_cash = kelly * self.custom_fraction * equity
             np.divide(stake_cash, prices, out=target)
-        return _reason_for(proposed[row], target)
+        return (_reason_for(proposed[row], target), None)
 
 
 __all__ = [

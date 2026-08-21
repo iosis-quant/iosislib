@@ -143,13 +143,13 @@ class Policy(ABC):
 
     @abstractmethod
     def decide(
-        self, state: MarketState, cash: float, balances: Array, orders: Array, row: int
-    ) -> None:
-        """Write the immediate order quantities into ``orders[row]``.
+        self, policy_state: PolicyState | None, state: MarketState, cash: float,
+        balances: Array, orders: Array, row: int,
+    ) -> PolicyState | None:
+        """Write order quantities into ``orders[row]``.
 
-        ``orders`` is the executor-owned (rows, width) batch buffer. Policies
-        must write their target quantities into ``orders[row]`` and must not
-        retain ``state``, ``balances``, or ``orders``.
+        ``policy_state`` is always ``None`` for stateless policies.
+        Stateful policies must return their successor ``PolicyState``.
         """
 
     def to_dict(self) -> dict[str, Any]:
@@ -179,22 +179,11 @@ class StatefulPolicy(Policy, ABC):
         """Return fresh state for one run; never retain it on the policy."""
 
     @abstractmethod
-    def decide_stateful(
-        self,
-        policy_state: PolicyState,
-        state: MarketState,
-        cash: float,
-        balances: Array,
-        orders: Array,
-        row: int,
+    def decide(
+        self, policy_state: PolicyState | None, state: MarketState, cash: float,
+        balances: Array, orders: Array, row: int,
     ) -> PolicyState:
         """Write order quantities into ``orders[row]`` and return successor state."""
-
-    def decide(
-        self, state: MarketState, cash: float, balances: Array, orders: Array, row: int
-    ) -> None:
-        del state, cash, balances, orders, row
-        raise TypeError("StatefulPolicy must be driven via decide_stateful")
 
 
 class FeatureBuffer:
@@ -343,9 +332,9 @@ class ModelPolicy(StatefulPolicy, ABC):
             ),
         )
 
-    def decide_stateful(
+    def decide(
         self,
-        policy_state: PolicyState,
+        policy_state: PolicyState | None,
         state: MarketState,
         cash: float,
         balances: Array,

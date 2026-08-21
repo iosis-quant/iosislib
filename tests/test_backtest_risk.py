@@ -63,8 +63,8 @@ def l1_feed(width: int = 1) -> L1Feed:
 class SignalOrderPolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
-        del cash, balances
+    def decide(self, policy_state, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
+        del policy_state, cash, balances
         orders[row] = state.information
 
 
@@ -227,9 +227,9 @@ class FirstTickZeroPolicy(StatefulRiskPolicy):
     def initial_state(self) -> PolicyState:
         return ZeroingState()
 
-    def decide_stateful(
+    def decide(
         self,
-        policy_state: PolicyState,
+        risk_state: PolicyState | None,
         state: MarketState,
         proposed: Array,
         cash: float,
@@ -238,15 +238,15 @@ class FirstTickZeroPolicy(StatefulRiskPolicy):
         row: int,
     ) -> tuple[RiskReason, PolicyState]:
         del state, cash, balances
-        assert isinstance(policy_state, ZeroingState)
+        assert isinstance(risk_state, ZeroingState)
         target = orders[row]
-        if policy_state.tick == 0:
+        if risk_state.tick == 0:
             target.fill(0.0)
             reason = RiskReason.ZEROED
         else:
             target[:] = proposed[row]
             reason = RiskReason.NO_CHANGE
-        return reason, ZeroingState(policy_state.tick + 1)
+        return reason, ZeroingState(risk_state.tick + 1)
 
 
 def test_stateful_risk_policy_state_is_fresh_for_each_execution() -> None:
@@ -316,14 +316,15 @@ class BadReturnRiskPolicy(RiskPolicy):
 
     def decide(
         self,
-        proposed: Array,
+        risk_state: PolicyState | None,
         state: MarketState,
+        proposed: Array,
         cash: float,
         balances: Array,
         orders: Array,
         row: int,
-    ) -> RiskReason:
-        del proposed, state, cash, balances, orders, row
+    ) -> tuple[RiskReason, PolicyState | None]:
+        del risk_state, proposed, state, cash, balances, orders, row
         return None  # type: ignore[return-value]
 
 
@@ -333,16 +334,17 @@ class WrongWidthRiskPolicy(RiskPolicy):
 
     def decide(
         self,
-        proposed: Array,
+        risk_state: PolicyState | None,
         state: MarketState,
+        proposed: Array,
         cash: float,
         balances: Array,
         orders: Array,
         row: int,
-    ) -> RiskReason:
-        del proposed, state, cash, balances
+    ) -> tuple[RiskReason, PolicyState | None]:
+        del risk_state, proposed, state, cash, balances
         orders[row] = np.array([1.0, 2.0], dtype=np.float64)
-        return RiskReason.CLAMPED
+        return (RiskReason.CLAMPED, None)
 
 
 @dataclass(frozen=True)
@@ -351,16 +353,17 @@ class MutatingBalanceRiskPolicy(RiskPolicy):
 
     def decide(
         self,
-        proposed: Array,
+        risk_state: PolicyState | None,
         state: MarketState,
+        proposed: Array,
         cash: float,
         balances: Array,
         orders: Array,
         row: int,
-    ) -> RiskReason:
-        del state, cash
+    ) -> tuple[RiskReason, PolicyState | None]:
+        del risk_state, proposed, state, cash
         balances[0] = 1.0
-        return RiskReason.NO_CHANGE
+        return (RiskReason.NO_CHANGE, None)
 
 
 @dataclass(frozen=True)
@@ -369,22 +372,23 @@ class MutatingMarketRiskPolicy(RiskPolicy):
 
     def decide(
         self,
-        proposed: Array,
+        risk_state: PolicyState | None,
         state: MarketState,
+        proposed: Array,
         cash: float,
         balances: Array,
         orders: Array,
         row: int,
-    ) -> RiskReason:
-        del proposed, cash, balances, orders, row
+    ) -> tuple[RiskReason, PolicyState | None]:
+        del risk_state, proposed, cash, balances, orders, row
         state.bid[0] = 1.0
-        return RiskReason.NO_CHANGE
+        return (RiskReason.NO_CHANGE, None)
 
 
 @pytest.mark.parametrize(
     ("risk_policy", "message"),
     (
-        (BadReturnRiskPolicy(), "int"),
+        (BadReturnRiskPolicy(), "cannot unpack"),
         (WrongWidthRiskPolicy(), "could not broadcast"),
     ),
 )
