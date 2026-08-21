@@ -67,7 +67,7 @@ for first_character, resolvers in tuple(_StrategyLoader.yaml_implicit_resolvers.
         not in {"tag:yaml.org,2002:bool", "tag:yaml.org,2002:timestamp"}
     ]
 
-_StrategyLoader.add_implicit_resolver(  # type: ignore[no-untyped-call]
+_StrategyLoader.add_implicit_resolver(
     "tag:yaml.org,2002:bool",
     re.compile(r"^(?:true|false)$", re.IGNORECASE),
     list("tTfF"),
