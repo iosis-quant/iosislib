@@ -128,9 +128,9 @@ class ScalarScoreModel(SupervisedModel):
 class ThresholdPolicy(OrderModelPolicy):
     """Interpret a binary-classification score as a one-unit long/short order."""
 
-    def interpret(self, prediction: Array) -> Order:
-        return Order(
-            np.where(prediction >= 0.5, 1.0, -1.0).astype(np.float64, copy=False)
+    def interpret(self, prediction: Array, orders: Array, row: int) -> None:
+        orders[row] = np.where(prediction >= 0.5, 1.0, -1.0).astype(
+            np.float64, copy=False
         )
 
 
@@ -286,7 +286,7 @@ def test_model_policy_uses_metrics_at_scheduler_check_boundaries() -> None:
 def test_model_policy_validates_model_output_width() -> None:
     values = labelled_frame([[1.0]], [[0.0]])
 
-    with pytest.raises(ValueError, match="Order width"):
+    with pytest.raises(ValueError, match="could not broadcast"):
         function(policy(WrongWidthModel())).batch(values)
 
 

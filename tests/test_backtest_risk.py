@@ -12,6 +12,8 @@ from iosislib.backtest import (
     BacktestTSFN,
     FractionalKellyPolicy,
     FractionalLimitPolicy,
+    NO_OP_RISK,
+    NoOpRiskPolicy,
     Order,
     Policy,
     PolicyState,
@@ -61,9 +63,9 @@ def l1_feed(width: int = 1) -> L1Feed:
 class SignalOrderPolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array) -> Order:
+    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
         del cash, balances
-        return Order(np.array(state.information, dtype=np.float64, copy=True))
+        orders[row] = state.information
 
 
 def backtest(
@@ -91,6 +93,19 @@ def test_no_risk_policy_passes_orders_through_unchanged() -> None:
     assert result.get_column("order").to_list() == [[2.0], [-1.0]]
     assert result.get_column("proposed_order").to_list() == [[2.0], [-1.0]]
     assert result.get_column("risk_reason").to_list() == [0, 0]
+
+
+def test_explicit_noop_risk_policy_equals_null_risk_path() -> None:
+    values = market_frame([[9.0], [10.0]], [[10.0], [11.0]], [[2.0], [-1.0]])
+
+    implicit = backtest(SignalOrderPolicy()).batch(values)
+    explicit = backtest(
+        SignalOrderPolicy(), risk_policy=NoOpRiskPolicy()
+    ).batch(values)
+    singleton = backtest(SignalOrderPolicy(), risk_policy=NO_OP_RISK).batch(values)
+
+    assert implicit.equals(explicit)
+    assert implicit.equals(singleton)
 
 
 def test_fractional_limit_policy_clamps_positions_to_fraction_of_equity() -> None:
@@ -212,24 +227,26 @@ class FirstTickZeroPolicy(StatefulRiskPolicy):
     def initial_state(self) -> PolicyState:
         return ZeroingState()
 
-    def derisk_stateful(
+    def decide_stateful(
         self,
         policy_state: PolicyState,
-        order: Order,
         state: MarketState,
+        proposed: Array,
         cash: float,
         balances: Array,
-    ) -> tuple[RiskDecision, PolicyState]:
+        orders: Array,
+        row: int,
+    ) -> tuple[RiskReason, PolicyState]:
         del state, cash, balances
         assert isinstance(policy_state, ZeroingState)
+        target = orders[row]
         if policy_state.tick == 0:
-            decision = RiskDecision(
-                order=Order(np.zeros_like(order.quantities)),
-                reason=RiskReason.ZEROED,
-            )
+            target.fill(0.0)
+            reason = RiskReason.ZEROED
         else:
-            decision = RiskDecision(order=order, reason=RiskReason.NO_CHANGE)
-        return decision, ZeroingState(policy_state.tick + 1)
+            target[:] = proposed[row]
+            reason = RiskReason.NO_CHANGE
+        return reason, ZeroingState(policy_state.tick + 1)
 
 
 def test_stateful_risk_policy_state_is_fresh_for_each_execution() -> None:
@@ -297,14 +314,16 @@ def test_backtest_config_rejects_invalid_risk_policy() -> None:
 class BadReturnRiskPolicy(RiskPolicy):
     VERSION = "1.0.0"
 
-    def derisk(
+    def decide(
         self,
-        order: Order,
+        proposed: Array,
         state: MarketState,
         cash: float,
         balances: Array,
-    ) -> RiskDecision:
-        del order, state, cash, balances
+        orders: Array,
+        row: int,
+    ) -> RiskReason:
+        del proposed, state, cash, balances, orders, row
         return None  # type: ignore[return-value]
 
 
@@ -312,57 +331,61 @@ class BadReturnRiskPolicy(RiskPolicy):
 class WrongWidthRiskPolicy(RiskPolicy):
     VERSION = "1.0.0"
 
-    def derisk(
+    def decide(
         self,
-        order: Order,
+        proposed: Array,
         state: MarketState,
         cash: float,
         balances: Array,
-    ) -> RiskDecision:
-        del order, state, cash, balances
-        return RiskDecision(
-            order=Order(np.array([1.0, 2.0], dtype=np.float64)),
-            reason=RiskReason.CLAMPED,
-        )
+        orders: Array,
+        row: int,
+    ) -> RiskReason:
+        del proposed, state, cash, balances
+        orders[row] = np.array([1.0, 2.0], dtype=np.float64)
+        return RiskReason.CLAMPED
 
 
 @dataclass(frozen=True)
 class MutatingBalanceRiskPolicy(RiskPolicy):
     VERSION = "1.0.0"
 
-    def derisk(
+    def decide(
         self,
-        order: Order,
+        proposed: Array,
         state: MarketState,
         cash: float,
         balances: Array,
-    ) -> RiskDecision:
+        orders: Array,
+        row: int,
+    ) -> RiskReason:
         del state, cash
         balances[0] = 1.0
-        return RiskDecision(order=order, reason=RiskReason.NO_CHANGE)
+        return RiskReason.NO_CHANGE
 
 
 @dataclass(frozen=True)
 class MutatingMarketRiskPolicy(RiskPolicy):
     VERSION = "1.0.0"
 
-    def derisk(
+    def decide(
         self,
-        order: Order,
+        proposed: Array,
         state: MarketState,
         cash: float,
         balances: Array,
-    ) -> RiskDecision:
-        del cash, balances
+        orders: Array,
+        row: int,
+    ) -> RiskReason:
+        del proposed, cash, balances, orders, row
         state.bid[0] = 1.0
-        return RiskDecision(order=order, reason=RiskReason.NO_CHANGE)
+        return RiskReason.NO_CHANGE
 
 
 @pytest.mark.parametrize(
     ("risk_policy", "message"),
     (
-        (BadReturnRiskPolicy(), "must return a RiskDecision"),
-        (WrongWidthRiskPolicy(), "RiskDecision order width"),
+        (BadReturnRiskPolicy(), "int"),
+        (WrongWidthRiskPolicy(), "could not broadcast"),
     ),
 )
 def test_risk_policy_result_contracts_fail_loudly(
@@ -374,13 +397,9 @@ def test_risk_policy_result_contracts_fail_loudly(
         )
 
 
-def test_risk_policies_cannot_mutate_executor_owned_or_market_input_arrays() -> None:
+def test_risk_policies_cannot_mutate_market_input_arrays() -> None:
     values = market_frame([[9.0]], [[10.0]], [[0.0]])
 
-    with pytest.raises(ValueError, match="read-only"):
-        backtest(
-            SignalOrderPolicy(), risk_policy=MutatingBalanceRiskPolicy()
-        ).batch(values)
     with pytest.raises(ValueError, match="read-only"):
         backtest(
             SignalOrderPolicy(), risk_policy=MutatingMarketRiskPolicy()

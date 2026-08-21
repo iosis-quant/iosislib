@@ -17,6 +17,8 @@ from iosislib.backtest.policy import (
 from iosislib.backtest.risk import (
     FractionalKellyPolicy,
     FractionalLimitPolicy,
+    NO_OP_RISK,
+    NoOpRiskPolicy,
     RiskDecision,
     RiskPolicy,
     RiskReason,
@@ -36,6 +38,8 @@ __all__ = [
     "MarketState",
     "ModelPolicy",
     "ModelPolicyState",
+    "NO_OP_RISK",
+    "NoOpRiskPolicy",
     "Order",
     "OrderModelPolicy",
     "Policy",

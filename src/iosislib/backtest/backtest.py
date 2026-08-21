@@ -7,6 +7,7 @@ from math import isfinite
 from typing import cast
 
 import numpy as np
+import numpy.typing as npt
 import polars as pl
 
 from iosislib.backtest.feeds import Feed
@@ -14,15 +15,13 @@ from iosislib.backtest.policy import (
     Array,
     MarketState,
     ModelPolicy,
-    Order,
     Policy,
     PolicyState,
     StatefulPolicy,
 )
 from iosislib.backtest.risk import (
-    RiskDecision,
+    NO_OP_RISK,
     RiskPolicy,
-    RiskReason,
     StatefulRiskPolicy,
 )
 from iosislib.core.tsfn import BatchTSFN, FrameSignature, TSFNConfig, _column_signatures
@@ -56,47 +55,10 @@ class BacktestConfig(TSFNConfig):
             raise TypeError("risk_policy must be a RiskPolicy or None")
 
 
-class _History:
-    """Append-only, preallocated history for one known-size batch input."""
-
-    def __init__(self, rows: int, width: int) -> None:
-        self._row = 0
-        self.cash = np.empty(rows, dtype=np.float64)
-        self.equity = np.empty(rows, dtype=np.float64)
-        self.balances = np.empty((rows, width), dtype=np.float64)
-        self.orders = np.empty((rows, width), dtype=np.float64)
-        self.proposed_orders = np.empty((rows, width), dtype=np.float64)
-        self.reasons = np.empty(rows, dtype=np.int8)
-
-    def append(
-        self,
-        cash: float,
-        balances: Array,
-        quantities: Array,
-        proposed_quantities: Array,
-        reason: RiskReason,
-        bid: Array,
-        market_row: int,
-    ) -> None:
-        if self._row >= len(self.cash):
-            raise RuntimeError("history capacity exhausted")
-        self.cash[self._row] = cash
-        self.equity[self._row] = cash + float(np.dot(balances, bid[market_row]))
-        self.balances[self._row] = balances
-        self.orders[self._row] = quantities
-        self.proposed_orders[self._row] = proposed_quantities
-        self.reasons[self._row] = int(reason)
-        self._row += 1
-
-    def assert_complete(self) -> None:
-        if self._row != len(self.cash):
-            raise RuntimeError("history is incomplete")
-
-
 class BacktestTSFN(BatchTSFN[BacktestConfig]):
     """Simulate policy orders against a feed's executable quotes, row by row."""
 
-    VERSION = "1.1.0"
+    VERSION = "1.2.0"
     CONFIG_CLS = BacktestConfig
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
@@ -139,6 +101,7 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         self._validate_frame(frame)
         config = self.parameters
         width = config.feed.width
+        rows = frame.height
         bid, ask = self._quotes(frame)
         feature_shape = (
             config.policy.feature_shape
@@ -157,48 +120,76 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         )
         timestamps = frame.get_column(config.feed.time_axis.column)
 
-        cash = config.initial_cash
-        balances = np.zeros(width, dtype=np.float64)
-        history = _History(frame.height, width)
+        policy = config.policy
+        policy_stateful = isinstance(policy, StatefulPolicy)
+        policy_state = self._initial_policy_state(policy)
+
+        risk_policy = (
+            config.risk_policy if config.risk_policy is not None else NO_OP_RISK
+        )
+        risk_stateful = isinstance(risk_policy, StatefulRiskPolicy)
+        risk_state = self._initial_risk_state(risk_policy)
+
+        proposed_order = np.empty((rows, width), dtype=np.float64)
+        order = np.empty((rows, width), dtype=np.float64)
+        balance = np.empty((rows, width), dtype=np.float64)
+        cash_col = np.empty(rows, dtype=np.float64)
+        reason = np.empty(rows, dtype=np.int8)
+
+        price = np.empty(width, dtype=np.float64)
+        price_mask: npt.NDArray[np.bool_] = np.empty(width, dtype=np.bool_)
+
         state = MarketState(information, bid, ask, target)
-        policy_state = self._initial_policy_state(config.policy)
-        risk_state = self._initial_risk_state(config.risk_policy)
+        running_cash = config.initial_cash
+        running_balances = np.zeros(width, dtype=np.float64)
+
         for row, timestamp in enumerate(timestamps):
             state.move_to(timestamp, row)
-            order, policy_state = self._decide(
-                config.policy, policy_state, state, cash, balances, width
+            if policy_stateful:
+                assert policy_state is not None
+                policy_state = policy.decide_stateful(
+                    policy_state, state, running_cash, running_balances,
+                    proposed_order, row,
+                )
+            else:
+                policy.decide(
+                    state, running_cash, running_balances, proposed_order, row,
+                )
+
+            if risk_stateful:
+                assert risk_state is not None
+                risk_reason, risk_state = risk_policy.decide_stateful(
+                    risk_state, state, proposed_order, running_cash,
+                    running_balances, order, row,
+                )
+            else:
+                risk_reason = risk_policy.decide(
+                    proposed_order, state, running_cash, running_balances,
+                    order, row,
+                )
+            reason[row] = int(risk_reason)
+
+            running_cash = self._execute(
+                running_cash, running_balances, order[row], bid, ask,
+                row, price, price_mask,
             )
-            proposed = order
-            decision, risk_state = self._apply_risk(
-                config.risk_policy, risk_state, order, state, cash, balances, width
-            )
-            order = decision.order
-            cash = self._execute(cash, balances, order, bid, ask, row)
-            history.append(
-                cash,
-                balances,
-                order.quantities,
-                proposed.quantities,
-                decision.reason,
-                bid,
-                row,
-            )
-        history.assert_complete()
+            cash_col[row] = running_cash
+            balance[row] = running_balances
+
+        equity = cash_col + np.einsum("ij,ij->i", balance, bid)
         return pl.DataFrame(
             [
                 timestamps,
-                numpy_to_series("cash", history.cash),
-                numpy_to_series("equity", history.equity),
-                self._history_array_series("balance", history.balances, width),
-                self._history_array_series("order", history.orders, width),
-                self._history_array_series(
-                    "proposed_order", history.proposed_orders, width
-                ),
-                pl.Series("risk_reason", history.reasons, dtype=pl.Int8),
+                numpy_to_series("cash", cash_col),
+                numpy_to_series("equity", equity),
+                self._array_series("balance", balance, width),
+                self._array_series("order", order, width),
+                self._array_series("proposed_order", proposed_order, width),
+                pl.Series("risk_reason", reason, dtype=pl.Int8),
             ]
         )
 
-    def _history_array_series(self, name: str, values: Array, width: int) -> pl.Series:
+    def _array_series(self, name: str, values: Array, width: int) -> pl.Series:
         if len(values) == 0:
             return pl.Series(name, [], dtype=pl.Array(pl.Float64, width))
         return numpy_to_series(name, values, shape=(width,))
@@ -271,7 +262,7 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
     def _initial_risk_state(
         risk_policy: RiskPolicy | None,
     ) -> PolicyState | None:
-        if not isinstance(risk_policy, StatefulRiskPolicy):
+        if risk_policy is None or not isinstance(risk_policy, StatefulRiskPolicy):
             return None
         risk_state = risk_policy.initial_state()
         if not isinstance(risk_state, PolicyState):
@@ -280,100 +271,17 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
             )
         return risk_state
 
-    @classmethod
-    def _decide(
-        cls,
-        policy: Policy,
-        policy_state: PolicyState | None,
-        state: MarketState,
-        cash: float,
-        balances: Array,
-        width: int,
-    ) -> tuple[Order, PolicyState | None]:
-        balances.setflags(write=False)
-        try:
-            if isinstance(policy, StatefulPolicy):
-                if policy_state is None:
-                    raise RuntimeError("StatefulPolicy requires an initial PolicyState")
-                result = policy.decide_stateful(policy_state, state, cash, balances)
-                if not isinstance(result, tuple) or len(result) != 2:
-                    raise TypeError(
-                        "StatefulPolicy.decide_stateful must return (Order, PolicyState)"
-                    )
-                order, next_state = result
-                if not isinstance(next_state, PolicyState):
-                    raise TypeError(
-                        "StatefulPolicy.decide_stateful must return a PolicyState"
-                    )
-            else:
-                order = policy.decide(state, cash, balances)
-                next_state = None
-        finally:
-            balances.setflags(write=True)
-        return cls._order(order, width), next_state
-
-    @classmethod
-    def _apply_risk(
-        cls,
-        risk_policy: RiskPolicy | None,
-        risk_state: PolicyState | None,
-        order: Order,
-        state: MarketState,
-        cash: float,
-        balances: Array,
-        width: int,
-    ) -> tuple[RiskDecision, PolicyState | None]:
-        if risk_policy is None:
-            return RiskDecision(order=order, reason=RiskReason.NO_CHANGE), None
-        balances.setflags(write=False)
-        try:
-            if isinstance(risk_policy, StatefulRiskPolicy):
-                if risk_state is None:
-                    raise RuntimeError(
-                        "StatefulRiskPolicy requires an initial PolicyState"
-                    )
-                result = risk_policy.derisk_stateful(
-                    risk_state, order, state, cash, balances
-                )
-                if not isinstance(result, tuple) or len(result) != 2:
-                    raise TypeError(
-                        "StatefulRiskPolicy.derisk_stateful must return "
-                        "(RiskDecision, PolicyState)"
-                    )
-                decision, next_state = result
-                if not isinstance(next_state, PolicyState):
-                    raise TypeError(
-                        "StatefulRiskPolicy.derisk_stateful must return a "
-                        "PolicyState"
-                    )
-            else:
-                decision = risk_policy.derisk(order, state, cash, balances)
-                next_state = None
-        finally:
-            balances.setflags(write=True)
-        return cls._risk_decision(decision, width), next_state
-
-    @staticmethod
-    def _risk_decision(value: RiskDecision, width: int) -> RiskDecision:
-        if not isinstance(value, RiskDecision):
-            raise TypeError("RiskPolicy.derisk must return a RiskDecision")
-        if len(value.order.quantities) != width:
-            raise ValueError(f"RiskDecision order width must be {width}")
-        return value
-
-    @staticmethod
-    def _order(value: Order, width: int) -> Order:
-        if not isinstance(value, Order):
-            raise TypeError("Policy.decide must return an Order")
-        if len(value.quantities) != width:
-            raise ValueError(f"Order width must be {width}")
-        return value
-
     @staticmethod
     def _execute(
-        cash: float, balances: Array, order: Order, bid: Array, ask: Array, row: int
+        cash: float,
+        balances: Array,
+        quantities: Array,
+        bid: Array,
+        ask: Array,
+        row: int,
+        price: Array,
+        price_mask: npt.NDArray[np.bool_],
     ) -> float:
-        quantities = order.quantities
         if quantities.size < 8:
             for asset, quantity in enumerate(quantities):
                 if quantity >= 0.0:
@@ -382,8 +290,10 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
                     cash -= quantity * bid[row, asset]
                 balances[asset] += quantity
             return cash
-        prices = np.where(quantities >= 0.0, ask[row], bid[row])
-        cash -= float(np.dot(quantities, prices))
+        np.greater_equal(quantities, 0.0, out=price_mask)
+        np.copyto(price, bid[row])
+        np.copyto(price, ask[row], where=price_mask)
+        cash -= float(np.dot(quantities, price))
         balances += quantities
         return cash
 

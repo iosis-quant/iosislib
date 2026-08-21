@@ -24,7 +24,11 @@ class RiskReason(IntEnum):
 
 @dataclass(frozen=True)
 class RiskDecision:
-    """The risk-adjusted result for one tick: an order plus its reason."""
+    """The risk-adjusted result for one tick: an order plus its reason.
+
+    A passive value type for analytics and serialization; the backtest loop
+    itself never constructs decisions and instead reasons are written per row.
+    """
 
     order: Order
     modified: bool = True
@@ -40,16 +44,15 @@ class RiskDecision:
         object.__setattr__(self, "modified", self.reason is not RiskReason.NO_CHANGE)
 
 
-def _decision(original: Array, effective: Array) -> RiskDecision:
-    """Classify an effective order against the proposed one into a RiskDecision."""
-    if original.shape != effective.shape:
+def _reason_for(proposed: Array, effective: Array) -> RiskReason:
+    """Classify an effective order against the proposed one."""
+    if proposed.shape != effective.shape:
         raise ValueError("effective order must match the proposed order width")
-    order = Order(np.ascontiguousarray(effective))
-    if np.array_equal(original, effective):
-        return RiskDecision(order=order, reason=RiskReason.NO_CHANGE)
+    if np.array_equal(proposed, effective):
+        return RiskReason.NO_CHANGE
     if not np.any(effective):
-        return RiskDecision(order=order, reason=RiskReason.ZEROED)
-    return RiskDecision(order=order, reason=RiskReason.CLAMPED)
+        return RiskReason.ZEROED
+    return RiskReason.CLAMPED
 
 
 class RiskPolicy(ABC):
@@ -59,17 +62,19 @@ class RiskPolicy(ABC):
     VERSION: ClassVar[str]
 
     @abstractmethod
-    def derisk(
+    def decide(
         self,
-        order: Order,
+        proposed: Array,
         state: MarketState,
         cash: float,
         balances: Array,
-    ) -> RiskDecision:
-        """Return the effective order: as-is, clamped, or clamped to zero.
+        orders: Array,
+        row: int,
+    ) -> RiskReason:
+        """Write the effective order into ``orders[row]`` and classify what changed.
 
-        ``balances`` is executor-owned persistent storage and is read-only while
-        the method runs. Implementations must not retain ``state`` or balances.
+        ``proposed`` is the full batch buffer of policy-requested quantities.
+        Implementations must not retain ``state``, ``balances``, or ``orders``.
         """
 
     def to_dict(self) -> dict[str, Any]:
@@ -91,6 +96,29 @@ class RiskPolicy(ABC):
         return _canonical_json(self.to_dict())
 
 
+@dataclass(frozen=True)
+class NoOpRiskPolicy(RiskPolicy):
+    """Pass-through risk policy; the executor uses it when none is configured."""
+
+    VERSION = "1.0.0"
+
+    def decide(
+        self,
+        proposed: Array,
+        state: MarketState,
+        cash: float,
+        balances: Array,
+        orders: Array,
+        row: int,
+    ) -> RiskReason:
+        del state, cash, balances
+        orders[row] = proposed[row]
+        return RiskReason.NO_CHANGE
+
+
+NO_OP_RISK = NoOpRiskPolicy()
+
+
 class StatefulRiskPolicy(RiskPolicy, ABC):
     """A risk policy whose immutable state remains local to one execution."""
 
@@ -99,25 +127,29 @@ class StatefulRiskPolicy(RiskPolicy, ABC):
         """Return fresh state for one run; never retain it on the policy."""
 
     @abstractmethod
-    def derisk_stateful(
+    def decide_stateful(
         self,
         policy_state: PolicyState,
-        order: Order,
         state: MarketState,
+        proposed: Array,
         cash: float,
         balances: Array,
-    ) -> tuple[RiskDecision, PolicyState]:
-        """Return the risk decision and successor state for the current tick."""
+        orders: Array,
+        row: int,
+    ) -> tuple[RiskReason, PolicyState]:
+        """Write the effective order into ``orders[row]`` and return reason plus state."""
 
-    def derisk(
+    def decide(
         self,
-        order: Order,
+        proposed: Array,
         state: MarketState,
         cash: float,
         balances: Array,
-    ) -> RiskDecision:
-        del order, state, cash, balances
-        raise TypeError("StatefulRiskPolicy must be driven via derisk_stateful")
+        orders: Array,
+        row: int,
+    ) -> RiskReason:
+        del proposed, state, cash, balances, orders, row
+        raise TypeError("StatefulRiskPolicy must be driven via decide_stateful")
 
 
 @dataclass(frozen=True)
@@ -134,30 +166,33 @@ class FractionalLimitPolicy(RiskPolicy):
         if self.fraction <= 0.0 or self.fraction > 1.0:
             raise ValueError("fraction must be in (0, 1]")
 
-    def derisk(
+    def decide(
         self,
-        order: Order,
+        proposed: Array,
         state: MarketState,
         cash: float,
         balances: Array,
-    ) -> RiskDecision:
+        orders: Array,
+        row: int,
+    ) -> RiskReason:
         equity = cash + float(np.dot(balances, state.bid))
         max_notional = self.fraction * equity
-        quantities = order.quantities.copy()
-        for index, quantity in enumerate(quantities):
+        target = orders[row]
+        target[:] = proposed[row]
+        for index, quantity in enumerate(target):
             if quantity == 0.0:
                 continue
             price = state.ask[index] if quantity > 0.0 else state.bid[index]
             if price <= 0.0:
                 raise ValueError("quote price must be positive")
             if max_notional <= 0.0:
-                quantities[index] = 0.0
+                target[index] = 0.0
                 continue
             projected = balances[index] + quantity
             if abs(projected) * price > max_notional:
                 target_position = np.copysign(max_notional / price, projected)
-                quantities[index] = float(target_position - balances[index])
-        return _decision(order.quantities, quantities)
+                target[index] = float(target_position - balances[index])
+        return _reason_for(proposed[row], target)
 
 
 @dataclass(frozen=True)
@@ -174,14 +209,15 @@ class FractionalKellyPolicy(RiskPolicy):
         if self.custom_fraction <= 0.0 or self.custom_fraction > 1.0:
             raise ValueError("custom_fraction must be in (0, 1]")
 
-    def derisk(
+    def decide(
         self,
-        order: Order,
+        proposed: Array,
         state: MarketState,
         cash: float,
         balances: Array,
-    ) -> RiskDecision:
-        proposed = order.quantities
+        orders: Array,
+        row: int,
+    ) -> RiskReason:
         probabilities = np.asarray(state.information, dtype=np.float64)
         prices = np.asarray(state.ask, dtype=np.float64)
         if probabilities.shape != prices.shape:
@@ -193,21 +229,24 @@ class FractionalKellyPolicy(RiskPolicy):
         if (prices <= 0.0).any():
             raise ValueError("ask prices must be positive")
         equity = cash + float(np.dot(balances, state.bid))
+        target = orders[row]
         if equity <= 0.0:
-            effective = np.zeros_like(probabilities)
+            target.fill(0.0)
         else:
             denominator = 1.0 - prices
             with np.errstate(divide="ignore", invalid="ignore"):
                 kelly = probabilities - (1.0 - probabilities) * prices / denominator
             kelly = np.where((denominator > 0.0) & (kelly > 0.0), kelly, 0.0)
             stake_cash = kelly * self.custom_fraction * equity
-            effective = stake_cash / prices
-        return _decision(proposed, effective)
+            np.divide(stake_cash, prices, out=target)
+        return _reason_for(proposed[row], target)
 
 
 __all__ = [
     "FractionalKellyPolicy",
     "FractionalLimitPolicy",
+    "NO_OP_RISK",
+    "NoOpRiskPolicy",
     "RiskDecision",
     "RiskPolicy",
     "RiskReason",

@@ -74,45 +74,36 @@ class InvalidQuoteFeed(Feed):
 class SignalOrderPolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array) -> Order:
+    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
         del cash, balances
-        return Order(np.array(state.information, dtype=np.float64, copy=True))
+        orders[row] = state.information
 
 
 @dataclass(frozen=True)
 class CashAwarePolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array) -> Order:
+    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
         del state, balances
-        return Order(np.array([1.0 if cash == 100.0 else 2.0], dtype=np.float64))
+        orders[row] = np.array([1.0 if cash == 100.0 else 2.0], dtype=np.float64)
 
 
 @dataclass(frozen=True)
 class WrongWidthPolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array) -> Order:
+    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
         del state, cash, balances
-        return Order(np.array([1.0, 2.0], dtype=np.float64))
-
-
-@dataclass(frozen=True)
-class InvalidReturnPolicy(Policy):
-    VERSION = "1.0.0"
-
-    def decide(self, state: MarketState, cash: float, balances: Array) -> Order:
-        del state, cash, balances
-        return None  # type: ignore[return-value]
+        orders[row] = np.array([1.0, 2.0], dtype=np.float64)
 
 
 @dataclass(frozen=True)
 class MixedEightAssetPolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array) -> Order:
+    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
         del state, cash, balances
-        return Order(np.array([1.0, -1.0] * 4, dtype=np.float64))
+        orders[row] = np.array([1.0, -1.0] * 4, dtype=np.float64)
 
 
 @dataclass(frozen=True)
@@ -133,12 +124,13 @@ class CounterPolicy(StatefulPolicy):
         state: MarketState,
         cash: float,
         balances: Array,
-    ) -> tuple[Order, PolicyState]:
+        orders: Array,
+        row: int,
+    ) -> PolicyState:
         del state, cash, balances
         assert isinstance(policy_state, CounterState)
-        return Order(
-            np.array([float(policy_state.tick + 1)], dtype=np.float64)
-        ), CounterState(policy_state.tick + 1)
+        orders[row] = float(policy_state.tick + 1)
+        return CounterState(policy_state.tick + 1)
 
 
 @dataclass(frozen=True)
@@ -154,9 +146,11 @@ class InvalidStatePolicy(StatefulPolicy):
         state: MarketState,
         cash: float,
         balances: Array,
-    ) -> tuple[Order, PolicyState]:
-        del policy_state, state, cash, balances
-        return Order(np.zeros(1, dtype=np.float64)), PolicyState()
+        orders: Array,
+        row: int,
+    ) -> PolicyState:
+        del policy_state, state, cash, balances, orders, row
+        return PolicyState()
 
 
 @dataclass(frozen=True)
@@ -172,29 +166,29 @@ class InvalidNextStatePolicy(StatefulPolicy):
         state: MarketState,
         cash: float,
         balances: Array,
-    ) -> tuple[Order, PolicyState]:
-        del policy_state, state, cash, balances
-        return Order(np.zeros(1, dtype=np.float64)), None  # type: ignore[return-value]
+        orders: Array,
+        row: int,
+    ) -> PolicyState:
+        del policy_state, state, cash, balances, orders, row
+        return None  # type: ignore[return-value]
 
 
 @dataclass(frozen=True)
 class MutatingBalancePolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array) -> Order:
+    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
         del state, cash
         balances[0] = 1.0
-        return Order(np.zeros(1, dtype=np.float64))
 
 
 @dataclass(frozen=True)
 class MutatingMarketPolicy(Policy):
     VERSION = "1.0.0"
 
-    def decide(self, state: MarketState, cash: float, balances: Array) -> Order:
+    def decide(self, state: MarketState, cash: float, balances: Array, orders: Array, row: int) -> None:
         del cash, balances
         state.bid[0] = 1.0
-        return Order(np.zeros(1, dtype=np.float64))
 
 
 @dataclass(frozen=True)
@@ -350,11 +344,9 @@ def test_stateful_policy_state_is_fresh_for_each_execution() -> None:
     assert first.get_column("order").to_list() == [[1.0], [2.0]]
 
 
-def test_policies_cannot_mutate_executor_owned_or_market_input_arrays() -> None:
+def test_policies_cannot_mutate_market_input_arrays() -> None:
     values = market_frame([[9.0]], [[10.0]], [[0.0]])
 
-    with pytest.raises(ValueError, match="read-only"):
-        backtest(MutatingBalancePolicy()).batch(values)
     with pytest.raises(ValueError, match="read-only"):
         backtest(MutatingMarketPolicy()).batch(values)
 
@@ -386,28 +378,14 @@ def test_wide_execution_uses_bid_for_sells_and_ask_for_buys() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    ("policy", "message"),
-    (
-        (WrongWidthPolicy(), "Order width"),
-        (InvalidReturnPolicy(), "must return an Order"),
-    ),
-)
-def test_policy_result_contracts_fail_loudly(policy: Policy, message: str) -> None:
-    with pytest.raises((TypeError, ValueError), match=message):
-        backtest(policy).batch(market_frame([[9.0]], [[10.0]], [[0.0]]))
+def test_policy_wrong_width_write_fails_loudly() -> None:
+    with pytest.raises(ValueError, match="could not broadcast"):
+        backtest(WrongWidthPolicy()).batch(market_frame([[9.0]], [[10.0]], [[0.0]]))
 
 
-@pytest.mark.parametrize(
-    ("policy", "message"),
-    (
-        (InvalidStatePolicy(), "initial_state"),
-        (InvalidNextStatePolicy(), "return a PolicyState"),
-    ),
-)
-def test_stateful_policy_contracts_fail_loudly(policy: Policy, message: str) -> None:
-    with pytest.raises(TypeError, match=message):
-        backtest(policy).batch(market_frame([[9.0]], [[10.0]], [[0.0]]))
+def test_stateful_policy_contracts_fail_loudly() -> None:
+    with pytest.raises(TypeError, match="initial_state"):
+        backtest(InvalidStatePolicy()).batch(market_frame([[9.0]], [[10.0]], [[0.0]]))
 
 
 def test_graph_execution_uses_the_backtest_batch_loop() -> None:

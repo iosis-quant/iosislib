@@ -117,7 +117,11 @@ class PolicyState:
 
 @dataclass(frozen=True, eq=False)
 class Order:
-    """Immediate signed Float64 quantities in feed-venue universe order."""
+    """Immediate signed Float64 quantities in feed-venue universe order.
+
+    A passive value type for analytics and serialization; the backtest loop
+    itself never constructs orders and instead writes into pooled buffers.
+    """
 
     quantities: Array
 
@@ -128,8 +132,6 @@ class Order:
             raise ValueError("order quantities must be one-dimensional")
         if self.quantities.dtype != np.dtype(np.float64):
             raise TypeError("order quantities must have dtype float64")
-        if not np.isfinite(self.quantities).all():
-            raise ValueError("order quantities must be finite")
         self.quantities.setflags(write=False)
 
 
@@ -140,11 +142,14 @@ class Policy(ABC):
     VERSION: ClassVar[str]
 
     @abstractmethod
-    def decide(self, state: MarketState, cash: float, balances: Array) -> Order:
-        """Return the immediate order for the current tick.
+    def decide(
+        self, state: MarketState, cash: float, balances: Array, orders: Array, row: int
+    ) -> None:
+        """Write the immediate order quantities into ``orders[row]``.
 
-        ``balances`` is executor-owned persistent storage and is read-only while
-        the method runs. Implementations must not retain ``state`` or balances.
+        ``orders`` is the executor-owned (rows, width) batch buffer. Policies
+        must write their target quantities into ``orders[row]`` and must not
+        retain ``state``, ``balances``, or ``orders``.
         """
 
     def to_dict(self) -> dict[str, Any]:
@@ -180,11 +185,15 @@ class StatefulPolicy(Policy, ABC):
         state: MarketState,
         cash: float,
         balances: Array,
-    ) -> tuple[Order, PolicyState]:
-        """Return the order and successor state for the current tick."""
+        orders: Array,
+        row: int,
+    ) -> PolicyState:
+        """Write order quantities into ``orders[row]`` and return successor state."""
 
-    def decide(self, state: MarketState, cash: float, balances: Array) -> Order:
-        del state, cash, balances
+    def decide(
+        self, state: MarketState, cash: float, balances: Array, orders: Array, row: int
+    ) -> None:
+        del state, cash, balances, orders, row
         raise TypeError("StatefulPolicy must be driven via decide_stateful")
 
 
@@ -315,8 +324,8 @@ class ModelPolicy(StatefulPolicy, ABC):
             raise TypeError("seed must be an integer")
 
     @abstractmethod
-    def interpret(self, prediction: Array) -> Order:
-        """Translate one normalized model prediction into an immediate order."""
+    def interpret(self, prediction: Array, orders: Array, row: int) -> None:
+        """Translate one normalized model prediction into ``orders[row]``."""
 
     def prediction_metrics(self, prediction: Array, target: Array) -> MetricItems:
         """Return prediction metrics; subclasses may define task-specific metrics."""
@@ -340,7 +349,9 @@ class ModelPolicy(StatefulPolicy, ABC):
         state: MarketState,
         cash: float,
         balances: Array,
-    ) -> tuple[Order, PolicyState]:
+        orders: Array,
+        row: int,
+    ) -> PolicyState:
         del cash, balances
         if not isinstance(policy_state, ModelPolicyState):
             raise TypeError("ModelPolicy requires a ModelPolicyState")
@@ -381,17 +392,15 @@ class ModelPolicy(StatefulPolicy, ABC):
         target = _row_vector(state.target, self.target_shape, "ModelPolicy targets")
         if not active_model.is_trained:
             policy_state.buffer.append(feature_vector, target)
-            return (
-                Order(np.zeros(len(state.bid), dtype=np.float64)),
-                ModelPolicyState(
-                    active_model=active_model,
-                    buffer=policy_state.buffer,
-                    rows_seen=policy_state.rows_seen + 1,
-                    last_retrain_at=last_retrain_at,
-                    retrain_count=retrain_count,
-                    next_schedule_at=next_schedule_at,
-                    metrics=policy_state.metrics,
-                ),
+            orders[row].fill(0.0)
+            return ModelPolicyState(
+                active_model=active_model,
+                buffer=policy_state.buffer,
+                rows_seen=policy_state.rows_seen + 1,
+                last_retrain_at=last_retrain_at,
+                retrain_count=retrain_count,
+                next_schedule_at=next_schedule_at,
+                metrics=policy_state.metrics,
             )
         feature_values = (
             feature_vector.reshape((1, *self.feature_shape))
@@ -422,24 +431,19 @@ class ModelPolicy(StatefulPolicy, ABC):
             ) from error
         if not np.isfinite(prediction).all():
             raise ValueError("ModelPolicy predictions must be finite")
-        order = self.interpret(prediction)
-        if not isinstance(order, Order):
-            raise TypeError("ModelPolicy.interpret must return an Order")
+        self.interpret(prediction, orders, row)
 
         target = _row_vector(state.target, self.target_shape, "ModelPolicy targets")
         metrics = self.prediction_metrics(prediction, target)
         policy_state.buffer.append(feature_vector, target)
-        return (
-            order,
-            ModelPolicyState(
-                active_model=active_model,
-                buffer=policy_state.buffer,
-                rows_seen=policy_state.rows_seen + 1,
-                last_retrain_at=last_retrain_at,
-                retrain_count=retrain_count,
-                next_schedule_at=next_schedule_at,
-                metrics=metrics,
-            ),
+        return ModelPolicyState(
+            active_model=active_model,
+            buffer=policy_state.buffer,
+            rows_seen=policy_state.rows_seen + 1,
+            last_retrain_at=last_retrain_at,
+            retrain_count=retrain_count,
+            next_schedule_at=next_schedule_at,
+            metrics=metrics,
         )
 
 
@@ -447,8 +451,8 @@ class ModelPolicy(StatefulPolicy, ABC):
 class OrderModelPolicy(ModelPolicy):
     """Interpret the model's output vector as immediate signed order quantities."""
 
-    def interpret(self, prediction: Array) -> Order:
-        return Order(np.ascontiguousarray(prediction))
+    def interpret(self, prediction: Array, orders: Array, row: int) -> None:
+        orders[row] = np.ascontiguousarray(prediction)
 
 
 __all__ = [
