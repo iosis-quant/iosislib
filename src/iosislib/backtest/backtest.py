@@ -143,33 +143,42 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         running_cash = config.initial_cash
         running_balances = np.zeros(width, dtype=np.float64)
 
+        _move_to = state.move_to
+        if policy_stateful:
+            _policy_decide = policy.decide_stateful
+        else:
+            _policy_decide = policy.decide
+        if risk_stateful:
+            _risk_decide = risk_policy.decide_stateful
+        else:
+            _risk_decide = risk_policy.decide
+        _execute = self._execute
+
         for row, timestamp in enumerate(timestamps):
-            state.move_to(timestamp, row)
+            _move_to(timestamp, row)
             if policy_stateful:
-                assert policy_state is not None
-                policy_state = policy.decide_stateful(
+                policy_state = _policy_decide(
                     policy_state, state, running_cash, running_balances,
                     proposed_order, row,
                 )
             else:
-                policy.decide(
+                _policy_decide(
                     state, running_cash, running_balances, proposed_order, row,
                 )
 
             if risk_stateful:
-                assert risk_state is not None
-                risk_reason, risk_state = risk_policy.decide_stateful(
+                risk_reason, risk_state = _risk_decide(
                     risk_state, state, proposed_order, running_cash,
                     running_balances, order, row,
                 )
             else:
-                risk_reason = risk_policy.decide(
+                risk_reason = _risk_decide(
                     proposed_order, state, running_cash, running_balances,
                     order, row,
                 )
             reason[row] = int(risk_reason)
 
-            running_cash = self._execute(
+            running_cash = _execute(
                 running_cash, running_balances, order[row], bid, ask,
                 row, price, price_mask,
             )
