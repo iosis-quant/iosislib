@@ -27,7 +27,7 @@ class RiskDecision:
     """The risk-adjusted result for one tick: an order plus its reason.
 
     A passive value type for analytics and serialization; the backtest loop
-    itself never constructs decisions and instead reasons are written per row.
+    itself never constructs decisions.
     """
 
     order: Order
@@ -44,10 +44,11 @@ class RiskDecision:
         object.__setattr__(self, "modified", self.reason is not RiskReason.NO_CHANGE)
 
 
-def _reason_for(proposed: Array, effective: Array) -> RiskReason:
-    """Classify an effective order against the proposed one."""
-    if proposed.shape != effective.shape:
-        raise ValueError("effective order must match the proposed order width")
+def classify_reason(proposed: Array, effective: Array) -> RiskReason:
+    """Post-hoc classification: infer what a risk policy did to an order.
+
+    Not used in the hot loop. Provided for post-batch analytics and tracing.
+    """
     if np.array_equal(proposed, effective):
         return RiskReason.NO_CHANGE
     if not np.any(effective):
@@ -71,11 +72,11 @@ class RiskPolicy(ABC):
         balances: Array,
         orders: Array,
         row: int,
-    ) -> tuple[RiskReason, PolicyState | None]:
+    ) -> PolicyState | None:
         """Write the effective order into ``orders[row]``.
 
-        ``proposed`` is the full batch buffer of policy-requested quantities.
-        Returns ``(reason, new_risk_state_or_None)``.
+        No validation, no classification. Just write the quantities and return
+        the next risk state (or None for non-stateful policies).
         """
 
     def to_dict(self) -> dict[str, Any]:
@@ -112,10 +113,10 @@ class NoOpRiskPolicy(RiskPolicy):
         balances: Array,
         orders: Array,
         row: int,
-    ) -> tuple[RiskReason, PolicyState | None]:
+    ) -> PolicyState | None:
         del risk_state, state, cash, balances
         orders[row] = proposed[row]
-        return (RiskReason.NO_CHANGE, None)
+        return None
 
 
 NO_OP_RISK = NoOpRiskPolicy()
@@ -138,8 +139,8 @@ class StatefulRiskPolicy(RiskPolicy, ABC):
         balances: Array,
         orders: Array,
         row: int,
-    ) -> tuple[RiskReason, PolicyState]:
-        """Write effective order into ``orders[row]`` and return (reason, new_state)."""
+    ) -> PolicyState:
+        """Write effective order into ``orders[row]`` and return new state."""
 
 
 @dataclass(frozen=True)
@@ -165,14 +166,14 @@ class FractionalLimitPolicy(RiskPolicy):
         balances: Array,
         orders: Array,
         row: int,
-    ) -> tuple[RiskReason, PolicyState | None]:
+    ) -> PolicyState | None:
         equity = cash + float(np.dot(balances, state.bid))
         max_notional = self.fraction * equity
         target = orders[row]
         target[:] = proposed[row]
         if max_notional <= 0.0:
             target[:] = 0.0
-            return (_reason_for(proposed[row], target), None)
+            return None
         prices = np.where(target > 0.0, state.ask, state.bid)
         projected = balances + target
         notional = np.abs(projected) * prices
@@ -182,7 +183,7 @@ class FractionalLimitPolicy(RiskPolicy):
                 np.copysign(max_notional / prices[exceeds], projected[exceeds])
                 - balances[exceeds]
             )
-        return (_reason_for(proposed[row], target), None)
+        return None
 
 
 @dataclass(frozen=True)
@@ -208,29 +209,20 @@ class FractionalKellyPolicy(RiskPolicy):
         balances: Array,
         orders: Array,
         row: int,
-    ) -> tuple[RiskReason, PolicyState | None]:
-        probabilities = np.asarray(state.information, dtype=np.float64)
-        prices = np.asarray(state.ask, dtype=np.float64)
-        if probabilities.shape != prices.shape:
-            raise ValueError("information and ask must have equal width")
-        if not np.isfinite(probabilities).all():
-            raise ValueError("predicted probabilities must be finite")
-        if ((probabilities < 0.0) | (probabilities > 1.0)).any():
-            raise ValueError("predicted probabilities must be within [0, 1]")
-        if (prices <= 0.0).any():
-            raise ValueError("ask prices must be positive")
+    ) -> PolicyState | None:
+        probabilities = state.information
+        prices = state.ask
         equity = cash + float(np.dot(balances, state.bid))
         target = orders[row]
         if equity <= 0.0:
-            target.fill(0.0)
+            target[:] = 0.0
         else:
             denominator = 1.0 - prices
-            with np.errstate(divide="ignore", invalid="ignore"):
-                kelly = probabilities - (1.0 - probabilities) * prices / denominator
+            kelly = probabilities - (1.0 - probabilities) * prices / denominator
             kelly = np.where((denominator > 0.0) & (kelly > 0.0), kelly, 0.0)
             stake_cash = kelly * self.custom_fraction * equity
             np.divide(stake_cash, prices, out=target)
-        return (_reason_for(proposed[row], target), None)
+        return None
 
 
 __all__ = [
@@ -242,4 +234,5 @@ __all__ = [
     "RiskPolicy",
     "RiskReason",
     "StatefulRiskPolicy",
+    "classify_reason",
 ]

@@ -41,6 +41,7 @@ class BacktestConfig(TSFNConfig):
     policy: Policy
     initial_cash: float
     risk_policy: RiskPolicy | None = None
+    validate: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.feed, Feed):
@@ -92,13 +93,13 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
                     ("balance", pl.Float64, (width,)),
                     ("order", pl.Float64, (width,)),
                     ("proposed_order", pl.Float64, (width,)),
-                    ("risk_reason", pl.Int8),
                 ),
             ),
         )
 
     def batch(self, frame: pl.DataFrame) -> pl.DataFrame:
-        self._validate_frame(frame)
+        if self.parameters.validate:
+            self._validate_frame(frame)
         config = self.parameters
         width = config.feed.width
         rows = frame.height
@@ -132,7 +133,6 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         order = np.empty((rows, width), dtype=np.float64)
         balance = np.empty((rows, width), dtype=np.float64)
         cash_col = np.empty(rows, dtype=np.float64)
-        reason = np.empty(rows, dtype=np.int8)
 
         price = np.empty(width, dtype=np.float64)
         price_mask: npt.NDArray[np.bool_] = np.empty(width, dtype=np.bool_)
@@ -152,11 +152,10 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
                 policy_state, state, running_cash, running_balances,
                 proposed_order, row,
             )
-            risk_reason, risk_state = _risk_decide(
+            risk_state = _risk_decide(
                 risk_state, state, proposed_order, running_cash,
                 running_balances, order, row,
             )
-            reason[row] = int(risk_reason)
 
             running_cash = _execute(
                 running_cash, running_balances, order, bid, ask,
@@ -174,7 +173,6 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
                 self._array_series("balance", balance, width),
                 self._array_series("order", order, width),
                 self._array_series("proposed_order", proposed_order, width),
-                pl.Series("risk_reason", reason, dtype=pl.Int8),
             ]
         )
 

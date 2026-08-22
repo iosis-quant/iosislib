@@ -22,6 +22,7 @@ from iosislib.backtest import (
     RiskReason,
     StatefulRiskPolicy,
     Venue,
+    classify_reason,
 )
 from iosislib.backtest.feeds import L1Feed
 from iosislib.backtest.policy import Array, MarketState
@@ -74,6 +75,7 @@ def backtest(
     risk_policy: RiskPolicy | None = None,
     width: int = 1,
     initial_cash: float = 100.0,
+    validate: bool = True,
 ) -> BacktestTSFN:
     return BacktestTSFN(
         BacktestConfig(
@@ -81,6 +83,7 @@ def backtest(
             policy=policy,
             initial_cash=initial_cash,
             risk_policy=risk_policy,
+            validate=validate,
         )
     )
 
@@ -92,7 +95,6 @@ def test_no_risk_policy_passes_orders_through_unchanged() -> None:
 
     assert result.get_column("order").to_list() == [[2.0], [-1.0]]
     assert result.get_column("proposed_order").to_list() == [[2.0], [-1.0]]
-    assert result.get_column("risk_reason").to_list() == [0, 0]
 
 
 def test_explicit_noop_risk_policy_equals_null_risk_path() -> None:
@@ -118,7 +120,6 @@ def test_fractional_limit_policy_clamps_positions_to_fraction_of_equity() -> Non
     assert result.get_column("balance").to_list() == [[5.0]]
     assert result.get_column("cash").to_list() == [50.0]
     assert result.get_column("equity").to_list() == [95.0]
-    assert result.get_column("risk_reason").to_list() == [1]
 
 
 def test_fractional_limit_policy_clamps_only_exceeding_assets() -> None:
@@ -129,7 +130,6 @@ def test_fractional_limit_policy_clamps_only_exceeding_assets() -> None:
     )
 
     assert result.get_column("order").to_list() == [[5.0, 1.0]]
-    assert result.get_column("risk_reason").to_list() == [1]
 
 
 def test_fractional_limit_policy_no_change_when_within_limit() -> None:
@@ -138,7 +138,6 @@ def test_fractional_limit_policy_no_change_when_within_limit() -> None:
     ).batch(market_frame([[9.0]], [[10.0]], [[2.0]]))
 
     assert result.get_column("order").to_list() == [[2.0]]
-    assert result.get_column("risk_reason").to_list() == [0]
 
 
 def test_fractional_limit_policy_zeroes_orders_at_nonpositive_equity() -> None:
@@ -150,7 +149,6 @@ def test_fractional_limit_policy_zeroes_orders_at_nonpositive_equity() -> None:
 
     assert result.get_column("order").to_list() == [[0.0]]
     assert result.get_column("proposed_order").to_list() == [[20.0]]
-    assert result.get_column("risk_reason").to_list() == [2]
     assert result.get_column("cash").to_list() == [-10.0]
 
 
@@ -171,7 +169,6 @@ def test_fractional_kelly_policy_sizes_from_probability_and_ask() -> None:
     expected = 25.0 / 0.6
     assert result.get_column("order").to_list() == [[pytest.approx(expected)]]
     assert result.get_column("proposed_order").to_list() == [[0.7]]
-    assert result.get_column("risk_reason").to_list() == [1]
 
 
 def test_fractional_kelly_policy_scales_by_custom_fraction_and_is_deterministic() -> None:
@@ -198,15 +195,9 @@ def test_fractional_kelly_policy_zeroes_orders_without_edge() -> None:
     ).batch(market_frame([[0.5]], [[0.7]], [[0.5]]))
 
     assert result.get_column("order").to_list() == [[0.0]]
-    assert result.get_column("risk_reason").to_list() == [2]
 
 
-def test_fractional_kelly_policy_validates_probabilities_and_fraction() -> None:
-    function = backtest(
-        SignalOrderPolicy(), risk_policy=FractionalKellyPolicy(1.0)
-    )
-    with pytest.raises(ValueError, match="within \\[0, 1\\]"):
-        function.batch(market_frame([[0.5]], [[0.6]], [[1.5]]))
+def test_fractional_kelly_policy_validates_fraction() -> None:
     with pytest.raises(ValueError, match="finite"):
         FractionalKellyPolicy(float("nan"))
     with pytest.raises(ValueError, match=r"\(0, 1\]"):
@@ -236,17 +227,15 @@ class FirstTickZeroPolicy(StatefulRiskPolicy):
         balances: Array,
         orders: Array,
         row: int,
-    ) -> tuple[RiskReason, PolicyState]:
+    ) -> PolicyState:
         del state, cash, balances
         assert isinstance(risk_state, ZeroingState)
         target = orders[row]
         if risk_state.tick == 0:
             target.fill(0.0)
-            reason = RiskReason.ZEROED
         else:
             target[:] = proposed[row]
-            reason = RiskReason.NO_CHANGE
-        return reason, ZeroingState(risk_state.tick + 1)
+        return ZeroingState(risk_state.tick + 1)
 
 
 def test_stateful_risk_policy_state_is_fresh_for_each_execution() -> None:
@@ -259,7 +248,13 @@ def test_stateful_risk_policy_state_is_fresh_for_each_execution() -> None:
     assert first.equals(second)
     assert first.get_column("order").to_list() == [[0.0], [-1.0]]
     assert first.get_column("proposed_order").to_list() == [[2.0], [-1.0]]
-    assert first.get_column("risk_reason").to_list() == [2, 0]
+
+
+def test_classify_reason_posthoc() -> None:
+    proposed = np.array([2.0, -1.0])
+    assert classify_reason(proposed, proposed) == RiskReason.NO_CHANGE
+    assert classify_reason(proposed, np.zeros(2)) == RiskReason.ZEROED
+    assert classify_reason(proposed, np.array([2.0, -0.5])) == RiskReason.CLAMPED
 
 
 def test_risk_decision_derives_modified_from_reason() -> None:
@@ -323,9 +318,9 @@ class BadReturnRiskPolicy(RiskPolicy):
         balances: Array,
         orders: Array,
         row: int,
-    ) -> tuple[RiskReason, PolicyState | None]:
+    ) -> PolicyState | None:
         del risk_state, proposed, state, cash, balances, orders, row
-        return None  # type: ignore[return-value]
+        return None
 
 
 @dataclass(frozen=True)
@@ -341,10 +336,10 @@ class WrongWidthRiskPolicy(RiskPolicy):
         balances: Array,
         orders: Array,
         row: int,
-    ) -> tuple[RiskReason, PolicyState | None]:
+    ) -> PolicyState | None:
         del risk_state, proposed, state, cash, balances
         orders[row] = np.array([1.0, 2.0], dtype=np.float64)
-        return (RiskReason.CLAMPED, None)
+        return None
 
 
 @dataclass(frozen=True)
@@ -360,10 +355,10 @@ class MutatingBalanceRiskPolicy(RiskPolicy):
         balances: Array,
         orders: Array,
         row: int,
-    ) -> tuple[RiskReason, PolicyState | None]:
+    ) -> PolicyState | None:
         del risk_state, proposed, state, cash
         balances[0] = 1.0
-        return (RiskReason.NO_CHANGE, None)
+        return None
 
 
 @dataclass(frozen=True)
@@ -379,24 +374,15 @@ class MutatingMarketRiskPolicy(RiskPolicy):
         balances: Array,
         orders: Array,
         row: int,
-    ) -> tuple[RiskReason, PolicyState | None]:
+    ) -> PolicyState | None:
         del risk_state, proposed, cash, balances, orders, row
         state.bid[0] = 1.0
-        return (RiskReason.NO_CHANGE, None)
+        return None
 
 
-@pytest.mark.parametrize(
-    ("risk_policy", "message"),
-    (
-        (BadReturnRiskPolicy(), "cannot unpack"),
-        (WrongWidthRiskPolicy(), "could not broadcast"),
-    ),
-)
-def test_risk_policy_result_contracts_fail_loudly(
-    risk_policy: RiskPolicy, message: str
-) -> None:
-    with pytest.raises((TypeError, ValueError), match=message):
-        backtest(SignalOrderPolicy(), risk_policy=risk_policy).batch(
+def test_risk_wrong_width_fails_loudly() -> None:
+    with pytest.raises(ValueError, match="could not broadcast"):
+        backtest(SignalOrderPolicy(), risk_policy=WrongWidthRiskPolicy()).batch(
             market_frame([[9.0]], [[10.0]], [[0.0]])
         )
 
@@ -408,6 +394,12 @@ def test_risk_policies_cannot_mutate_market_input_arrays() -> None:
         backtest(
             SignalOrderPolicy(), risk_policy=MutatingMarketRiskPolicy()
         ).batch(values)
+
+
+def test_validate_false_skips_frame_validation() -> None:
+    values = market_frame([[9.0]], [[10.0]], [[0.0]])
+    result = backtest(SignalOrderPolicy(), validate=False).batch(values)
+    assert result.height == 1
 
 
 def test_backtest_graph_runs_with_a_risk_policy_bound() -> None:
@@ -448,4 +440,3 @@ def test_backtest_graph_runs_with_a_risk_policy_bound() -> None:
     result = Graph(simulation).execute()
 
     assert result.get_column("order").to_list() == [[5.0]]
-    assert result.get_column("risk_reason").to_list() == [1]

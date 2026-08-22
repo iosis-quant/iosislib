@@ -383,7 +383,6 @@ def test_graph_execution_uses_the_backtest_batch_loop() -> None:
         "balance",
         "order",
         "proposed_order",
-        "risk_reason",
     ]
     assert result.get_column("balance").to_list() == [[1.0], [0.0]]
 
@@ -448,6 +447,5 @@ def test_backtest_validates_input_schema_and_empty_batches() -> None:
         "balance": pl.Array(pl.Float64, 1),
         "order": pl.Array(pl.Float64, 1),
         "proposed_order": pl.Array(pl.Float64, 1),
-        "risk_reason": pl.Int8,
     }
     assert result.height == 0

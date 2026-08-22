@@ -23,6 +23,7 @@ from iosislib.backtest.risk import (
     RiskPolicy,
     RiskReason,
     StatefulRiskPolicy,
+    classify_reason,
 )
 from iosislib.backtest.venue import Venue
 
@@ -50,4 +51,5 @@ __all__ = [
     "StatefulPolicy",
     "StatefulRiskPolicy",
     "Venue",
+    "classify_reason",
 ]
