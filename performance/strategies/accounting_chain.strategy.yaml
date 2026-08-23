@@ -1,0 +1,54 @@
+# Benchmark: deep transform chain on accounting data
+# Tests multi-step pipeline: log → delta → pct_change
+format: iosis.strategy
+version: 0.1.0
+name: accounting-chain
+description: >
+  Deep transform chain on accounting revenue: log → delta → pct_change.
+  Measures multi-step pipeline overhead on financial statement data.
+
+nodes:
+  accounting:
+    op: source.csv_source
+    version: 0.2.0
+    params:
+      path: data/accounting.csv
+      content_sha256: d6830b937c0bdb8c49a96740cd8756e2ec8959bfa64bb46532466ec7ddde5cd8
+      schema:
+        time: timestamp
+        columns:
+          revenue: float64
+          cost: float64
+          profit: float64
+          assets: float64
+          liabilities: float64
+
+  log_revenue:
+    op: transform.log
+    version: 0.1.0
+    inputs:
+      value: accounting.revenue
+    params:
+      input_column: value
+      output_column: log
+
+  rev_delta:
+    op: transform.delta
+    version: 0.2.0
+    inputs:
+      value: log_revenue.log
+    params:
+      input_column: value
+      output_column: delta
+
+  rev_pct:
+    op: transform.pct_change
+    version: 0.1.0
+    inputs:
+      value: rev_delta.delta
+    params:
+      input_column: value
+      output_column: pct_change
+
+outputs:
+  rev_pct: rev_pct.pct_change

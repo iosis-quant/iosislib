@@ -1,0 +1,74 @@
+# Benchmark: deep 5-node pipeline on prices
+# Tests deep chain: log → delta → rolling_mean → ewm_mean → pct_change
+format: iosis.strategy
+version: 0.1.0
+name: full-pipeline
+description: >
+  Deep 5-node pipeline on price data: log → delta → rolling_mean → ewm_mean → pct_change.
+  Measures cumulative overhead of chained transforms on financial data.
+
+nodes:
+  prices:
+    op: source.csv_source
+    version: 0.2.0
+    params:
+      path: data/prices.csv
+      content_sha256: 1fd7ced1e5ebc179a05e2f297ce62af7c1ebbbf4aa0a3169c7d722b5a30f9761
+      schema:
+        time: timestamp
+        columns:
+          open: float64
+          high: float64
+          low: float64
+          close: float64
+          volume: int64
+
+  log_close:
+    op: transform.log
+    version: 0.1.0
+    inputs:
+      value: prices.close
+    params:
+      input_column: value
+      output_column: log
+
+  log_delta:
+    op: transform.delta
+    version: 0.2.0
+    inputs:
+      value: log_close.log
+    params:
+      input_column: value
+      output_column: delta
+
+  smoothed:
+    op: transform.rolling_mean
+    version: 0.1.0
+    inputs:
+      value: log_delta.delta
+    params:
+      input_column: value
+      output_column: rolling_mean
+      periods: 20
+
+  ewm_smoothed:
+    op: transform.ewm_mean
+    version: 0.1.0
+    inputs:
+      value: smoothed.rolling_mean
+    params:
+      input_column: value
+      output_column: ewm_mean
+      alpha: 0.05
+
+  final_pct:
+    op: transform.pct_change
+    version: 0.1.0
+    inputs:
+      value: ewm_smoothed.ewm_mean
+    params:
+      input_column: value
+      output_column: pct_change
+
+outputs:
+  final_pct: final_pct.pct_change

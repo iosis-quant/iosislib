@@ -1,0 +1,47 @@
+# Benchmark: EWM mean and std on sensor temperature data
+# Tests exponential weighted moving operations on IoT sensor data
+format: iosis.strategy
+version: 0.1.0
+name: sensor-ewm
+description: >
+  Exponential weighted mean and standard deviation on sensor temperature.
+  Measures EWM overhead on high-frequency IoT sensor data.
+
+nodes:
+  sensors:
+    op: source.csv_source
+    version: 0.2.0
+    params:
+      path: data/sensors.csv
+      content_sha256: 83c6813e461ef483a4d75f71d3fcb0b7f0a36fdedd91eb451fb8419711ada8a9
+      schema:
+        time: timestamp
+        columns:
+          temperature: float64
+          pressure: float64
+          humidity: float64
+          vibration: float64
+
+  temp_ewm_mean:
+    op: transform.ewm_mean
+    version: 0.1.0
+    inputs:
+      value: sensors.temperature
+    params:
+      input_column: value
+      output_column: ewm_mean
+      alpha: 0.1
+
+  temp_ewm_std:
+    op: transform.ewm_std
+    version: 0.1.0
+    inputs:
+      value: sensors.temperature
+    params:
+      input_column: value
+      output_column: ewm_std
+      alpha: 0.1
+
+outputs:
+  temp_ewm_mean: temp_ewm_mean.ewm_mean
+  temp_ewm_std: temp_ewm_std.ewm_std

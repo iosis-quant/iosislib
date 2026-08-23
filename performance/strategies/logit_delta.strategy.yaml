@@ -1,0 +1,45 @@
+# Benchmark: logit transform on price close, then delta
+# Tests simple 2-transform chain on financial data
+format: iosis.strategy
+version: 0.1.0
+name: logit-delta
+description: >
+  Logit transform on close price, then first-difference.
+  Measures itemwise unary + delta overhead on prices data.
+
+nodes:
+  prices:
+    op: source.csv_source
+    version: 0.2.0
+    params:
+      path: data/prices.csv
+      content_sha256: 1fd7ced1e5ebc179a05e2f297ce62af7c1ebbbf4aa0a3169c7d722b5a30f9761
+      schema:
+        time: timestamp
+        columns:
+          open: float64
+          high: float64
+          low: float64
+          close: float64
+          volume: int64
+
+  logit_val:
+    op: transform.logit
+    version: 0.1.0
+    inputs:
+      value: prices.close
+    params:
+      input_column: value
+      output_column: logit
+
+  change:
+    op: transform.delta
+    version: 0.2.0
+    inputs:
+      value: logit_val.logit
+    params:
+      input_column: value
+      output_column: delta
+
+outputs:
+  change: change.delta
