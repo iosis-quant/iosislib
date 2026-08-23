@@ -12,7 +12,7 @@ nodes:
     op: source.csv_source
     version: 0.2.0
     params:
-      path: data/weather.csv
+      path: ../data/weather.csv
       content_sha256: 9e58fd02319a690d595a5d2ee448841fdb0b6e6c079ff08ed3a1eac7ef04d8f4
       schema:
         time: timestamp

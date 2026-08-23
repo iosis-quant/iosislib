@@ -12,7 +12,7 @@ nodes:
     op: source.csv_source
     version: 0.2.0
     params:
-      path: data/prices.csv
+      path: ../data/prices.csv
       content_sha256: 1fd7ced1e5ebc179a05e2f297ce62af7c1ebbbf4aa0a3169c7d722b5a30f9761
       schema:
         time: timestamp

@@ -12,7 +12,7 @@ nodes:
     op: source.csv_source
     version: 0.2.0
     params:
-      path: data/shipping.csv
+      path: ../data/shipping.csv
       content_sha256: 226bf9edc387ec03d2c0643447b0ae766fc61c0e4680a42c5f9229db44a982b1
       schema:
         time: timestamp

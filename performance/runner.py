@@ -51,8 +51,18 @@ class BenchResult:
 # ---------------------------------------------------------------------------
 
 def _load_strategy(path: Path) -> Any:
-    """Parse a strategy YAML file into a Strategy IR object."""
-    return loads(path.read_text(encoding="utf-8"))
+    """Parse a strategy YAML file, resolving relative paths to the strategy's directory."""
+    import re
+    raw = path.read_text(encoding="utf-8")
+    strategy_dir = str(path.parent).replace("\\", "/")
+    if not strategy_dir.endswith("/"):
+        strategy_dir += "/"
+    raw = re.sub(
+        r'(?<=path: )([a-zA-Z0-9_./-]+\.(?:csv|parquet))',
+        lambda m: m.group(1) if Path(m.group(1)).is_absolute() else strategy_dir + m.group(1),
+        raw,
+    )
+    return loads(raw)
 
 
 def _lower_strategy(strategy: Any) -> Any:
@@ -65,7 +75,7 @@ def _run_once(graph: Graph, executor: LocalExecutor | None = None) -> tuple[pl.D
     """Execute a graph once, return (result_df, elapsed_seconds)."""
     exec_ = executor or LocalExecutor()
     t0 = time.perf_counter()
-    result = graph.execute(exec_=exec_)
+    result = graph.execute(executor=exec_)
     elapsed = time.perf_counter() - t0
     return result, elapsed
 

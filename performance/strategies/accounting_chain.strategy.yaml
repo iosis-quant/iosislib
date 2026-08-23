@@ -12,7 +12,7 @@ nodes:
     op: source.csv_source
     version: 0.2.0
     params:
-      path: data/accounting.csv
+      path: ../data/accounting.csv
       content_sha256: d6830b937c0bdb8c49a96740cd8756e2ec8959bfa64bb46532466ec7ddde5cd8
       schema:
         time: timestamp
