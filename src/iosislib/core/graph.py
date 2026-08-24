@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import abc
 import hashlib
@@ -257,6 +257,13 @@ class Graph:
         "node_list",
         "root_node",
     )
+
+    ID: str
+    _frozen: bool
+    _validation_report: ValidationReport
+    materialized_node_ids: frozenset[str]
+    node_list: tuple[Node, ...]
+    root_node: Node
 
     def __setattr__(self, name: str, value: Any) -> None:
         if getattr(self, "_frozen", False):
