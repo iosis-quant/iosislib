@@ -31,6 +31,9 @@ Array = npt.NDArray[np.float64]
 Shape = tuple[int, ...]
 
 
+_SCALAR_WIDTH_THRESHOLD = 16
+
+
 def _shape_width(shape: Shape) -> int:
     width = 1
     for size in shape:
@@ -61,7 +64,10 @@ def _row_vector(value: object, shape: Shape, name: str) -> Array:
 class MarketState:
     """A reusable, read-only view over the current row of market inputs."""
 
-    __slots__ = ("timestamp", "row", "_information", "_bid", "_ask", "_target")
+    __slots__ = (
+        "timestamp", "row", "_information", "_bid", "_ask", "_target",
+        "_cached_information", "_cached_bid", "_cached_ask", "_cached_target",
+    )
 
     def __init__(
         self,
@@ -79,10 +85,25 @@ class MarketState:
         self._bid = bid
         self._ask = ask
         self._target = target
+        if len(information) > 0:
+            self._cached_information: Array = information[0]
+            self._cached_bid: Array = bid[0]
+            self._cached_ask: Array = ask[0]
+            self._cached_target: Array | None = target[0] if target is not None else None
+        else:
+            self._cached_information = information
+            self._cached_bid = bid
+            self._cached_ask = ask
+            self._cached_target = target
 
     def move_to(self, timestamp: object, row: int) -> None:
         self.timestamp = timestamp
         self.row = row
+        self._cached_information = self._information[row]
+        self._cached_bid = self._bid[row]
+        self._cached_ask = self._ask[row]
+        if self._target is not None:
+            self._cached_target = self._target[row]
 
     @property
     def row_count(self) -> int:
@@ -90,11 +111,11 @@ class MarketState:
 
     @property
     def information(self) -> Array:
-        return cast(Array, self._information[self.row])
+        return cast(Array, self._cached_information)
 
     @property
     def bid(self) -> Array:
-        return cast(Array, self._bid[self.row])
+        return cast(Array, self._cached_bid)
 
     @property
     def previous_bid(self) -> Array:
@@ -103,13 +124,13 @@ class MarketState:
 
     @property
     def ask(self) -> Array:
-        return cast(Array, self._ask[self.row])
+        return cast(Array, self._cached_ask)
 
     @property
     def target(self) -> Array:
-        if self._target is None:
+        if self._cached_target is None:
             raise ValueError("This policy requires a resolved target input")
-        return cast(Array, self._target[self.row])
+        return cast(Array, self._cached_target)
 
 
 @dataclass(frozen=True)
@@ -519,11 +540,27 @@ class ThresholdPolicy(Policy):
     ) -> PolicyState | None:
         del policy_state, cash, balances
         signal = state.information
-        orders[row] = np.where(
-            signal > self.threshold,
-            self.long_qty,
-            np.where(signal < -self.threshold, -self.short_qty, 0.0),
-        )
+        target = orders[row]
+        width = len(signal)
+        if width <= _SCALAR_WIDTH_THRESHOLD:
+            threshold = self.threshold
+            long_qty = self.long_qty
+            neg_short = -self.short_qty
+            for i in range(width):
+                s = signal[i]
+                if s > threshold:
+                    target[i] = long_qty
+                elif s < -threshold:
+                    target[i] = neg_short
+                else:
+                    target[i] = 0.0
+        else:
+            neg_short = -self.short_qty
+            orders[row] = np.where(
+                signal > self.threshold,
+                self.long_qty,
+                np.where(signal < -self.threshold, neg_short, 0.0),
+            )
         return None
 
     def to_dict(self) -> dict[str, Any]:

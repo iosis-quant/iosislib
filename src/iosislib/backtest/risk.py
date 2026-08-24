@@ -5,13 +5,15 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields, is_dataclass
 from enum import IntEnum
-from math import isfinite
+from math import copysign, isfinite
 from typing import Any, ClassVar, cast
 
 import numpy as np
 
 from iosislib.backtest.policy import Array, MarketState, Order, PolicyState
 from iosislib.core.utils import _canonical_json, _serialize_value
+
+_SCALAR_WIDTH_THRESHOLD = 16
 
 
 class RiskReason(IntEnum):
@@ -167,22 +169,43 @@ class FractionalLimitPolicy(RiskPolicy):
         orders: Array,
         row: int,
     ) -> PolicyState | None:
-        equity = cash + float(np.dot(balances, state.bid))
-        max_notional = self.fraction * equity
+        bid_row = state.bid
+        ask_row = state.ask
+        proposed_row = proposed[row]
         target = orders[row]
-        target[:] = proposed[row]
+        width = len(bid_row)
+        equity = cash
+        for i in range(width):
+            equity += balances[i] * bid_row[i]
+        max_notional = self.fraction * equity
         if max_notional <= 0.0:
-            target[:] = 0.0
+            for i in range(width):
+                target[i] = 0.0
             return None
-        prices = np.where(target > 0.0, state.ask, state.bid)
-        projected = balances + target
-        notional = np.abs(projected) * prices
-        exceeds = (target != 0.0) & (notional > max_notional)
-        if exceeds.any():
-            target[exceeds] = (
-                np.copysign(max_notional / prices[exceeds], projected[exceeds])
-                - balances[exceeds]
-            )
+        if width <= _SCALAR_WIDTH_THRESHOLD:
+            for i in range(width):
+                target[i] = proposed_row[i]
+            for i in range(width):
+                qty = target[i]
+                if qty != 0.0:
+                    price = ask_row[i] if qty > 0.0 else bid_row[i]
+                    projected = balances[i] + qty
+                    notional = abs(projected) * price
+                    if notional > max_notional:
+                        target[i] = (
+                            copysign(max_notional / price, projected) - balances[i]
+                        )
+        else:
+            target[:] = proposed_row
+            prices = np.where(target > 0.0, ask_row, bid_row)
+            projected = balances + target
+            notional = np.abs(projected) * prices
+            exceeds = (target != 0.0) & (notional > max_notional)
+            if exceeds.any():
+                target[exceeds] = (
+                    np.copysign(max_notional / prices[exceeds], projected[exceeds])
+                    - balances[exceeds]
+                )
         return None
 
 
@@ -211,17 +234,35 @@ class FractionalKellyPolicy(RiskPolicy):
         row: int,
     ) -> PolicyState | None:
         probabilities = state.information
-        prices = state.ask
-        equity = cash + float(np.dot(balances, state.bid))
+        ask_row = state.ask
+        bid_row = state.bid
         target = orders[row]
+        width = len(probabilities)
+        equity = cash
+        for i in range(width):
+            equity += balances[i] * bid_row[i]
         if equity <= 0.0:
-            target[:] = 0.0
+            for i in range(width):
+                target[i] = 0.0
+        elif width <= _SCALAR_WIDTH_THRESHOLD:
+            fraction = self.custom_fraction * equity
+            for i in range(width):
+                denom = 1.0 - ask_row[i]
+                if denom > 0.0:
+                    k = (
+                        probabilities[i]
+                        - (1.0 - probabilities[i]) * ask_row[i] / denom
+                    )
+                    if k > 0.0:
+                        target[i] = k * fraction / ask_row[i]
+                        continue
+                target[i] = 0.0
         else:
-            denominator = 1.0 - prices
-            kelly = probabilities - (1.0 - probabilities) * prices / denominator
+            denominator = 1.0 - ask_row
+            kelly = probabilities - (1.0 - probabilities) * ask_row / denominator
             kelly = np.where((denominator > 0.0) & (kelly > 0.0), kelly, 0.0)
             stake_cash = kelly * self.custom_fraction * equity
-            np.divide(stake_cash, prices, out=target)
+            np.divide(stake_cash, ask_row, out=target)
         return None
 
 

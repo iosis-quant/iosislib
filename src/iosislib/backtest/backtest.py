@@ -270,7 +270,7 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
             cash_col[row] = running_cash
             balance[row] = running_balances
 
-        equity = cash_col + np.einsum("ij,ij->i", balance, bid)
+        equity = cash_col + (balance * bid).sum(axis=1)
         return pl.DataFrame(
             [
                 timestamps,
@@ -375,20 +375,25 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         price: Array,
         price_mask: npt.NDArray[np.bool_],
     ) -> float:
-        if orders.shape[1] < 8:
-            for asset in range(orders.shape[1]):
-                quantity = orders[row, asset]
-                if quantity >= 0.0:
-                    cash -= quantity * ask[row, asset]
-                else:
-                    cash -= quantity * bid[row, asset]
-                balances[asset] += quantity
+        order_row = orders[row]
+        ask_row = ask[row]
+        bid_row = bid[row]
+        width = order_row.shape[0]
+        if width < 8:
+            for asset in range(width):
+                quantity = order_row[asset]
+                if quantity != 0.0:
+                    if quantity >= 0.0:
+                        cash -= quantity * ask_row[asset]
+                    else:
+                        cash -= quantity * bid_row[asset]
+                    balances[asset] += quantity
             return cash
-        np.greater_equal(orders[row], 0.0, out=price_mask)
-        np.copyto(price, bid[row])
-        np.copyto(price, ask[row], where=price_mask)
-        cash -= float(np.dot(orders[row], price))
-        balances += orders[row]
+        np.greater_equal(order_row, 0.0, out=price_mask)
+        np.copyto(price, bid_row)
+        np.copyto(price, ask_row, where=price_mask)
+        cash -= float(np.dot(order_row, price))
+        balances += order_row
         return cash
 
     def _validate_frame(self, frame: pl.DataFrame) -> None:
