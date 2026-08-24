@@ -296,7 +296,7 @@ def test_backtest_node_identity_tracks_risk_policy() -> None:
 
 
 def test_backtest_config_rejects_invalid_risk_policy() -> None:
-    with pytest.raises(TypeError, match="risk_policy must be a RiskPolicy or None"):
+    with pytest.raises(TypeError, match="risk_policy must be a RiskPolicy or a declarative mapping"):
         BacktestConfig(
             feed=l1_feed(),
             policy=SignalOrderPolicy(),

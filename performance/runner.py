@@ -10,14 +10,17 @@ Usage:
     python performance/runner.py --json
     python performance/runner.py --list-ops                # show available TSFNs
     python performance/runner.py --profile                 # cProfile runs
+    python performance/runner.py --no-warmup               # skip warmup (cold-cache)
 """
 
 from __future__ import annotations
 
 import cProfile
+import gc
 import io
 import json
 import pstats
+import statistics
 import sys
 import time
 from dataclasses import dataclass, field
@@ -44,6 +47,85 @@ class BenchResult:
     us_per_row: float
     rows_per_sec: float
     all_times: list[float] = field(default_factory=list)
+    node_times: list[tuple[str, str, float]] = field(default_factory=list)
+    median: float = 0.0
+    stddev: float = 0.0
+    min_time: float = 0.0
+    max_time: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Profiling executor
+# ---------------------------------------------------------------------------
+
+class ProfilingExecutor(LocalExecutor):
+    """LocalExecutor that records per-node wall-clock timing.
+
+    Times the full lifecycle of each node: ``lower_node`` (lazy graph
+    construction) plus ``materialize`` if the node is a materialization
+    boundary.  This gives an accurate picture of where time is spent.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.node_times: list[tuple[str, str, float]] = []
+        self._pending_boundary: dict[str, float] = {}
+
+    def _evaluate_to_root(self, graph):  # type: ignore[override]
+        import polars as pl
+
+        from iosislib.core.graph import _s3_credentials_scope
+
+        results: dict[str, pl.LazyFrame] = {}
+
+        with _s3_credentials_scope(self._s3_credentials):
+            for node in graph.node_list:
+                t0 = time.perf_counter()
+                try:
+                    node_input_lf = (
+                        None
+                        if not node.bindings
+                        else self.align_inputs(node, results)
+                    )
+                    results[node.ID] = self.lower_node(node, node_input_lf)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Execution failed at node "
+                        f"'{node.name or node.ID[:8]}' "
+                        f"({node.function_cls.__name__}@"
+                        f"{node.function.version}): {exc}"
+                    ) from exc
+
+                if (
+                    node.ID in graph.materialized_node_ids
+                    and node.ID != graph.root_node.ID
+                ):
+                    results[node.ID] = self.materialize(
+                        node, results[node.ID]
+                    ).lazy()
+
+                elapsed = time.perf_counter() - t0
+                if node.ID != graph.root_node.ID:
+                    self.node_times.append(
+                        (node.name or node.ID[:8], node.function_cls.__name__, elapsed)
+                    )
+
+            return results[graph.root_node.ID]
+
+    def execute(self, graph):  # type: ignore[override]
+        from iosislib.core.graph import _s3_credentials_scope
+
+        with _s3_credentials_scope(self._s3_credentials):
+            root_lf = self._evaluate_to_root(graph)
+            t0 = time.perf_counter()
+            result = self.materialize(graph.root_node, root_lf)
+            elapsed = time.perf_counter() - t0
+            self.node_times.append(
+                (graph.root_node.name or graph.root_node.ID[:8],
+                 f"{graph.root_node.function_cls.__name__}+materialize",
+                 elapsed)
+            )
+            return result
 
 
 # ---------------------------------------------------------------------------
@@ -71,28 +153,53 @@ def _lower_strategy(strategy: Any) -> Any:
     return lower(strategy, registry)
 
 
-def _run_once(graph: Graph, executor: LocalExecutor | None = None) -> tuple[pl.DataFrame, float]:
-    """Execute a graph once, return (result_df, elapsed_seconds)."""
+def _run_once(
+    graph: Graph, executor: LocalExecutor | None = None
+) -> tuple[pl.DataFrame, float, list[tuple[str, str, float]]]:
+    """Execute a graph once, return (result_df, elapsed_seconds, node_times)."""
     exec_ = executor or LocalExecutor()
     t0 = time.perf_counter()
     result = graph.execute(executor=exec_)
     elapsed = time.perf_counter() - t0
-    return result, elapsed
+    node_times = getattr(exec_, "node_times", [])
+    return result, elapsed, list(node_times)
 
 
 def _bench_fn(
     graph: Graph,
     warmup: int = 3,
     repeats: int = 5,
-) -> tuple[float, list[float]]:
-    """Warm up, then time repeated executions. Return (best_time, all_times)."""
+    executor_factory: Any = None,
+) -> tuple[float, list[float], list[tuple[str, str, float]], pl.DataFrame]:
+    """Warm up, then time repeated executions.
+
+    Returns (best_time, all_times, node_times_from_best, result_df).
+
+    Warmup runs prime the OS buffer cache, so this measures warm-cache
+    (in-memory) Polars compute performance, not cold-disk I/O.
+    """
+    last_df: pl.DataFrame | None = None
     for _ in range(warmup):
-        _run_once(graph)
+        last_df, _, _ = _run_once(graph, executor_factory() if executor_factory else None)
+
     times = []
-    for _ in range(repeats):
-        _, elapsed = _run_once(graph)
-        times.append(elapsed)
-    return min(times), times
+    best_node_times: list[tuple[str, str, float]] = []
+    best_df: pl.DataFrame | None = last_df
+
+    gc.collect()
+    gc.disable()
+    try:
+        for _ in range(repeats):
+            exec_ = executor_factory() if executor_factory else None
+            df, elapsed, nt = _run_once(graph, exec_)
+            times.append(elapsed)
+            if elapsed == min(times):
+                best_node_times = nt
+                best_df = df
+    finally:
+        gc.enable()
+
+    return min(times), times, best_node_times, best_df  # type: ignore[return-value]
 
 
 def _profile_fn(graph: Graph, top_n: int = 25) -> str:
@@ -137,14 +244,21 @@ def run_strategy_benchmark(
             )
 
         graph = lowered.graph(out_name)
-        best, all_times = _bench_fn(graph, warmup, repeats)
-
-        # Execute once more to get row count
-        result_df, _ = _run_once(graph)
+        exec_factory = ProfilingExecutor if run_profile else None
+        best, all_times, node_times, result_df = _bench_fn(
+            graph, warmup, repeats, exec_factory
+        )
         rows = result_df.height
 
         us = best / rows * 1e6 if rows > 0 else 0.0
         rps = rows / best if best > 0 else 0.0
+
+        if len(all_times) >= 2:
+            med = statistics.median(all_times)
+            sd = statistics.stdev(all_times)
+        else:
+            med = best
+            sd = 0.0
 
         results.append(BenchResult(
             strategy_name=strategy.name,
@@ -154,6 +268,11 @@ def run_strategy_benchmark(
             us_per_row=us,
             rows_per_sec=rps,
             all_times=all_times,
+            node_times=node_times,
+            median=med,
+            stddev=sd,
+            min_time=min(all_times),
+            max_time=max(all_times),
         ))
 
         profile_report = None
@@ -178,12 +297,12 @@ def load_all_strategies(strategies_dir: Path) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 def print_table(results: list[BenchResult]) -> None:
-    print(f"\n{'Strategy':<20s} {'Output':<20s} {'Rows':>10s} {'Time':>8s} {'us/row':>8s} {'rows/s':>12s}")
-    print("-" * 80)
+    print(f"\n{'Strategy':<20s} {'Output':<20s} {'Rows':>10s} {'Time':>8s} {'us/row':>8s} {'rows/s':>12s} {'stddev':>8s}")
+    print("-" * 88)
     for r in results:
         print(
             f"{r.strategy_name:<20s} {r.output_name:<20s} "
-            f"{r.rows:>10,} {r.elapsed:>7.3f}s {r.us_per_row:>7.1f} {r.rows_per_sec:>11,.0f}"
+            f"{r.rows:>10,} {r.elapsed:>7.3f}s {r.us_per_row:>7.1f} {r.rows_per_sec:>11,.0f} {r.stddev:>7.4f}s"
         )
 
 
@@ -197,6 +316,10 @@ def export_json(results: list[BenchResult]) -> str:
                 "elapsed_s": round(r.elapsed, 4),
                 "us_per_row": round(r.us_per_row, 2),
                 "rows_per_sec": round(r.rows_per_sec),
+                "median_s": round(r.median, 4),
+                "stddev_s": round(r.stddev, 4),
+                "min_s": round(r.min_time, 4),
+                "max_s": round(r.max_time, 4),
                 "all_times": [round(t, 4) for t in r.all_times],
             }
             for r in results
@@ -223,6 +346,7 @@ def main() -> None:
     do_profile = "--profile" in args
     do_json = "--json" in args
     list_ops = "--list-ops" in args
+    no_warmup = "--no-warmup" in args
 
     # Parse --output <name>
     output_filter = None
@@ -235,7 +359,7 @@ def main() -> None:
             sys.exit(1)
 
     # Parse --warmup and --repeats
-    warmup, repeats = 3, 5
+    warmup, repeats = (0 if no_warmup else 3), 5
     if "--warmup" in args:
         idx = args.index("--warmup")
         warmup = int(args[idx + 1])
@@ -287,6 +411,9 @@ def main() -> None:
                 f"{r.elapsed:>7.3f}s  {r.us_per_row:>6.1f} us/row  "
                 f"{r.rows_per_sec:>10,.0f} rows/s"
             )
+            if r.node_times:
+                for name, cls_name, nt in r.node_times:
+                    print(f"    {name:<24s} {cls_name:<20s} {nt:>7.4f}s")
 
         all_results.extend(results)
         all_profiles.extend(profiles)

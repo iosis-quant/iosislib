@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
+from math import isfinite
 from typing import Any, ClassVar, cast
 
 import numpy as np
@@ -444,6 +446,97 @@ class OrderModelPolicy(ModelPolicy):
         orders[row] = np.ascontiguousarray(prediction)
 
 
+@dataclass(frozen=True)
+class SignalPolicy(Policy):
+    """Copy a named signal column directly as order quantities.
+
+    This is a minimal stateless policy suitable for benchmarking and simple
+    signal-to-order pipelines.  The ``signal_column`` parameter selects which
+    upstream column provides the per-asset order quantities.
+    """
+
+    VERSION = "1.0.0"
+    signal_column: str = "signal"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.signal_column, str) or not self.signal_column:
+            raise ValueError("signal_column must be a non-empty string")
+
+    def decide(
+        self,
+        policy_state: PolicyState | None,
+        state: MarketState,
+        cash: float,
+        balances: Array,
+        orders: Array,
+        row: int,
+    ) -> PolicyState | None:
+        del policy_state, cash, balances
+        orders[row] = state.information
+        return None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": f"{type(self).__module__}.{type(self).__qualname__}",
+            "version": self.VERSION,
+            "signal_column": self.signal_column,
+        }
+
+
+@dataclass(frozen=True)
+class ThresholdPolicy(Policy):
+    """Long/short based on whether a signal exceeds a threshold.
+
+    When the signal value exceeds ``threshold``, ``long_qty`` is placed.
+    When it falls below ``-threshold``, ``-short_qty`` is placed (short).
+    Otherwise no order is submitted.
+    """
+
+    VERSION = "1.0.0"
+    signal_column: str = "signal"
+    threshold: float = 0.0
+    long_qty: float = 1.0
+    short_qty: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.signal_column, str) or not self.signal_column:
+            raise ValueError("signal_column must be a non-empty string")
+        if not isfinite(self.threshold) or self.threshold < 0.0:
+            raise ValueError("threshold must be a non-negative finite number")
+        if not isfinite(self.long_qty):
+            raise ValueError("long_qty must be finite")
+        if not isfinite(self.short_qty):
+            raise ValueError("short_qty must be finite")
+
+    def decide(
+        self,
+        policy_state: PolicyState | None,
+        state: MarketState,
+        cash: float,
+        balances: Array,
+        orders: Array,
+        row: int,
+    ) -> PolicyState | None:
+        del policy_state, cash, balances
+        signal = state.information
+        orders[row] = np.where(
+            signal > self.threshold,
+            self.long_qty,
+            np.where(signal < -self.threshold, -self.short_qty, 0.0),
+        )
+        return None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": f"{type(self).__module__}.{type(self).__qualname__}",
+            "version": self.VERSION,
+            "signal_column": self.signal_column,
+            "threshold": self.threshold,
+            "long_qty": self.long_qty,
+            "short_qty": self.short_qty,
+        }
+
+
 __all__ = [
     "Array",
     "FeatureBuffer",
@@ -454,5 +547,7 @@ __all__ = [
     "OrderModelPolicy",
     "Policy",
     "PolicyState",
+    "SignalPolicy",
     "StatefulPolicy",
+    "ThresholdPolicy",
 ]

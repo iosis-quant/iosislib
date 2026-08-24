@@ -2,28 +2,34 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from math import isfinite
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
 import polars as pl
 
-from iosislib.backtest.feeds import Feed
+from iosislib.backtest.feeds import Feed, L1Feed
 from iosislib.backtest.policy import (
     Array,
     MarketState,
     ModelPolicy,
     Policy,
     PolicyState,
+    SignalPolicy,
     StatefulPolicy,
+    ThresholdPolicy,
 )
 from iosislib.backtest.risk import (
     NO_OP_RISK,
+    FractionalKellyPolicy,
+    FractionalLimitPolicy,
     RiskPolicy,
     StatefulRiskPolicy,
 )
+from iosislib.backtest.venue import Venue
 from iosislib.core.tsfn import BatchTSFN, FrameSignature, TSFNConfig, _column_signatures
 from iosislib.core.utils import (
     _datetime_dtype_without_timezone,
@@ -33,9 +39,99 @@ from iosislib.core.utils import (
 )
 
 
+_POLICY_REGISTRY: dict[str, type[Policy]] = {
+    "signal": SignalPolicy,
+    "threshold": ThresholdPolicy,
+}
+
+_RISK_REGISTRY: dict[str, type[RiskPolicy]] = {
+    "fractional_limit": FractionalLimitPolicy,
+    "fractional_kelly": FractionalKellyPolicy,
+}
+
+
+def _feed_from_declaration(value: Mapping[str, Any]) -> Feed:
+    """Resolve a declarative feed mapping into a concrete ``Feed`` instance."""
+    kind = value.get("kind", "l1")
+    if kind != "l1":
+        raise ValueError(f"Unsupported feed kind: {kind!r}; only 'l1' is supported")
+    venue_data = value.get("venue")
+    if not isinstance(venue_data, Mapping):
+        raise ValueError("feed.venue must be a mapping with 'name' and 'universe'")
+    universe = venue_data.get("universe")
+    if isinstance(universe, (list, tuple)):
+        universe = tuple(universe)
+    else:
+        raise ValueError("feed.venue.universe must be a list of asset names")
+    venue = Venue(name=venue_data["name"], universe=universe)
+    return L1Feed(
+        venue=venue,
+        bid_column=value.get("bid_column", "bid"),
+        ask_column=value.get("ask_column", "ask"),
+    )
+
+
+def _policy_from_declaration(value: Mapping[str, Any]) -> Policy:
+    """Resolve a declarative policy mapping into a concrete ``Policy`` instance."""
+    kind = value.get("kind")
+    if kind is None:
+        raise ValueError("policy declaration must declare a 'kind'")
+    cls = _POLICY_REGISTRY.get(kind)
+    if cls is None:
+        raise ValueError(
+            f"Unknown policy kind: {kind!r}; "
+            f"available: {sorted(_POLICY_REGISTRY)}"
+        )
+    params = {k: v for k, v in value.items() if k != "kind"}
+    return cls(**params)
+
+
+def _risk_policy_from_declaration(value: Mapping[str, Any]) -> RiskPolicy:
+    """Resolve a declarative risk policy mapping into a ``RiskPolicy``."""
+    kind = value.get("kind")
+    if kind is None:
+        raise ValueError("risk_policy declaration must declare a 'kind'")
+    cls = _RISK_REGISTRY.get(kind)
+    if cls is None:
+        raise ValueError(
+            f"Unknown risk_policy kind: {kind!r}; "
+            f"available: {sorted(_RISK_REGISTRY)}"
+        )
+    params = {k: v for k, v in value.items() if k != "kind"}
+    return cls(**params)
+
+
+def _normalize_feed(value: Feed | Mapping[str, Any]) -> Feed:
+    if isinstance(value, Feed):
+        return value
+    if isinstance(value, Mapping):
+        return _feed_from_declaration(value)
+    raise TypeError("feed must be a Feed or a declarative mapping")
+
+
+def _normalize_policy(value: Policy | Mapping[str, Any]) -> Policy:
+    if isinstance(value, Policy):
+        return value
+    if isinstance(value, Mapping):
+        return _policy_from_declaration(value)
+    raise TypeError("policy must be a Policy or a declarative mapping")
+
+
+def _normalize_risk_policy(value: RiskPolicy | Mapping[str, Any]) -> RiskPolicy:
+    if isinstance(value, RiskPolicy):
+        return value
+    if isinstance(value, Mapping):
+        return _risk_policy_from_declaration(value)
+    raise TypeError("risk_policy must be a RiskPolicy or a declarative mapping")
+
+
 @dataclass(frozen=True)
 class BacktestConfig(TSFNConfig):
-    """Configuration for one immediate-execution simulation."""
+    """Configuration for one immediate-execution simulation.
+
+    ``feed`` and ``policy`` accept either live Python objects or declarative
+    YAML-compatible mappings.  ``risk_policy`` follows the same convention.
+    """
 
     feed: Feed
     policy: Policy
@@ -44,6 +140,16 @@ class BacktestConfig(TSFNConfig):
     validate: bool = True
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "feed", _normalize_feed(self.feed)
+        )
+        object.__setattr__(
+            self, "policy", _normalize_policy(self.policy)
+        )
+        if self.risk_policy is not None:
+            object.__setattr__(
+                self, "risk_policy", _normalize_risk_policy(self.risk_policy)
+            )
         if not isinstance(self.feed, Feed):
             raise TypeError("feed must be a Feed")
         if not isinstance(self.policy, Policy):

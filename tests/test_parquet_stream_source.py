@@ -433,3 +433,349 @@ def test_streamed_frame_preserves_declared_time_axis(tmp_path: Path) -> None:
     assert result.schema == pl.Schema(
         {"timestamp": pl.Datetime("us"), "value": pl.Float64}
     )
+
+
+# ---------------------------------------------------------------------------
+# ParquetChunk validation edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_parquet_chunk_rejects_empty_key() -> None:
+    with pytest.raises(ValueError, match="non-empty string"):
+        parquet_stream.ParquetChunk(key="", sha256=DIGEST_64, size=100, rows=1)
+
+
+def test_parquet_chunk_rejects_whitespace_only_key() -> None:
+    with pytest.raises(ValueError, match="non-empty string"):
+        parquet_stream.ParquetChunk(key="   ", sha256=DIGEST_64, size=100, rows=1)
+
+
+def test_parquet_chunk_rejects_leading_slash() -> None:
+    with pytest.raises(ValueError, match="safe relative"):
+        parquet_stream.ParquetChunk(key="/etc/passwd", sha256=DIGEST_64, size=100, rows=1)
+
+
+def test_parquet_chunk_rejects_dotdot_path() -> None:
+    with pytest.raises(ValueError, match="safe relative"):
+        parquet_stream.ParquetChunk(key="../escape", sha256=DIGEST_64, size=100, rows=1)
+
+
+def test_parquet_chunk_rejects_question_mark() -> None:
+    with pytest.raises(ValueError, match="safe relative"):
+        parquet_stream.ParquetChunk(key="file?.parquet", sha256=DIGEST_64, size=100, rows=1)
+
+
+def test_parquet_chunk_rejects_hash_in_key() -> None:
+    with pytest.raises(ValueError, match="safe relative"):
+        parquet_stream.ParquetChunk(key="file#1.parquet", sha256=DIGEST_64, size=100, rows=1)
+
+
+def test_parquet_chunk_normalizes_backslash() -> None:
+    chunk = parquet_stream.ParquetChunk(
+        key="sub\\dir\\file.parquet", sha256=DIGEST_64, size=100, rows=1
+    )
+    assert chunk.key == "sub/dir/file.parquet"
+
+
+def test_parquet_chunk_rejects_bad_sha256() -> None:
+    with pytest.raises(ValueError, match="64-character hexadecimal"):
+        parquet_stream.ParquetChunk(key="a.parquet", sha256="not-hex", size=100, rows=1)
+
+
+def test_parquet_chunk_rejects_short_sha256() -> None:
+    with pytest.raises(ValueError, match="64-character hexadecimal"):
+        parquet_stream.ParquetChunk(key="a.parquet", sha256="abc", size=100, rows=1)
+
+
+def test_parquet_chunk_rejects_zero_size() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        parquet_stream.ParquetChunk(key="a.parquet", sha256=DIGEST_64, size=0, rows=1)
+
+
+def test_parquet_chunk_rejects_negative_size() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        parquet_stream.ParquetChunk(key="a.parquet", sha256=DIGEST_64, size=-1, rows=1)
+
+
+def test_parquet_chunk_rejects_bool_size() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        parquet_stream.ParquetChunk(key="a.parquet", sha256=DIGEST_64, size=True, rows=1)
+
+
+def test_parquet_chunk_rejects_zero_rows() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        parquet_stream.ParquetChunk(key="a.parquet", sha256=DIGEST_64, size=100, rows=0)
+
+
+def test_parquet_chunk_rejects_negative_rows() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        parquet_stream.ParquetChunk(key="a.parquet", sha256=DIGEST_64, size=100, rows=-1)
+
+
+def test_parquet_chunk_rejects_bool_rows() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        parquet_stream.ParquetChunk(key="a.parquet", sha256=DIGEST_64, size=100, rows=True)
+
+
+def test_parquet_chunk_from_dict_missing_keys() -> None:
+    with pytest.raises(ValueError, match="missing"):
+        parquet_stream.ParquetChunk.from_dict({"key": "a.parquet"})
+
+
+def test_parquet_chunk_from_dict_extra_keys() -> None:
+    with pytest.raises(ValueError, match="unknown field"):
+        parquet_stream.ParquetChunk.from_dict(
+            {"key": "a.parquet", "sha256": DIGEST_64, "size": 1, "rows": 1, "extra": 1}
+        )
+
+
+def test_parquet_chunk_from_dict_not_a_dict() -> None:
+    with pytest.raises(ValueError, match="JSON object"):
+        parquet_stream.ParquetChunk.from_dict("not-a-dict")
+
+
+# ---------------------------------------------------------------------------
+# ChunkManifest validation edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_manifest_rejects_wrong_format() -> None:
+    chunk = parquet_stream.ParquetChunk(key="a.parquet", sha256=DIGEST_64, size=100, rows=1)
+    with pytest.raises(ValueError, match="format must be"):
+        parquet_stream.ChunkManifest(chunks=(chunk,), format="wrong-format")
+
+
+def test_chunk_manifest_rejects_unsupported_version() -> None:
+    chunk = parquet_stream.ParquetChunk(key="a.parquet", sha256=DIGEST_64, size=100, rows=1)
+    with pytest.raises(ValueError, match="unsupported.*version"):
+        parquet_stream.ChunkManifest(chunks=(chunk,), version=99)
+
+
+def test_chunk_manifest_rejects_empty_chunks() -> None:
+    with pytest.raises(ValueError, match="at least one chunk"):
+        parquet_stream.ChunkManifest(chunks=())
+
+
+def test_chunk_manifest_rejects_duplicate_keys() -> None:
+    chunk = parquet_stream.ParquetChunk(key="a.parquet", sha256=DIGEST_64, size=100, rows=1)
+    with pytest.raises(ValueError, match="Duplicate chunk keys"):
+        parquet_stream.ChunkManifest(chunks=(chunk, chunk))
+
+
+def test_chunk_manifest_rejects_non_tuple_chunks() -> None:
+    with pytest.raises(TypeError, match="tuple of ParquetChunk"):
+        parquet_stream.ChunkManifest(chunks=[parquet_stream.ParquetChunk(
+            key="a.parquet", sha256=DIGEST_64, size=100, rows=1
+        )])
+
+
+def test_chunk_manifest_from_bytes_invalid_json() -> None:
+    with pytest.raises(ValueError, match="not valid UTF-8 JSON"):
+        parquet_stream.ChunkManifest.from_bytes(b"not-json")
+
+
+def test_chunk_manifest_from_bytes_invalid_utf8() -> None:
+    with pytest.raises(ValueError, match="not valid UTF-8 JSON"):
+        parquet_stream.ChunkManifest.from_bytes(b"\xff\xfe")
+
+
+def test_chunk_manifest_from_dict_not_a_dict() -> None:
+    with pytest.raises(ValueError, match="JSON object"):
+        parquet_stream.ChunkManifest.from_dict("not-a-dict")
+
+
+def test_chunk_manifest_from_dict_missing_merkle() -> None:
+    with pytest.raises(ValueError, match="missing"):
+        parquet_stream.ChunkManifest.from_dict(
+            {"format": "iosis.parquet-chunk-manifest", "version": 1, "chunks": []}
+        )
+
+
+def test_chunk_manifest_from_dict_merkle_wrong_algorithm() -> None:
+    chunk = parquet_stream.ParquetChunk(key="a.parquet", sha256=DIGEST_64, size=100, rows=1)
+    manifest = parquet_stream.ChunkManifest(chunks=(chunk,))
+    data = manifest.to_dict()
+    data["merkle"]["algorithm"] = "md5"
+    with pytest.raises(ValueError, match="algorithm must be"):
+        parquet_stream.ChunkManifest.from_dict(data)
+
+
+def test_chunk_manifest_from_dict_merkle_wrong_tree() -> None:
+    chunk = parquet_stream.ParquetChunk(key="a.parquet", sha256=DIGEST_64, size=100, rows=1)
+    manifest = parquet_stream.ChunkManifest(chunks=(chunk,))
+    data = manifest.to_dict()
+    data["merkle"]["tree"] = "wrong-tree"
+    with pytest.raises(ValueError, match="tree must be"):
+        parquet_stream.ChunkManifest.from_dict(data)
+
+
+def test_chunk_manifest_from_dict_merkle_bad_root() -> None:
+    chunk = parquet_stream.ParquetChunk(key="a.parquet", sha256=DIGEST_64, size=100, rows=1)
+    manifest = parquet_stream.ChunkManifest(chunks=(chunk,))
+    data = manifest.to_dict()
+    data["merkle"]["root"] = "not-hex"
+    with pytest.raises(ValueError, match="64-hex digest"):
+        parquet_stream.ChunkManifest.from_dict(data)
+
+
+def test_chunk_manifest_from_dict_chunks_not_array() -> None:
+    with pytest.raises(ValueError, match="array of objects"):
+        parquet_stream.ChunkManifest.from_dict(
+            {
+                "format": "iosis.parquet-chunk-manifest",
+                "version": 1,
+                "merkle": {"algorithm": "sha256", "tree": "balanced-binary", "root": DIGEST_64},
+                "chunks": "not-an-array",
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
+# chunk_merkle_root edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_merkle_root_empty_chunks_raises() -> None:
+    with pytest.raises(ValueError, match="at least one chunk"):
+        parquet_stream.chunk_merkle_root([])
+
+
+def test_chunk_merkle_root_single_chunk() -> None:
+    chunk = parquet_stream.ParquetChunk(key="a.parquet", sha256=DIGEST_64, size=100, rows=1)
+    root = parquet_stream.chunk_merkle_root([chunk])
+    assert re.fullmatch(r"[0-9a-f]{64}", root)
+
+
+# ---------------------------------------------------------------------------
+# _normalize_merkle_digest edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_merkle_digest_type_error() -> None:
+    with pytest.raises(TypeError, match="must be a string"):
+        parquet_stream._normalize_merkle_digest(123)
+
+
+def test_normalize_merkle_digest_uppercase_normalized() -> None:
+    result = parquet_stream._normalize_merkle_digest("A" * 64)
+    assert result == "a" * 64
+
+
+def test_normalize_merkle_digest_empty_string() -> None:
+    assert parquet_stream._normalize_merkle_digest("") == ""
+
+
+# ---------------------------------------------------------------------------
+# build_parquet_chunk_manifest error paths
+# ---------------------------------------------------------------------------
+
+
+def test_build_manifest_nonexistent_directory() -> None:
+    with pytest.raises(ValueError, match="does not exist"):
+        parquet_stream.build_parquet_chunk_manifest("/nonexistent/path/abc123")
+
+
+def test_build_manifest_empty_directory(tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(ValueError, match="no .parquet files"):
+        parquet_stream.build_parquet_chunk_manifest(empty)
+
+
+# ---------------------------------------------------------------------------
+# StreamingParquetSourceConfig with explicit manifest path
+# ---------------------------------------------------------------------------
+
+
+def test_config_explicit_manifest_path(tmp_path: Path) -> None:
+    directory = tmp_path / "prices"
+    directory.mkdir()
+    write_chunks(directory)
+    root = build_parquet_chunk_manifest(directory)
+    manifest_path = str(directory / "manifest.json")
+
+    config = StreamingParquetSourceConfig(
+        path=str(directory),
+        output_signature=FLOAT_SIGNATURE,
+        content_sha256=root,
+        manifest=manifest_path,
+    )
+    assert config.manifest == manifest_path
+
+
+# ---------------------------------------------------------------------------
+# merkle_sha256_parquet_source end-to-end
+# ---------------------------------------------------------------------------
+
+
+def test_merkle_sha256_parquet_source_end_to_end(tmp_path: Path) -> None:
+    directory = tmp_path / "prices"
+    directory.mkdir()
+    write_chunks(directory)
+    root = build_parquet_chunk_manifest(directory)
+
+    result = merkle_sha256_parquet_source(directory)
+    assert result == root
+
+
+# ---------------------------------------------------------------------------
+# ParquetChunk.to_dict / from_dict round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_parquet_chunk_round_trip() -> None:
+    chunk = parquet_stream.ParquetChunk(
+        key="sub/file.parquet", sha256=DIGEST_64, size=1024, rows=500
+    )
+    data = chunk.to_dict()
+    restored = parquet_stream.ParquetChunk.from_dict(data)
+    assert restored == chunk
+
+
+# ---------------------------------------------------------------------------
+# StreamingParquetSource with single chunk
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_source_single_chunk(tmp_path: Path) -> None:
+    directory = tmp_path / "single"
+    directory.mkdir()
+    (directory / "only.parquet").write_bytes(
+        _parquet_bytes([datetime(2026, 1, 1)], [42.0])
+    )
+    root = build_parquet_chunk_manifest(directory)
+
+    result = Graph(
+        Node(
+            StreamingParquetSource,
+            parameters=source_parameters(directory, root),
+            name="single",
+        )
+    ).execute()
+
+    assert result["value"].to_list() == [42.0]
+
+
+# ---------------------------------------------------------------------------
+# StreamingParquetSource with many chunks (balanced Merkle tree)
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_source_many_chunks(tmp_path: Path) -> None:
+    directory = tmp_path / "many"
+    directory.mkdir()
+    for i in range(10):
+        (directory / f"part-{i:03d}.parquet").write_bytes(
+            _parquet_bytes([datetime(2026, 1, 1, 0, i)], [float(i)])
+        )
+    root = build_parquet_chunk_manifest(directory)
+
+    result = Graph(
+        Node(
+            StreamingParquetSource,
+            parameters=source_parameters(directory, root),
+        )
+    ).execute()
+
+    assert len(result) == 10
+    assert result["value"].to_list() == [float(i) for i in range(10)]

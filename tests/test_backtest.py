@@ -279,9 +279,9 @@ def test_backtest_node_identity_tracks_executable_configuration() -> None:
 
 
 def test_backtest_config_rejects_invalid_runtime_declarations() -> None:
-    with pytest.raises(TypeError, match="feed must be a Feed"):
+    with pytest.raises(TypeError, match="feed must be a Feed or a declarative mapping"):
         BacktestConfig(feed=None, policy=SignalOrderPolicy(), initial_cash=1.0)  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="policy must be a Policy"):
+    with pytest.raises(TypeError, match="policy must be a Policy or a declarative mapping"):
         BacktestConfig(feed=l1_feed(), policy=None, initial_cash=1.0)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="initial_cash must be finite"):
         BacktestConfig(

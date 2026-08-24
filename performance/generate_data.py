@@ -122,7 +122,45 @@ def generate_sensors(rows: int, rng: np.random.Generator) -> pl.DataFrame:
     })
 
 
-GENERATORS = {
+BACKTEST_WIDTH = 8
+
+
+def generate_market_data(rows: int, rng: np.random.Generator) -> None:
+    """Generate shaped OHLCV+signal parquet for backtest benchmarks.
+
+    Writes directly to Parquet (CSVSource doesn't support shaped columns).
+    Returns nothing; the data is written to data/market_data.parquet.
+    """
+    w = BACKTEST_WIDTH
+    dt = 1.0 / 252 / 390
+    mu, sigma = 0.05, 0.2
+    log_returns = (mu - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * rng.standard_normal((rows, w))
+    close = 100.0 * np.exp(np.cumsum(log_returns, axis=0))
+    spread = rng.uniform(0.001, 0.01, (rows, w)) * close
+    bid = close - spread * 0.5
+    ask = close + spread * 0.5
+    signal = rng.standard_normal((rows, w)) * 0.1
+
+    out_dir = Path(__file__).parent / "data"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    from iosislib.core.utils import numpy_to_series
+
+    df = pl.DataFrame({
+        "timestamp": _timestamp_column(rows),
+        "bid": numpy_to_series("bid", bid, allow_copy=True, shape=(w,)),
+        "ask": numpy_to_series("ask", ask, allow_copy=True, shape=(w,)),
+        "signal": numpy_to_series("signal", signal, allow_copy=True, shape=(w,)),
+    })
+    path = out_dir / "market_data.parquet"
+    df.write_parquet(path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    print(
+        f"  {path.name:<20s}  {df.height:>10,} rows  {df.width} cols  sha256={digest[:16]}\u2026"
+    )
+
+
+CSV_GENERATORS = {
     "prices": generate_prices,
     "weather": generate_weather,
     "accounting": generate_accounting,
@@ -177,27 +215,32 @@ def main() -> None:
     out_dir = Path(args.out) if args.out else Path(__file__).parent / "data"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    names = args.datasets if args.datasets else list(GENERATORS.keys())
+    names = args.datasets if args.datasets else list(CSV_GENERATORS.keys())
     rng = np.random.default_rng(42)
 
     hashes: dict[str, str] = {}
     for name in names:
-        if name not in GENERATORS:
-            print(f"Unknown dataset: {name!r}. Available: {sorted(GENERATORS)}", file=sys.stderr)
+        if name not in CSV_GENERATORS:
+            print(f"Unknown dataset: {name!r}. Available: {sorted(CSV_GENERATORS)}", file=sys.stderr)
             sys.exit(1)
-        df = GENERATORS[name](args.rows, rng)
+        df = CSV_GENERATORS[name](args.rows, rng)
         path = out_dir / f"{name}.csv"
         df.write_csv(path)
         h = sha256_file(path)
         hashes[name] = h
         print(f"  {path.name:<20s}  {df.height:>10,} rows  {df.width} cols  sha256={h[:16]}\u2026")
 
+    if "market_data" in (args.datasets or ["market_data"]):
+        generate_market_data(args.rows, rng)
+        hashes["market_data"] = sha256_file(out_dir / "market_data.parquet")
+
     print(f"\nGenerated {len(names)} dataset(s) in {out_dir}")
 
     # Print SHA-256 hashes for embedding in strategy YAML files
     print("\n# SHA-256 content hashes for strategy YAML files:")
     for name, h in sorted(hashes.items()):
-        print(f"#   {name}.csv: {h}")
+        ext = ".parquet" if name == "market_data" else ".csv"
+        print(f"#   {name}{ext}: {h}")
 
     if args.update_strategies:
         print("\nUpdating strategy YAML files...")

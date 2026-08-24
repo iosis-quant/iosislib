@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import polars as pl
 
 from iosislib.core.tsfn import (
+    ColumnSignature,
     FrameSignature,
     TimeAxis,
     TSFN,
@@ -110,12 +111,29 @@ def _dtype_from_string(value: object) -> pl.DataType:
     return _STRING_DTYPES[value]
 
 
+def _dtype_from_schema_value(value: object) -> tuple[pl.DataType, tuple[int, ...]]:
+    """Parse a schema column value into (dtype, shape).
+
+    Accepts either a plain dtype string (e.g. ``"float64"``) or a mapping
+    with ``dtype`` and optional ``shape`` keys.
+    """
+    if isinstance(value, str):
+        return _dtype_from_string(value), ()
+    if isinstance(value, Mapping):
+        dtype = _dtype_from_string(value["dtype"])
+        shape_raw = value.get("shape", ())
+        shape = tuple(shape_raw) if isinstance(shape_raw, (list, tuple)) else ()
+        return dtype, shape
+    raise TypeError(f"Unsupported schema column value: {type(value).__name__!r}")
+
+
 def _signature_from_schema(schema: Mapping[str, object]) -> FrameSignature:
     """Build a FrameSignature from the portable source DSL schema form.
 
     The portable form is ``{"time": <time column name>, "columns":
     {<name>: <dtype string>}}`` and matches the source nodes emitted by the
-    web strategy model.
+    web strategy model.  Column values may also be mappings with ``dtype``
+    and ``shape`` keys for shaped (Array) columns.
     """
     extra = sorted(schema.keys() - {"time", "columns"})
     if extra:
@@ -126,11 +144,14 @@ def _signature_from_schema(schema: Mapping[str, object]) -> FrameSignature:
     columns_value = schema.get("columns", {})
     if not isinstance(columns_value, Mapping):
         raise TypeError("schema.columns must be a mapping")
-    columns = tuple(
-        (name, _dtype_from_string(dtype_value))
-        for name, dtype_value in sorted(columns_value.items())
-    )
-    return FrameSignature(time=TimeAxis(column=time_value), columns=columns)
+    columns: list[tuple[str, object] | ColumnSignature] = []
+    for name, dtype_value in sorted(columns_value.items()):
+        dtype, shape = _dtype_from_schema_value(dtype_value)
+        if shape:
+            columns.append(ColumnSignature(name, dtype, shape))
+        else:
+            columns.append((name, dtype))
+    return FrameSignature(time=TimeAxis(column=time_value), columns=tuple(columns))
 
 
 _UNRESOLVED_SIGNATURE = FrameSignature(time=None, columns=())
