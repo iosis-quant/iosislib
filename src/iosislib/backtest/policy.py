@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from math import isfinite
 from typing import Any, ClassVar, cast
