@@ -1,6 +1,13 @@
 """Graph-native immediate-execution backtesting primitives."""
 
-from iosislib.backtest.backtest import BacktestConfig, BacktestTSFN
+from iosislib.backtest.backtest import (
+    BacktestConfig,
+    BacktestTSFN,
+    list_policies,
+    list_risk_policies,
+    register_policy,
+    register_risk_policy,
+)
 from iosislib.backtest.feeds import Feed, L1Feed
 from iosislib.backtest.policy import (
     Array,
@@ -56,4 +63,8 @@ __all__ = [
     "ThresholdPolicy",
     "Venue",
     "classify_reason",
+    "list_policies",
+    "list_risk_policies",
+    "register_policy",
+    "register_risk_policy",
 ]

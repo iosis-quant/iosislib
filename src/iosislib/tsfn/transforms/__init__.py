@@ -14,6 +14,7 @@ from iosislib.tsfn.transforms.log import Exp, ExpConfig, Log, LogConfig
 from iosislib.tsfn.transforms.log_ratio import LogRatio, LogRatioConfig
 from iosislib.tsfn.transforms.log_return import LogReturn, LogReturnConfig
 from iosislib.tsfn.transforms.logit import Logit, LogitConfig
+from iosislib.tsfn.transforms.negate import Negate, NegateConfig
 from iosislib.tsfn.transforms.pct_change import PctChange, PctChangeConfig
 from iosislib.tsfn.transforms.ratio import Ratio, RatioConfig
 from iosislib.tsfn.transforms.rolling import (
@@ -59,6 +60,8 @@ __all__ = [
     "LogReturnConfig",
     "Logit",
     "LogitConfig",
+    "Negate",
+    "NegateConfig",
     "PctChange",
     "PctChangeConfig",
     "Ratio",

@@ -50,6 +50,48 @@ _RISK_REGISTRY: dict[str, type[RiskPolicy]] = {
 }
 
 
+def register_policy(kind: str, cls: type[Policy]) -> None:
+    """Register a custom Policy class under a declarative ``kind`` name.
+
+    The ``kind`` value is used in YAML strategy declarations as
+    ``policy: {kind: "<kind>", ...}``. The class must be a concrete
+    ``Policy`` subclass.
+    """
+    if not isinstance(kind, str) or not kind.strip():
+        raise ValueError("policy kind must be a non-empty string")
+    if not isinstance(cls, type) or not issubclass(cls, Policy):
+        raise TypeError("cls must be a concrete Policy subclass")
+    if kind in _POLICY_REGISTRY:
+        raise ValueError(f"policy kind {kind!r} is already registered")
+    _POLICY_REGISTRY[kind] = cls
+
+
+def register_risk_policy(kind: str, cls: type[RiskPolicy]) -> None:
+    """Register a custom RiskPolicy class under a declarative ``kind`` name.
+
+    The ``kind`` value is used in YAML strategy declarations as
+    ``risk_policy: {kind: "<kind>", ...}``. The class must be a concrete
+    ``RiskPolicy`` subclass.
+    """
+    if not isinstance(kind, str) or not kind.strip():
+        raise ValueError("risk_policy kind must be a non-empty string")
+    if not isinstance(cls, type) or not issubclass(cls, RiskPolicy):
+        raise TypeError("cls must be a concrete RiskPolicy subclass")
+    if kind in _RISK_REGISTRY:
+        raise ValueError(f"risk_policy kind {kind!r} is already registered")
+    _RISK_REGISTRY[kind] = cls
+
+
+def list_policies() -> dict[str, type[Policy]]:
+    """Return the current policy registry."""
+    return dict(_POLICY_REGISTRY)
+
+
+def list_risk_policies() -> dict[str, type[RiskPolicy]]:
+    """Return the current risk policy registry."""
+    return dict(_RISK_REGISTRY)
+
+
 def _feed_from_declaration(value: Mapping[str, Any]) -> Feed:
     """Resolve a declarative feed mapping into a concrete ``Feed`` instance."""
     kind = value.get("kind", "l1")

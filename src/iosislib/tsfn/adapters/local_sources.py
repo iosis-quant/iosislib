@@ -81,7 +81,11 @@ def _normalize_content_sha256(content_sha256: str) -> str:
     if len(normalized) != 64 or any(
         character not in "0123456789abcdef" for character in normalized
     ):
-        raise ValueError("content_sha256 must be a 64-character hexadecimal digest")
+        raise ValueError(
+            "content_sha256 must be a 64-character hexadecimal digest. "
+            "Hint: for published datasets, the manifest 'id' field is the "
+            "content_sha256. Use list_dataset_manifests() to obtain it."
+        )
     return normalized
 
 

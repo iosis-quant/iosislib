@@ -114,6 +114,27 @@ class FeaturePackerConfig(TSFNConfig):
 
 
 class FeaturePacker(TSFN[FeaturePackerConfig]):
+    """Pack multiple scalar columns into a single fixed-width array column.
+
+    The output column name is set by the ``output_column`` parameter
+    (default ``"features"``). In the strategy YAML, the input mapping keys
+    must match the ``input_columns`` entries, and the upstream node must
+    produce columns with those names.
+
+    Example YAML::
+
+        nodes:
+          packer:
+            op: transform.feature_packer
+            version: 0.2.0
+            inputs:
+              rolling_mean: momentum.rolling_mean
+              spread: spread.spread
+            params:
+              input_columns: [rolling_mean, spread]
+              output_column: features
+    """
+
     VERSION = "0.2.0"
     CONFIG_CLS = FeaturePackerConfig
 

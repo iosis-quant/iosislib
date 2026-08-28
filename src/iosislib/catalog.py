@@ -20,6 +20,72 @@ _PROBE_PARAMS: dict[str, dict[str, object]] = {
     "transform.feature_packer": {"input_columns": ["a", "b"]},
 }
 
+_DESCRIPTIONS: dict[str, str] = {
+    "source.parquet_source": "Read a local or S3 Parquet file. Requires content_sha256 for verification.",
+    "source.csv_source": "Read a local CSV file with content verification.",
+    "source.streaming_parquet_source": "Streaming Parquet source with chunk manifests and Merkle roots.",
+    "source.polymarket_price_history": "Fetch Polymarket CLOB price history.",
+    "source.y_finance_ohlcv": "Fetch OHLCV data from Yahoo Finance.",
+    "transform.delta": "Compute difference between consecutive values (or N periods back).",
+    "transform.logit": "Apply logit transform: log(x / (1-x)). Input must be in (0, 1).",
+    "transform.exp": "Element-wise exponential: e^x.",
+    "transform.log": "Element-wise natural logarithm: ln(x).",
+    "transform.log_return": "Compute log return: ln(close / close_n).",
+    "transform.log_ratio": "Compute log ratio between two columns: ln(a / b).",
+    "transform.pct_change": "Compute percentage change over N periods.",
+    "transform.ratio": "Compute ratio between two columns: a / b.",
+    "transform.spread": "Compute spread between two columns: a - b.",
+    "transform.rolling_mean": "Rolling mean over a window.",
+    "transform.rolling_max": "Rolling maximum over a window.",
+    "transform.rolling_min": "Rolling minimum over a window.",
+    "transform.rolling_std": "Rolling standard deviation over a window.",
+    "transform.rolling_sum": "Rolling sum over a window.",
+    "transform.rolling_median": "Rolling median over a window.",
+    "transform.rolling_z_score": "Rolling z-score: (value - mean) / std.",
+    "transform.ewm_mean": "Exponentially-weighted moving mean.",
+    "transform.ewm_std": "Exponentially-weighted moving standard deviation.",
+    "transform.lag": "Shift column values forward by N periods (looks into the past).",
+    "transform.lead": "Shift column values backward by N periods (looks into the future). CAUSES LOOKAHEAD.",
+    "transform.feature_packer": "Pack multiple scalar columns into a single fixed-width array.",
+    "transform.feature_unpacker": "Unpack array columns into individual scalar columns.",
+    "transform.negate": "Negate a numeric column element-wise (-x). Useful for pairs trading.",
+    "backtest.backtest": "Simulate policy orders against a feed. Materialized operation.",
+    "model.light_gbm": "Walk-forward LightGBM regression model.",
+    "model.dense_mlp": "Walk-forward dense MLP regression model.",
+}
+
+_PARAM_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "source.parquet_source": {
+        "path": "File path or s3:// URI",
+        "content_sha256": "64-char hex digest. For published datasets, use the manifest 'id' field.",
+        "schema": "Mapping with 'time' (column name) and 'columns' (name -> dtype) keys",
+        "output_signature": "FrameSignature (alternative to schema)",
+    },
+    "source.csv_source": {
+        "path": "File path",
+        "content_sha256": "64-char hex digest for verification",
+        "schema": "Mapping with 'time' (column name) and 'columns' (name -> dtype) keys",
+        "separator": "CSV delimiter (default ',')",
+    },
+    "transform.feature_packer": {
+        "input_columns": "List of column names to pack into the array",
+        "output_column": "Output column name (default 'features')",
+        "timestamp_column": "Time column name (default 'timestamp')",
+        "output_dtype": "Output array element dtype (default Float64)",
+    },
+    "transform.negate": {
+        "input_column": "Column to negate (default 'value')",
+        "output_column": "Output column name (default 'negated')",
+        "timestamp_column": "Time column name (default 'timestamp')",
+    },
+    "backtest.backtest": {
+        "feed": "Mapping with 'kind: l1', 'venue: {name, universe}', and optional 'bid_column'/'ask_column'",
+        "policy": "Mapping with 'kind: signal' or 'kind: threshold' and optional params",
+        "risk_policy": "Mapping with 'kind: fractional_limit' or 'kind: fractional_kelly' and params",
+        "initial_cash": "Starting cash (float)",
+    },
+}
+
 
 def dump_tsfn_catalog(registry: OperationRegistry | None = None) -> dict[str, Any]:
     """Serialize every registered TSFN and its attributes to plain JSON data.
@@ -49,25 +115,29 @@ def _entry(op: str, version: str, function_cls: type[TSFN[Any]]) -> dict[str, An
         "category": op.split(".", 1)[0],
         "class": function_cls.__name__,
         "module": function_cls.__module__,
-        "description": _description(function_cls),
+        "description": _DESCRIPTIONS.get(op, _description(function_cls)),
         "configClass": function_cls.CONFIG_CLS.__name__,
         "requiresMaterialization": bool(function_cls.REQUIRES_MATERIALIZATION),
         "defaultNullPolicy": _enum_value(function_cls.DEFAULT_NULL_POLICY),
         "lookahead": bool(function_cls.LOOKAHEAD),
         "allowLookaheadInputs": sorted(function_cls.ALLOW_LOOKAHEAD_INPUTS),
-        "parameters": [_parameter(field_) for field_ in fields(function_cls.CONFIG_CLS)],
+        "parameters": [_parameter(op, field_) for field_ in fields(function_cls.CONFIG_CLS)],
         "signature": _signature(op, function_cls),
     }
 
 
-def _parameter(field_: Field[Any]) -> dict[str, Any]:
+def _parameter(op: str, field_: Field[Any]) -> dict[str, Any]:
     required = field_.default is MISSING and field_.default_factory is MISSING
-    return {
+    result: dict[str, Any] = {
         "name": field_.name,
         "type": _type_str(field_.type),
         "required": required,
         "default": None if required else _json_safe(field_.default),
     }
+    param_descs = _PARAM_DESCRIPTIONS.get(op, {})
+    if field_.name in param_descs:
+        result["description"] = param_descs[field_.name]
+    return result
 
 
 def _signature(op: str, function_cls: type[TSFN[Any]]) -> dict[str, Any] | None:
