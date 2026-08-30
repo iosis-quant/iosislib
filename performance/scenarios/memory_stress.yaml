@@ -1,0 +1,319 @@
+# Memory stress scenarios
+# Tests memory behavior under sustained load and varying data sizes
+
+scenarios:
+  - name: backtest_memory_100k
+    description: "Backtest memory tracking: 100K rows, 8 assets"
+    data:
+      name: perf_backtest_100k_8a
+      rows: 100_000
+      width: 8
+      domain: market_data
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: backtest-memory-100k
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_backtest_100k_8a.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid:
+                  dtype: float64
+                  shape: [8]
+                ask:
+                  dtype: float64
+                  shape: [8]
+                signal:
+                  dtype: float64
+                  shape: [8]
+        simulation:
+          op: backtest.backtest
+          version: "1.2.0"
+          inputs:
+            bid: market_data.bid
+            ask: market_data.ask
+            signal: market_data.signal
+          params:
+            initial_cash: 1000000
+            feed:
+              kind: l1
+              venue:
+                name: bench
+                universe: [A0, A1, A2, A3, A4, A5, A6, A7]
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 100.0
+      max_memory_mb: 200
+    memory_tracking:
+      sample_interval: 10_000
+      track_peak: true
+      track_allocations: true
+
+  - name: backtest_memory_500k
+    description: "Backtest memory tracking: 500K rows, 8 assets"
+    data:
+      name: perf_backtest_500k_8a
+      rows: 500_000
+      width: 8
+      domain: market_data
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: backtest-memory-500k
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_backtest_500k_8a.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid:
+                  dtype: float64
+                  shape: [8]
+                ask:
+                  dtype: float64
+                  shape: [8]
+                signal:
+                  dtype: float64
+                  shape: [8]
+        simulation:
+          op: backtest.backtest
+          version: "1.2.0"
+          inputs:
+            bid: market_data.bid
+            ask: market_data.ask
+            signal: market_data.signal
+          params:
+            initial_cash: 1000000
+            feed:
+              kind: l1
+              venue:
+                name: bench
+                universe: [A0, A1, A2, A3, A4, A5, A6, A7]
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 100.0
+      max_memory_mb: 500
+    memory_tracking:
+      sample_interval: 10_000
+      track_peak: true
+      track_allocations: true
+
+  - name: backtest_memory_1m
+    description: "Backtest memory tracking: 1M rows, 8 assets"
+    data:
+      name: perf_backtest_1m_8a
+      rows: 1_000_000
+      width: 8
+      domain: market_data
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: backtest-memory-1m
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_backtest_1m_8a.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid:
+                  dtype: float64
+                  shape: [8]
+                ask:
+                  dtype: float64
+                  shape: [8]
+                signal:
+                  dtype: float64
+                  shape: [8]
+        simulation:
+          op: backtest.backtest
+          version: "1.2.0"
+          inputs:
+            bid: market_data.bid
+            ask: market_data.ask
+            signal: market_data.signal
+          params:
+            initial_cash: 1000000
+            feed:
+              kind: l1
+              venue:
+                name: bench
+                universe: [A0, A1, A2, A3, A4, A5, A6, A7]
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 100.0
+      max_memory_mb: 1000
+    memory_tracking:
+      sample_interval: 10_000
+      track_peak: true
+      track_allocations: true
+
+  - name: transform_memory_1m
+    description: "Transform pipeline memory: 5-node chain on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: transform-memory-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        log_close:
+          op: transform.log
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: log
+        log_delta:
+          op: transform.delta
+          version: "0.2.0"
+          inputs:
+            value: log_close.log
+          params:
+            input_column: value
+            output_column: delta
+        smoothed:
+          op: transform.rolling_mean
+          version: "0.1.0"
+          inputs:
+            value: log_delta.delta
+          params:
+            input_column: value
+            output_column: rolling_mean
+            periods: 20
+        ewm_smoothed:
+          op: transform.ewm_mean
+          version: "0.1.0"
+          inputs:
+            value: smoothed.rolling_mean
+          params:
+            input_column: value
+            output_column: ewm_mean
+            alpha: 0.05
+        final_pct:
+          op: transform.pct_change
+          version: "0.1.0"
+          inputs:
+            value: ewm_smoothed.ewm_mean
+          params:
+            input_column: value
+            output_column: pct_change
+      outputs:
+        final_pct: final_pct.pct_change
+    outputs: [final_pct]
+    thresholds:
+      max_us_per_row: 15.0
+      max_memory_mb: 500
+    memory_tracking:
+      sample_interval: 10_000
+      track_peak: true
+      track_allocations: true
+
+  - name: wide_backtest_memory_100k_32a
+    description: "Wide backtest memory: 100K rows, 32 assets"
+    data:
+      name: perf_backtest_100k_32a
+      rows: 100_000
+      width: 32
+      domain: market_data
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: wide-backtest-memory-100k-32a
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_backtest_100k_32a.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid:
+                  dtype: float64
+                  shape: [32]
+                ask:
+                  dtype: float64
+                  shape: [32]
+                signal:
+                  dtype: float64
+                  shape: [32]
+        simulation:
+          op: backtest.backtest
+          version: "1.2.0"
+          inputs:
+            bid: market_data.bid
+            ask: market_data.ask
+            signal: market_data.signal
+          params:
+            initial_cash: 1000000
+            feed:
+              kind: l1
+              venue:
+                name: bench
+                universe: [A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15,
+                           A16, A17, A18, A19, A20, A21, A22, A23, A24, A25, A26, A27, A28, A29, A30, A31]
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 200.0
+      max_memory_mb: 500
+    memory_tracking:
+      sample_interval: 10_000
+      track_peak: true
+      track_allocations: true

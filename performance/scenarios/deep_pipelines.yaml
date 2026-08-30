@@ -1,0 +1,276 @@
+# Deep pipeline stress scenarios
+# Tests deeply chained transforms and complex graph topologies
+
+scenarios:
+  - name: chain_8_deep_100k
+    description: "8-node chain: log->delta->rolling_mean->rolling_std->ewm_mean->ewm_std->pct_change->ratio on 100K rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: chain-8-deep-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        log_close:
+          op: transform.log
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: log
+        delta:
+          op: transform.delta
+          version: "0.2.0"
+          inputs:
+            value: log_close.log
+          params:
+            input_column: value
+            output_column: delta
+        rolling_mean:
+          op: transform.rolling_mean
+          version: "0.1.0"
+          inputs:
+            value: delta.delta
+          params:
+            input_column: value
+            output_column: rolling_mean
+            periods: 20
+        rolling_std:
+          op: transform.rolling_std
+          version: "0.1.0"
+          inputs:
+            value: delta.delta
+          params:
+            input_column: value
+            output_column: rolling_std
+            periods: 20
+        ewm_mean:
+          op: transform.ewm_mean
+          version: "0.1.0"
+          inputs:
+            value: rolling_mean.rolling_mean
+          params:
+            input_column: value
+            output_column: ewm_mean
+            alpha: 0.05
+        ewm_std:
+          op: transform.ewm_std
+          version: "0.1.0"
+          inputs:
+            value: rolling_std.rolling_std
+          params:
+            input_column: value
+            output_column: ewm_std
+            alpha: 0.05
+        pct_change:
+          op: transform.pct_change
+          version: "0.1.0"
+          inputs:
+            value: ewm_mean.ewm_mean
+          params:
+            input_column: value
+            output_column: pct_change
+        spread:
+          op: transform.spread
+          version: "0.1.0"
+          inputs:
+            left: ewm_mean.ewm_mean
+            right: ewm_std.ewm_std
+          params:
+            left_column: left
+            right_column: right
+            output_column: spread
+      outputs:
+        pct_change: pct_change.pct_change
+        spread: spread.spread
+    outputs: [pct_change, spread]
+    thresholds:
+      max_us_per_row: 25.0
+      max_memory_mb: 300
+
+  - name: diamond_graph_100k
+    description: "Diamond topology: source -> [log, delta] -> spread on 100K rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: diamond-graph-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        log_close:
+          op: transform.log
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: log
+        delta:
+          op: transform.delta
+          version: "0.2.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: delta
+        spread:
+          op: transform.spread
+          version: "0.1.0"
+          inputs:
+            left: log_close.log
+            right: delta.delta
+          params:
+            left_column: left
+            right_column: right
+            output_column: spread
+      outputs:
+        spread: spread.spread
+    outputs: [spread]
+    thresholds:
+      max_us_per_row: 15.0
+      max_memory_mb: 200
+
+  - name: wide_chain_100k_16a
+    description: "Wide chain: backtest on 16-asset shaped data"
+    data:
+      name: perf_market_100k_16a
+      rows: 100_000
+      width: 16
+      domain: market_data
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: wide-chain-100k-16a
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_market_100k_16a.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid:
+                  dtype: float64
+                  shape: [16]
+                ask:
+                  dtype: float64
+                  shape: [16]
+                signal:
+                  dtype: float64
+                  shape: [16]
+        simulation:
+          op: backtest.backtest
+          version: "1.2.0"
+          inputs:
+            bid: market_data.bid
+            ask: market_data.ask
+            signal: market_data.signal
+          params:
+            initial_cash: 1000000
+            feed:
+              kind: l1
+              venue:
+                name: bench
+                universe: [A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15]
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 200.0
+      max_memory_mb: 500
+
+  - name: backtest_then_transform_100k
+    description: "Backtest -> post-process with rolling_mean on 100K rows"
+    data:
+      name: perf_backtest_100k_8a
+      rows: 100_000
+      width: 8
+      domain: market_data
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: backtest-then-transform-100k
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_backtest_100k_8a.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid:
+                  dtype: float64
+                  shape: [8]
+                ask:
+                  dtype: float64
+                  shape: [8]
+                signal:
+                  dtype: float64
+                  shape: [8]
+        simulation:
+          op: backtest.backtest
+          version: "1.2.0"
+          inputs:
+            bid: market_data.bid
+            ask: market_data.ask
+            signal: market_data.signal
+          params:
+            initial_cash: 1000000
+            feed:
+              kind: l1
+              venue:
+                name: bench
+                universe: [A0, A1, A2, A3, A4, A5, A6, A7]
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 150.0
+      max_memory_mb: 300

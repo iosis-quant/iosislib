@@ -1,0 +1,283 @@
+# Transform pipeline scaling scenarios
+# Tests transform chains at various data scales
+
+scenarios:
+  - name: rolling_100k
+    description: "Rolling mean+std on 100K sensor rows"
+    data:
+      name: perf_sensors_100k
+      rows: 100_000
+      domain: sensors
+      format: parquet
+    strategy:
+      nodes:
+        source:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_sensors_100k.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                temperature: float64
+                pressure: float64
+                humidity: float64
+                vibration: float64
+        rolling_mean:
+          op: transform.rolling_mean
+          version: "0.1.0"
+          inputs:
+            value: source.temperature
+          params:
+            input_column: value
+            output_column: rolling_mean
+            periods: 60
+        rolling_std:
+          op: transform.rolling_std
+          version: "0.1.0"
+          inputs:
+            value: source.temperature
+          params:
+            input_column: value
+            output_column: rolling_std
+            periods: 60
+      outputs:
+        rolling_mean: rolling_mean.rolling_mean
+        rolling_std: rolling_std.rolling_std
+    thresholds:
+      max_us_per_row: 10.0
+      max_memory_mb: 200
+
+  - name: ewm_500k
+    description: "EWM mean+std on 500K sensor rows"
+    data:
+      name: perf_sensors_500k
+      rows: 500_000
+      domain: sensors
+      format: parquet
+    strategy:
+      nodes:
+        source:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_sensors_500k.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                temperature: float64
+                pressure: float64
+                humidity: float64
+                vibration: float64
+        ewm_mean:
+          op: transform.ewm_mean
+          version: "0.1.0"
+          inputs:
+            value: source.temperature
+          params:
+            input_column: value
+            output_column: ewm_mean
+            alpha: 0.1
+        ewm_std:
+          op: transform.ewm_std
+          version: "0.1.0"
+          inputs:
+            value: source.temperature
+          params:
+            input_column: value
+            output_column: ewm_std
+            alpha: 0.1
+      outputs:
+        ewm_mean: ewm_mean.ewm_mean
+        ewm_std: ewm_std.ewm_std
+    thresholds:
+      max_us_per_row: 10.0
+      max_memory_mb: 500
+
+  - name: deep_pipeline_100k
+    description: "5-node deep pipeline on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        log_close:
+          op: transform.log
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: log
+        log_delta:
+          op: transform.delta
+          version: "0.2.0"
+          inputs:
+            value: log_close.log
+          params:
+            input_column: value
+            output_column: delta
+        smoothed:
+          op: transform.rolling_mean
+          version: "0.1.0"
+          inputs:
+            value: log_delta.delta
+          params:
+            input_column: value
+            output_column: rolling_mean
+            periods: 20
+        ewm_smoothed:
+          op: transform.ewm_mean
+          version: "0.1.0"
+          inputs:
+            value: smoothed.rolling_mean
+          params:
+            input_column: value
+            output_column: ewm_mean
+            alpha: 0.05
+        final_pct:
+          op: transform.pct_change
+          version: "0.1.0"
+          inputs:
+            value: ewm_smoothed.ewm_mean
+          params:
+            input_column: value
+            output_column: pct_change
+      outputs:
+        final_pct: final_pct.pct_change
+    thresholds:
+      max_us_per_row: 15.0
+      max_memory_mb: 200
+
+  - name: deep_pipeline_1m
+    description: "5-node deep pipeline on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        log_close:
+          op: transform.log
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: log
+        log_delta:
+          op: transform.delta
+          version: "0.2.0"
+          inputs:
+            value: log_close.log
+          params:
+            input_column: value
+            output_column: delta
+        smoothed:
+          op: transform.rolling_mean
+          version: "0.1.0"
+          inputs:
+            value: log_delta.delta
+          params:
+            input_column: value
+            output_column: rolling_mean
+            periods: 20
+        ewm_smoothed:
+          op: transform.ewm_mean
+          version: "0.1.0"
+          inputs:
+            value: smoothed.rolling_mean
+          params:
+            input_column: value
+            output_column: ewm_mean
+            alpha: 0.05
+        final_pct:
+          op: transform.pct_change
+          version: "0.1.0"
+          inputs:
+            value: ewm_smoothed.ewm_mean
+          params:
+            input_column: value
+            output_column: pct_change
+      outputs:
+        final_pct: final_pct.pct_change
+    thresholds:
+      max_us_per_row: 15.0
+      max_memory_mb: 500
+
+  - name: logit_delta_100k
+    description: "Logit + delta on 100K weather rows"
+    data:
+      name: perf_weather_100k
+      rows: 100_000
+      domain: weather
+      format: csv
+    strategy:
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_weather_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                temperature: float64
+                humidity: float64
+                wind_speed: float64
+                precipitation: float64
+        temp_logit:
+          op: transform.logit
+          version: "0.1.0"
+          inputs:
+            value: source.humidity
+          params:
+            input_column: value
+            output_column: logit
+        logit_delta:
+          op: transform.delta
+          version: "0.2.0"
+          inputs:
+            value: temp_logit.logit
+          params:
+            input_column: value
+            output_column: delta
+      outputs:
+        logit_delta: logit_delta.delta
+    thresholds:
+      max_us_per_row: 10.0
+      max_memory_mb: 200

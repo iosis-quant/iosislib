@@ -1,0 +1,176 @@
+# I/O format scenarios
+# Tests CSV vs Parquet read/write performance and memory characteristics
+
+scenarios:
+  - name: csv_read_100k
+    description: "CSV source read 100K rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+      outputs:
+        data: source.close
+    thresholds:
+      max_us_per_row: 5.0
+      max_memory_mb: 200
+
+  - name: parquet_read_100k
+    description: "Parquet source read 100K rows"
+    data:
+      name: perf_sensors_100k
+      rows: 100_000
+      domain: sensors
+      format: parquet
+    strategy:
+      nodes:
+        source:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_sensors_100k.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                temperature: float64
+                pressure: float64
+                humidity: float64
+                vibration: float64
+      outputs:
+        data: source.temperature
+    thresholds:
+      max_us_per_row: 5.0
+      max_memory_mb: 200
+
+  - name: csv_read_1m
+    description: "CSV source read 1M rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+      outputs:
+        data: source.close
+    thresholds:
+      max_us_per_row: 5.0
+      max_memory_mb: 500
+
+  - name: parquet_read_1m
+    description: "Parquet source read 1M rows"
+    data:
+      name: perf_sensors_1m
+      rows: 1_000_000
+      domain: sensors
+      format: parquet
+    strategy:
+      nodes:
+        source:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_sensors_1m.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                temperature: float64
+                pressure: float64
+                humidity: float64
+                vibration: float64
+      outputs:
+        data: source.temperature
+    thresholds:
+      max_us_per_row: 5.0
+      max_memory_mb: 500
+
+  - name: csv_stream_read_500k
+    description: "CSV chunked-stream read 500K rows"
+    data:
+      name: perf_prices_500k_stream
+      rows: 500_000
+      domain: prices
+      format: csv
+      stream: true
+      chunk_rows: 50_000
+    strategy:
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_500k_stream.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+      outputs:
+        data: source.close
+    thresholds:
+      max_us_per_row: 5.0
+      max_memory_mb: 500
+
+  - name: parquet_write_vs_csv_write
+    description: "Compare write performance: Parquet vs CSV on 500K sensor rows"
+    data:
+      name: perf_sensors_500k
+      rows: 500_000
+      domain: sensors
+      format: parquet
+    strategy:
+      nodes:
+        source:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_sensors_500k.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                temperature: float64
+                pressure: float64
+                humidity: float64
+                vibration: float64
+      outputs:
+        data: source.temperature
+    thresholds:
+      max_us_per_row: 5.0
+      max_memory_mb: 500
