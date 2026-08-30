@@ -1,3 +1,12 @@
+from iosislib.tsfn.adapters.cloud_dataset import (
+    CloudDatasetManifest,
+    CloudDatasetSource,
+    CloudDatasetSourceConfig,
+)
+from iosislib.tsfn.adapters.inline_sources import (
+    DataFrameSource,
+    DataFrameSourceConfig,
+)
 from iosislib.tsfn.adapters.local_sources import (
     CSVSource,
     CSVSourceConfig,
@@ -25,9 +34,14 @@ from iosislib.tsfn.adapters.yfinance import (
 )
 
 __all__ = [
+    "CloudDatasetManifest",
+    "CloudDatasetSource",
+    "CloudDatasetSourceConfig",
     "CSVSource",
     "CSVSourceConfig",
     "ChunkManifest",
+    "DataFrameSource",
+    "DataFrameSourceConfig",
     "ParquetChunk",
     "ParquetSource",
     "ParquetSourceConfig",
