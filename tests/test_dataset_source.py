@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import json
 from datetime import datetime
 from pathlib import Path
 
@@ -12,9 +11,9 @@ from iosislib.core.graph import Graph
 from iosislib.core.node import Node
 from iosislib.core.tsfn import FrameSignature
 from iosislib.tsfn.adapters import (
-    CloudDatasetManifest,
-    CloudDatasetSource,
-    CloudDatasetSourceConfig,
+    DatasetManifest,
+    DatasetSource,
+    DatasetSourceConfig,
 )
 
 
@@ -48,24 +47,24 @@ def write_hive_dataset(base: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CloudDatasetManifest tests
+# DatasetManifest tests
 # ---------------------------------------------------------------------------
 
 
-class TestCloudDatasetManifest:
+class TestDatasetManifest:
     def test_round_trip(self) -> None:
-        manifest = CloudDatasetManifest(
+        manifest = DatasetManifest(
             format="iosis.cloud-dataset-v1",
             path="/data/**/*.parquet",
             schema={"time": "timestamp", "columns": {"value": "float64"}},
         )
         raw = manifest.to_json_bytes()
-        restored = CloudDatasetManifest.from_bytes(raw)
+        restored = DatasetManifest.from_bytes(raw)
         assert restored.path == "/data/**/*.parquet"
         assert restored.schema == {"time": "timestamp", "columns": {"value": "float64"}}
 
     def test_to_dict_includes_time_range(self) -> None:
-        manifest = CloudDatasetManifest(
+        manifest = DatasetManifest(
             format="iosis.cloud-dataset-v1",
             path="/data/**/*.parquet",
             schema={},
@@ -78,7 +77,7 @@ class TestCloudDatasetManifest:
         }
 
     def test_to_dict_omits_none_time_range(self) -> None:
-        manifest = CloudDatasetManifest(
+        manifest = DatasetManifest(
             format="iosis.cloud-dataset-v1",
             path="/data/**/*.parquet",
             schema={},
@@ -87,39 +86,39 @@ class TestCloudDatasetManifest:
 
     def test_rejects_wrong_format(self) -> None:
         with pytest.raises(ValueError, match="manifest format"):
-            CloudDatasetManifest(format="wrong", path="/x", schema={})
+            DatasetManifest(format="wrong", path="/x", schema={})
 
     def test_rejects_empty_path(self) -> None:
         with pytest.raises(ValueError, match="path"):
-            CloudDatasetManifest(format="iosis.cloud-dataset-v1", path="", schema={})
+            DatasetManifest(format="iosis.cloud-dataset-v1", path="", schema={})
 
     def test_from_dict_missing_required_field(self) -> None:
         with pytest.raises(ValueError, match="missing"):
-            CloudDatasetManifest.from_dict({"format": "iosis.cloud-dataset-v1"})
+            DatasetManifest.from_dict({"format": "iosis.cloud-dataset-v1"})
 
 
 # ---------------------------------------------------------------------------
-# CloudDatasetSourceConfig tests
+# DatasetSourceConfig tests
 # ---------------------------------------------------------------------------
 
 
-class TestCloudDatasetSourceConfig:
+class TestDatasetSourceConfig:
     def test_local_path(self, tmp_path: Path) -> None:
-        config = CloudDatasetSourceConfig(
+        config = DatasetSourceConfig(
             path=str(tmp_path / "**" / "*.parquet"),
             output_signature=FLOAT_SIGNATURE,
         )
         assert config.path == str(tmp_path / "**" / "*.parquet")
 
     def test_s3_path(self) -> None:
-        config = CloudDatasetSourceConfig(
+        config = DatasetSourceConfig(
             path="s3://my-bucket/data/**/*.parquet",
             output_signature=FLOAT_SIGNATURE,
         )
         assert config.path == "s3://my-bucket/data/**/*.parquet"
 
     def test_validates_time_range(self, tmp_path: Path) -> None:
-        config = CloudDatasetSourceConfig(
+        config = DatasetSourceConfig(
             path=str(tmp_path / "**" / "*.parquet"),
             output_signature=FLOAT_SIGNATURE,
             time_range=("2026-01-01", "2026-12-31"),
@@ -128,7 +127,7 @@ class TestCloudDatasetSourceConfig:
 
     def test_rejects_invalid_time_range(self, tmp_path: Path) -> None:
         with pytest.raises(TypeError, match="time_range"):
-            CloudDatasetSourceConfig(
+            DatasetSourceConfig(
                 path=str(tmp_path / "**" / "*.parquet"),
                 output_signature=FLOAT_SIGNATURE,
                 time_range="2026-01-01",
@@ -136,18 +135,18 @@ class TestCloudDatasetSourceConfig:
 
 
 # ---------------------------------------------------------------------------
-# CloudDatasetSource tests
+# DatasetSource tests
 # ---------------------------------------------------------------------------
 
 
-class TestCloudDatasetSource:
+class TestDatasetSource:
     def test_scans_hive_partitioned_dataset(self, tmp_path: Path) -> None:
         base = tmp_path / "data"
         write_hive_dataset(base)
 
         result = Graph(
             Node(
-                CloudDatasetSource,
+                DatasetSource,
                 parameters={
                     "path": str(base / "**" / "*.parquet"),
                     "output_signature": FLOAT_SIGNATURE,
@@ -166,7 +165,7 @@ class TestCloudDatasetSource:
 
         result = Graph(
             Node(
-                CloudDatasetSource,
+                DatasetSource,
                 parameters={
                     "path": str(base / "**" / "*.parquet"),
                     "output_signature": FrameSignature(
@@ -186,7 +185,7 @@ class TestCloudDatasetSource:
 
         result = Graph(
             Node(
-                CloudDatasetSource,
+                DatasetSource,
                 parameters={
                     "path": str(base / "**" / "*.parquet"),
                     "output_signature": FLOAT_SIGNATURE,
@@ -205,7 +204,7 @@ class TestCloudDatasetSource:
 
         result = Graph(
             Node(
-                CloudDatasetSource,
+                DatasetSource,
                 parameters={
                     "path": str(base / "**" / "*.parquet"),
                     "output_signature": FLOAT_SIGNATURE,
@@ -225,7 +224,7 @@ class TestCloudDatasetSource:
 
         result = Graph(
             Node(
-                CloudDatasetSource,
+                DatasetSource,
                 parameters={
                     "path": str(flat / "*.parquet"),
                     "output_signature": FLOAT_SIGNATURE,
@@ -249,7 +248,7 @@ class TestCloudDatasetSource:
 
         result = Graph(
             Node(
-                CloudDatasetSource,
+                DatasetSource,
                 parameters={
                     "path": str(base / "**" / "*.parquet"),
                     "output_signature": FLOAT_SIGNATURE,

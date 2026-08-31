@@ -1,4 +1,4 @@
-﻿# Repository Guidelines
+# Repository Guidelines
 
 ## Project Purpose
 
@@ -95,13 +95,13 @@ A `Model` is an immutable, serializable checkpoint. `SupervisedModel.fit()` cons
 
 Do not add `available_at` or framework-wide bitemporality casually. The graph enforces causal parent alignment, and the model loop trains only on earlier rows. Domain-specific label availability and sophisticated purging/embargo behavior belong in explicit splitter/feature programs.
 
-## Identity, Serialization, And Future Caching
+## Identity, Serialization, And Caching
 
 TSFN version, qualified class name, resolved signatures, normalized parameters, bindings, tolerances, effective null policies/relevant fill values, effective materialization, and outputs contribute to node identity. Names are human labels only. Graph IDs derive from the canonical topological tuple and root ID.
 
 Serialization must be deterministic: sort mapping keys/items, normalize unordered values, reject unsupported or non-finite values, and never use process-local identity. New value/config/helper classes that enter IDs need stable `to_dict()`/`__str__()` behavior. The `iosislib` namespace migration intentionally invalidated pre-migration qualified-name-based Node and Graph IDs; future module moves are identity migrations too.
 
-Caching is not implemented yet. When added, cached deterministic results should supersede scheduler labels such as "always": identical node identity and inputs should reuse the same result. Do not weaken identity now to make a speculative cache easier.
+`LocalExecutor` caches materialized node results as Parquet files keyed by node ID. Cache location is set via `cache_dir` parameter or the `IOSIS_CACHE_DIR` environment variable. During topological traversal, materialized nodes check the cache first; on a hit, the result is loaded via `pl.scan_parquet()` and computation is skipped entirely. Cache writes that fail are silently ignored. The root node is cached in `execute()` only when it is a declared materialization boundary. Non-materialized nodes are never cached.
 
 ## Adapters And Existing Behavior
 

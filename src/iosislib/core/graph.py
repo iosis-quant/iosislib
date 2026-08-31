@@ -3,9 +3,12 @@ from __future__ import annotations
 import abc
 import hashlib
 import json
+import os
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -235,7 +238,159 @@ class Executor(abc.ABC):
 
 
 class LocalExecutor(Executor):
-    """Execute a graph on one machine using Polars' local query engine."""
+    """Execute a graph on one machine using Polars' local query engine.
+
+    When a ``cache_dir`` is provided (or ``IOSIS_CACHE_DIR`` is set),
+    materialized node results are persisted as Parquet files and reused
+    on subsequent executions with identical node identity.  Cache hits
+    replace the node's computation with a lazy Parquet scan, skipping
+    ``lower_node()`` and ``materialize()`` entirely.
+    """
+
+    def __init__(
+        self,
+        cache_dir: str | os.PathLike[str] | None = None,
+        no_cache: bool = False,
+        s3_credentials: S3CredentialsProvider | None = None,
+    ) -> None:
+        super().__init__(s3_credentials=s3_credentials)
+        resolved: Path | None = None
+        if cache_dir is not None:
+            resolved = Path(cache_dir)
+        elif not no_cache:
+            env = os.environ.get("IOSIS_CACHE_DIR")
+            if env:
+                resolved = Path(env)
+        self._cache_dir: Path | None = resolved
+        self._no_cache = no_cache
+
+    @property
+    def _cache_enabled(self) -> bool:
+        return (
+            not self._no_cache
+            and self._cache_dir is not None
+            and self._cache_dir.is_dir()
+        )
+
+    def _cache_entry_dir(self, node_id: str) -> Path:
+        assert self._cache_dir is not None
+        return (
+            self._cache_dir
+            / node_id[:2]
+            / node_id[2:4]
+            / node_id[4:6]
+            / node_id[6:]
+        )
+
+    def _read_cache(self, node_id: str) -> pl.LazyFrame | None:
+        try:
+            entry = self._cache_entry_dir(node_id)
+            manifest_path = entry / "manifest.json"
+            if not manifest_path.exists():
+                return None
+            manifest = json.loads(manifest_path.read_text())
+            if not manifest.get("success", False):
+                return None
+            parquet_files = sorted(entry.glob("*.parquet"))
+            if not parquet_files:
+                return None
+            return pl.scan_parquet(
+                [str(p) for p in parquet_files],
+                hive_partitioning=False,
+            )
+        except Exception:
+            return None
+
+    def _write_cache(self, node_id: str, df: pl.DataFrame) -> None:
+        try:
+            entry = self._cache_entry_dir(node_id)
+            entry.mkdir(parents=True, exist_ok=True)
+            data_path = entry / "data.parquet"
+            df.write_parquet(data_path)
+            manifest = {
+                "node_id": node_id,
+                "success": True,
+                "row_count": df.shape[0],
+                "column_count": df.shape[1],
+                "columns": df.columns,
+                "schema": {col: str(df.schema[col]) for col in df.columns},
+                "byte_size": data_path.stat().st_size,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            (entry / "manifest.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True)
+            )
+        except Exception:
+            pass
+
+    def execute(self, graph: Graph) -> pl.DataFrame:
+        if self._cache_enabled:
+            cached = self._read_cache(graph.root_node.ID)
+            if cached is not None:
+                return cached.collect()
+        with _s3_credentials_scope(self._s3_credentials):
+            root_lf = self._evaluate_to_root(graph)
+            result = self.materialize(graph.root_node, root_lf)
+            if self._cache_enabled and graph.root_node.ID in graph.materialized_node_ids:
+                self._write_cache(graph.root_node.ID, result)
+            return result
+
+    def _evaluate_to_root(self, graph: Graph) -> pl.LazyFrame:
+        results: dict[str, pl.LazyFrame] = {}
+
+        for node in graph.node_list:
+            if node.ID not in graph.materialized_node_ids:
+                try:
+                    node_input_lf = (
+                        None
+                        if not node.bindings
+                        else self.align_inputs(node, results)
+                    )
+                    results[node.ID] = self.lower_node(node, node_input_lf)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Execution failed at node "
+                        f"'{node.name or node.ID[:8]}' "
+                        f"({node.function_cls.__name__}@"
+                        f"{node.function.version}): {exc}"
+                    ) from exc
+                continue
+
+            is_root = node.ID == graph.root_node.ID
+
+            if self._cache_enabled:
+                cached = self._read_cache(node.ID)
+                if cached is not None:
+                    if is_root:
+                        results[node.ID] = cached
+                    else:
+                        results[node.ID] = cached.lazy()
+                    continue
+
+            try:
+                node_input_lf = (
+                    None
+                    if not node.bindings
+                    else self.align_inputs(node, results)
+                )
+                lf = self.lower_node(node, node_input_lf)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Execution failed at node "
+                    f"'{node.name or node.ID[:8]}' "
+                    f"({node.function_cls.__name__}@"
+                    f"{node.function.version}): {exc}"
+                ) from exc
+
+            if is_root:
+                results[node.ID] = lf
+            else:
+                df = self.materialize(node, lf)
+                if self._cache_enabled:
+                    self._write_cache(node.ID, df)
+                results[node.ID] = df.lazy()
+
+        return results[graph.root_node.ID]
 
     def materialize(self, node: Node, lf: pl.LazyFrame) -> pl.DataFrame:
         try:

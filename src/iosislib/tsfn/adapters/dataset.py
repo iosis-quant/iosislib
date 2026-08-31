@@ -96,7 +96,7 @@ def _validate_time_range(value: object) -> tuple[str, str] | None:
 
 
 @dataclass(frozen=True, slots=True)
-class CloudDatasetManifest:
+class DatasetManifest:
     """Metadata for a partitioned dataset."""
 
     format: str
@@ -142,7 +142,7 @@ class CloudDatasetManifest:
         ).encode("utf-8")
 
     @classmethod
-    def from_dict(cls, value: object) -> CloudDatasetManifest:
+    def from_dict(cls, value: object) -> DatasetManifest:
         if not isinstance(value, dict):
             raise ValueError("manifest must be a JSON object")
         required = {"format", "path", "schema"}
@@ -166,7 +166,7 @@ class CloudDatasetManifest:
         )
 
     @classmethod
-    def from_bytes(cls, raw: bytes) -> CloudDatasetManifest:
+    def from_bytes(cls, raw: bytes) -> DatasetManifest:
         try:
             parsed = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -175,7 +175,7 @@ class CloudDatasetManifest:
 
 
 @dataclass(frozen=True)
-class CloudDatasetSourceConfig(TSFNConfig):
+class DatasetSourceConfig(TSFNConfig):
     """Configuration for scanning a Parquet dataset.
 
     ``path`` is a glob pattern pointing to Parquet files (local or S3).
@@ -204,7 +204,7 @@ class CloudDatasetSourceConfig(TSFNConfig):
         object.__setattr__(self, "time_range", _validate_time_range(self.time_range))
 
 
-class CloudDatasetSource(TSFN):
+class DatasetSource(TSFN):
     """Scan a Parquet dataset as a single logical table.
 
     Uses Polars' native ``scan_parquet`` with ``hive_partitioning=True``.
@@ -217,7 +217,7 @@ class CloudDatasetSource(TSFN):
     """
 
     VERSION = "0.1.0"
-    CONFIG_CLS = CloudDatasetSourceConfig
+    CONFIG_CLS = DatasetSourceConfig
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
         return FrameSignature.empty(), self.parameters.output_signature
@@ -249,7 +249,7 @@ class CloudDatasetSource(TSFN):
 
 
 __all__ = [
-    "CloudDatasetManifest",
-    "CloudDatasetSource",
-    "CloudDatasetSourceConfig",
+    "DatasetManifest",
+    "DatasetSource",
+    "DatasetSourceConfig",
 ]
