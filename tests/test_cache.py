@@ -419,3 +419,71 @@ class TestCachePersists:
         result2 = graph.execute(executor=executor)
         assert result1.equals(result2)
         assert len(_cache_files(tmp_path)) == 1
+
+
+# ---------------------------------------------------------------------------
+# S3 cache
+# ---------------------------------------------------------------------------
+
+
+class TestS3Cache:
+    def test_s3_uri_detected(self) -> None:
+        executor = LocalExecutor(cache_dir="s3://my-bucket/cache")
+        assert executor._cache_s3 is True
+        assert executor._cache_dir is None
+        assert executor._cache_enabled is True
+
+    def test_s3_entry_key_format(self) -> None:
+        executor = LocalExecutor(cache_dir="s3://my-bucket/cache")
+        node_id = "abcdef0123456789" + "0" * 48
+        key = executor._cache_entry_key(node_id)
+        assert key == "s3://my-bucket/cache/ab/cd/ef/0123456789" + "0" * 48
+
+    def test_s3_cache_round_trip(self, tmp_path: Path) -> None:
+        graph = _make_source_graph()
+        node_id = graph.root_node.ID
+
+        local_cache = tmp_path / "local"
+        local_cache.mkdir()
+        executor = LocalExecutor(cache_dir=local_cache)
+        graph.execute(executor=executor)
+
+        entry = executor._cache_entry_dir(node_id)
+        manifest = json.loads((entry / "manifest.json").read_text())
+        assert manifest["success"] is True
+
+    def test_s3_read_cache_returns_none_when_no_credentials(self) -> None:
+        from iosislib.core.utils import _s3_credentials_scope
+
+        executor = LocalExecutor(cache_dir="s3://bucket/cache")
+        with _s3_credentials_scope(None):
+            result = executor._read_cache_s3("abcdef0123456789" + "0" * 48)
+        assert result is None
+
+    def test_s3_write_cache_swallows_exceptions(self) -> None:
+        from iosislib.core.utils import _s3_credentials_scope
+
+        executor = LocalExecutor(cache_dir="s3://bucket/cache")
+        df = pl.DataFrame({"a": [1, 2, 3]})
+        with _s3_credentials_scope(None):
+            executor._write_cache_s3("abcdef0123456789" + "0" * 48, df)
+
+    def test_s3_env_var_cache_dir(self) -> None:
+        import os
+
+        with patch.dict(os.environ, {"IOSIS_CACHE_DIR": "s3://my-bucket/cache"}):
+            executor = LocalExecutor()
+            assert executor._cache_s3 is True
+            assert executor._cache_enabled is True
+
+    def test_s3_cache_disabled_with_no_cache(self) -> None:
+        executor = LocalExecutor(cache_dir="s3://bucket/cache", no_cache=True)
+        assert executor._cache_enabled is False
+
+    def test_s3_storage_options_empty_without_credentials(self) -> None:
+        from iosislib.core.utils import _s3_credentials_scope
+
+        executor = LocalExecutor(cache_dir="s3://bucket/cache")
+        with _s3_credentials_scope(None):
+            opts = executor._s3_storage_options()
+        assert opts == {}

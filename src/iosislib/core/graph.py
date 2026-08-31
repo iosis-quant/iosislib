@@ -29,6 +29,7 @@ from iosislib.core.utils import (
     _format_tolerance,
     _s3_credentials_scope,
     _serialize_value,
+    current_s3_credentials,
 )
 
 
@@ -245,6 +246,10 @@ class LocalExecutor(Executor):
     on subsequent executions with identical node identity.  Cache hits
     replace the node's computation with a lazy Parquet scan, skipping
     ``lower_node()`` and ``materialize()`` entirely.
+
+    ``cache_dir`` may be a local filesystem path or an S3 URI such as
+    ``s3://bucket/cache``.  S3 reads use the scoped ``S3Credentials``
+    from the executor; S3 writes use PyArrow's ``S3FileSystem``.
     """
 
     def __init__(
@@ -254,23 +259,30 @@ class LocalExecutor(Executor):
         s3_credentials: S3CredentialsProvider | None = None,
     ) -> None:
         super().__init__(s3_credentials=s3_credentials)
-        resolved: Path | None = None
+        raw: str | None = None
         if cache_dir is not None:
-            resolved = Path(cache_dir)
+            raw = str(cache_dir)
         elif not no_cache:
-            env = os.environ.get("IOSIS_CACHE_DIR")
-            if env:
-                resolved = Path(env)
-        self._cache_dir: Path | None = resolved
+            raw = os.environ.get("IOSIS_CACHE_DIR")
+        self._cache_raw: str | None = raw
+        self._cache_s3: bool = raw is not None and raw.startswith("s3://")
+        self._cache_dir: Path | None = (
+            None if raw is None or self._cache_s3 else Path(raw)
+        )
         self._no_cache = no_cache
 
     @property
     def _cache_enabled(self) -> bool:
-        return (
-            not self._no_cache
-            and self._cache_dir is not None
-            and self._cache_dir.is_dir()
-        )
+        if self._no_cache or self._cache_raw is None:
+            return False
+        if self._cache_s3:
+            return True
+        return self._cache_dir is not None and self._cache_dir.is_dir()
+
+    def _cache_entry_key(self, node_id: str) -> str:
+        assert self._cache_raw is not None
+        prefix = self._cache_raw.rstrip("/")
+        return f"{prefix}/{node_id[:2]}/{node_id[2:4]}/{node_id[4:6]}/{node_id[6:]}"
 
     def _cache_entry_dir(self, node_id: str) -> Path:
         assert self._cache_dir is not None
@@ -282,7 +294,39 @@ class LocalExecutor(Executor):
             / node_id[6:]
         )
 
+    def _s3_storage_options(self) -> dict[str, str]:
+        credentials = current_s3_credentials()
+        if credentials is None:
+            return {}
+        options: dict[str, str] = {
+            "aws_access_key_id": credentials.access_key,
+            "aws_secret_access_key": credentials.secret_key,
+        }
+        if credentials.session_token is not None:
+            options["aws_session_token"] = credentials.session_token
+        if credentials.region is not None:
+            options["aws_region"] = credentials.region
+        return options
+
+    def _open_s3_filesystem(self):  # type: ignore[no-untyped-def]
+        from pyarrow.fs import S3FileSystem
+
+        credentials = current_s3_credentials()
+        if credentials is None:
+            return S3FileSystem()
+        return S3FileSystem(
+            access_key=credentials.access_key,
+            secret_key=credentials.secret_key,
+            session_token=credentials.session_token,
+            region=credentials.region,
+        )
+
     def _read_cache(self, node_id: str) -> pl.LazyFrame | None:
+        if self._cache_s3:
+            return self._read_cache_s3(node_id)
+        return self._read_cache_local(node_id)
+
+    def _read_cache_local(self, node_id: str) -> pl.LazyFrame | None:
         try:
             entry = self._cache_entry_dir(node_id)
             manifest_path = entry / "manifest.json"
@@ -301,7 +345,38 @@ class LocalExecutor(Executor):
         except Exception:
             return None
 
+    def _read_cache_s3(self, node_id: str) -> pl.LazyFrame | None:
+        try:
+            key_prefix = self._cache_entry_key(node_id)
+            bare = key_prefix.removeprefix("s3://")
+            filesystem = self._open_s3_filesystem()
+
+            from pyarrow.fs import FileType
+
+            manifest_key = f"{bare}/manifest.json"
+            info = filesystem.get_file_info(manifest_key)
+            if info.type != FileType.File:
+                return None
+            with filesystem.open_input_stream(manifest_key) as stream:
+                manifest = json.loads(stream.read().decode("utf-8"))
+            if not manifest.get("success", False):
+                return None
+            storage_options = self._s3_storage_options()
+            return pl.scan_parquet(
+                f"{key_prefix}/*.parquet",
+                hive_partitioning=False,
+                storage_options=storage_options,
+            )
+        except Exception:
+            return None
+
     def _write_cache(self, node_id: str, df: pl.DataFrame) -> None:
+        if self._cache_s3:
+            self._write_cache_s3(node_id, df)
+        else:
+            self._write_cache_local(node_id, df)
+
+    def _write_cache_local(self, node_id: str, df: pl.DataFrame) -> None:
         try:
             entry = self._cache_entry_dir(node_id)
             entry.mkdir(parents=True, exist_ok=True)
@@ -320,6 +395,38 @@ class LocalExecutor(Executor):
             (entry / "manifest.json").write_text(
                 json.dumps(manifest, indent=2, sort_keys=True)
             )
+        except Exception:
+            pass
+
+    def _write_cache_s3(self, node_id: str, df: pl.DataFrame) -> None:
+        try:
+            key_prefix = self._cache_entry_key(node_id)
+            bare = key_prefix.removeprefix("s3://")
+            filesystem = self._open_s3_filesystem()
+
+            import io
+
+            buffer = io.BytesIO()
+            df.write_parquet(buffer)
+            parquet_bytes = buffer.getvalue()
+            filesystem.create_dir(bare, recursive=True)
+            with filesystem.open_output_stream(f"{bare}/data.parquet") as stream:
+                stream.write(parquet_bytes)
+
+            manifest = {
+                "node_id": node_id,
+                "success": True,
+                "row_count": df.shape[0],
+                "column_count": df.shape[1],
+                "columns": df.columns,
+                "schema": {col: str(df.schema[col]) for col in df.columns},
+                "byte_size": len(parquet_bytes),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            with filesystem.open_output_stream(f"{bare}/manifest.json") as stream:
+                stream.write(
+                    json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
+                )
         except Exception:
             pass
 
