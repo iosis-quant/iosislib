@@ -34,9 +34,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Chris2Rich/iosislib"
-Issues = "https://github.com/Chris2Rich/iosislib/issues"
-Repository = "https://github.com/Chris2Rich/iosislib.git"
+Homepage = "https://github.com/iosis-quant/iosislib"
+Issues = "https://github.com/iosis-quant/iosislib/issues"
+Repository = "https://github.com/iosis-quant/iosislib.git"
 
 [project.optional-dependencies]
 charting = [
