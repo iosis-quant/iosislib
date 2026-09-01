@@ -2,9 +2,9 @@
 
 ## Project Purpose
 
-iosislib is a typed, deterministic, time-aware computation graph for feature engineering and model workflows over Polars time-series data. A user program constructs the graph IR in ordinary Python. The graph validates schemas and lineage, aligns parent data causally, and executes through an `Executor`. Deterministic identities are intended to support later caching and distributed execution.
+iosisLib is a typed, deterministic, time-aware computation graph for feature engineering and model workflows over Polars time-series data. A user program constructs the graph IR in ordinary Python. The graph validates schemas and lineage, aligns parent data causally, and executes through an `Executor`. Deterministic identities are intended to support later caching and distributed execution.
 
-Keep the library narrower than a generic workflow orchestrator or backtester. Polars is the columnar execution engine; iosislib owns graph semantics, temporal alignment, type contracts, governance, and model lifecycle boundaries. Backtesting, caching, Ray execution, a portable TOML/YAML strategy DSL, and richer observability are future layers, not reasons to distort the current core.
+Keep the library narrower than a generic workflow orchestrator or backtester. Polars is the columnar execution engine; iosisLib owns graph semantics, temporal alignment, type contracts, governance, and model lifecycle boundaries. Backtesting, caching, Ray execution, a portable TOML/YAML strategy DSL, and richer observability are future layers, not reasons to distort the current core.
 
 ## Source Layout And Imports
 
@@ -99,7 +99,7 @@ Do not add `available_at` or framework-wide bitemporality casually. The graph en
 
 TSFN version, qualified class name, resolved signatures, normalized parameters, bindings, tolerances, effective null policies/relevant fill values, effective materialization, and outputs contribute to node identity. Names are human labels only. Graph IDs derive from the canonical topological tuple and root ID.
 
-Serialization must be deterministic: sort mapping keys/items, normalize unordered values, reject unsupported or non-finite values, and never use process-local identity. New value/config/helper classes that enter IDs need stable `to_dict()`/`__str__()` behavior. The `iosislib` namespace migration intentionally invalidated pre-migration qualified-name-based Node and Graph IDs; future module moves are identity migrations too.
+Serialization must be deterministic: sort mapping keys/items, normalize unordered values, reject unsupported or non-finite values, and never use process-local identity. New value/config/helper classes that enter IDs need stable `to_dict()`/`__str__()` behavior. The `iosisLib` namespace migration intentionally invalidated pre-migration qualified-name-based Node and Graph IDs; future module moves are identity migrations too.
 
 `LocalExecutor` caches materialized node results as Parquet files keyed by node ID. Cache location is set via `cache_dir` parameter or the `IOSIS_CACHE_DIR` environment variable. During topological traversal, materialized nodes check the cache first; on a hit, the result is loaded via `pl.scan_parquet()` and computation is skipped entirely. Cache writes that fail are silently ignored. The root node is cached in `execute()` only when it is a declared materialization boundary. Non-materialized nodes are never cached.
 
