@@ -1,4 +1,4 @@
-# iosislib
+# iosisLib
 
 iosislib is a Python library for typed, deterministic, time-aware computation
 graphs over Polars time-series data. It owns graph validation,
