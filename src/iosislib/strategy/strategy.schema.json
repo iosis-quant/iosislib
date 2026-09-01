@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tryiosis.vercel.app/schema/strategy/0.1.0.json",
+  "$id": "https://iosis.dev/schema/strategy/0.1.0.json",
   "title": "iosis strategy",
   "description": "Portable declaration of a time-aware strategy graph.",
   "type": "object",
