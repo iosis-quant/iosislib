@@ -1,20 +1,45 @@
 # iosislib
 
-iosislib is a pre-alpha Python library for typed, deterministic, time-aware
-computation graphs over Polars time-series data. It owns graph validation,
-causal parent alignment, null policies, materialization boundaries, and model
-lifecycle contracts while Polars remains the columnar execution engine.
+iosislib is a Python library for typed, deterministic, time-aware computation
+graphs over Polars time-series data. It owns graph validation,
+causal parent alignment, null policies, materialization boundaries, model
+lifecycle contracts, and graph-native backtesting while Polars remains the
+columnar execution engine.
 
-The distribution is not published yet. Install it from a checkout with Python
-3.11, 3.12, or 3.13:
+Install from PyPI with Python 3.11, 3.12, or 3.13:
 
 ```console
-python -m pip install .
+pip install iosislib
+```
+
+Optional extras:
+
+```console
+pip install iosislib[charting]   # matplotlib helpers
+pip install iosislib[lightgbm]   # LightGBM model TSFN
+pip install iosislib[yfinance]   # yfinance adapter (also pulls pandas)
+pip install iosislib[acceleration] # numba JIT acceleration
 ```
 
 The installed package namespace is `iosislib`. Owning modules such as
 `iosislib.core.graph` remain canonical, with a small top-level convenience
 surface for `Graph`, `Node`, and frame signatures.
+
+## Modules
+
+- **`iosislib.core`** -- graph, node, TSFN base classes, model lifecycle, and utilities.
+- **`iosislib.tsfn.transforms`** -- concrete transforms: delta, logit, log, exp,
+  spread, ratio, lag, lead, rolling, ewm, pct_change, log_return, log_ratio,
+  negate, feature_packer, feature_unpacker.
+- **`iosislib.tsfn.adapters`** -- data sources: dataset, parquet, csv, dataframe,
+  streaming parquet, yfinance, polymarket.
+- **`iosislib.models`** -- supervised model TSFNs: LightGBM, DenseMLP.
+- **`iosislib.backtest`** -- graph-native immediate-execution backtesting:
+  policies, risk controls, venue, and feeds.
+- **`iosislib.strategy`** -- portable `iosis.strategy` YAML parsing, lowering,
+  and the operation registry.
+- **`iosislib.metrics`** -- post-hoc metric extraction over materialized frames.
+- **`iosislib.charting`** -- Matplotlib helpers for plotting graph results.
 
 ## Offline quickstart
 
@@ -106,6 +131,8 @@ Tracked tests use local fixtures or mock remote API boundaries; they do not
 require live market or finance services. CI runs the full suite on Windows and
 Ubuntu for every declared Python version, then validates both source and wheel
 distributions in a clean environment outside the checkout.
+
+Releases publish to PyPI automatically when a `v*` tag is pushed.
 
 ## Portable strategy declarations
 
