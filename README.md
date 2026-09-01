@@ -1,4 +1,4 @@
-﻿# iosislib
+# iosislib
 
 iosislib is a pre-alpha Python library for typed, deterministic, time-aware
 computation graphs over Polars time-series data. It owns graph validation,
@@ -118,7 +118,7 @@ deterministic serializer, fingerprint, and packaged JSON Schema are documented i
 [the strategy format specification](docs/strategy-format.md). A backend
 operation registry/compiler is intentionally a later layer.
 
-See [TODO.md](TODO.md) for the ordered roadmap and [AGENTS.md](AGENTS.md) for
+See [AGENTS.md](AGENTS.md) for
 the architectural and contribution constraints.
 
 Third-party TSFN and model authors should start with the
