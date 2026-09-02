@@ -281,7 +281,7 @@ def test_resolve_missing_output_raises() -> None:
         resolve_metric_specs(parse_metric_specs(_strategy(metrics).metadata), _lowered())
 
 
-def test_resolve_rejects_node_that_will_not_be_cached() -> None:
+def test_resolve_accepts_non_materialized_nodes() -> None:
     uncached = {
         "base": {"op": "test.source", "version": "1.0.0", "params": {"value": 1.0}},
         "target": {
@@ -324,8 +324,10 @@ def test_resolve_rejects_node_that_will_not_be_cached() -> None:
     )
     lowered = lower(strategy, REGISTRY)
 
-    with pytest.raises(StrategyLoweringError, match="must be materialized"):
-        resolve_metric_specs(parse_metric_specs(strategy.metadata), lowered)
+    # The executor reads the cache for every node regardless of its
+    # materialization declaration, so any referenced node is cacheable.
+    resolved = resolve_metric_specs(parse_metric_specs(strategy.metadata), lowered)
+    assert {spec.name for spec in resolved} == {"mse"}
 
 
 def test_resolve_accepts_root_and_source_nodes() -> None:

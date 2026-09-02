@@ -309,7 +309,7 @@ def test_explicit_root_materialization_is_not_performed_twice() -> None:
     assert executor.materialized_nodes == [root.ID]
 
 
-def test_node_materialization_is_effective_semantic_identity() -> None:
+def test_node_materialization_does_not_affect_identity() -> None:
     source = source_node("source", (0,), (10,))
     lazy_middle = Node(
         NeedsInput,
@@ -327,14 +327,15 @@ def test_node_materialization_is_effective_semantic_identity() -> None:
     lazy_graph = Graph(lazy_root)
     material_graph = Graph(material_root)
 
-    assert lazy_middle.ID != material_middle.ID
-    assert lazy_root.ID != material_root.ID
-    assert lazy_graph.ID != material_graph.ID
+    assert lazy_middle.ID == material_middle.ID
+    assert lazy_root.ID == material_root.ID
+    assert lazy_graph.ID == material_graph.ID
+    # Materialization is execution state only; the root is not forced.
     assert lazy_graph.materialized_node_ids == frozenset()
     assert material_graph.materialized_node_ids == frozenset({material_middle.ID})
 
 
-def test_mixed_materialization_declarations_execute_as_distinct_nodes() -> None:
+def test_same_node_identity_across_materialization_flags() -> None:
     lazy = Node(
         SeriesSource,
         parameters={"minutes": (0,), "values": (10,)},
@@ -346,20 +347,20 @@ def test_mixed_materialization_declarations_execute_as_distinct_nodes() -> None:
         materialize=True,
     )
     root = Node(
-        CombineValues,
-        bindings={"left": lazy.value, "right": materialized.value},
+        NeedsInput,
+        bindings={"value": materialized.value},
+        name="root",
     )
     executor = RecordingExecutor()
     graph = Graph(root)
 
     result = graph.execute(executor=executor)
 
-    assert lazy.ID != materialized.ID
-    assert graph.node_list == (lazy, materialized, root)
-    assert executor.lowered_nodes == [lazy.ID, materialized.ID, root.ID]
+    assert lazy.ID == materialized.ID
+    assert graph.node_list == (materialized, root)
+    assert executor.lowered_nodes == [materialized.ID, root.ID]
     assert executor.materialized_nodes == [materialized.ID, root.ID]
-    assert result["left"].to_list() == [10]
-    assert result["right"].to_list() == [10]
+    assert result["value"].to_list() == [10]
 
 
 def test_tsfn_materialization_requirement_defaults_node_intent_and_is_verified() -> None:

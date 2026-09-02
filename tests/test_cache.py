@@ -404,6 +404,56 @@ class TestMaterializedTransformCached:
 
 
 # ---------------------------------------------------------------------------
+# Cache reuse across materialization boundaries
+# ---------------------------------------------------------------------------
+
+
+class TestCacheReuseAcrossMaterialization:
+    def test_lazy_node_reuses_cache_written_by_materialized_graph(
+        self, tmp_path: Path
+    ) -> None:
+        # A node identity shared by two graphs: one that materializes it and
+        # one that leaves it lazy. The lazy graph must find the cached frame.
+        source = Node(SimpleSource, name="source", materialize=True)
+        doubled_materialized = Node(
+            Doubler,
+            bindings={"value": source.output("value")},
+            name="doubler",
+            materialize=True,
+        )
+        materialized_graph = Graph(doubled_materialized)
+        doubled_lazy = Node(
+            Doubler,
+            bindings={"value": source.output("value")},
+            name="doubler",
+            materialize=False,
+        )
+        lazy_graph = Graph(doubled_lazy)
+
+        # Node identity is independent of the materialization flag.
+        assert doubled_materialized.ID == doubled_lazy.ID
+
+        executor = LocalExecutor(cache_dir=tmp_path)
+        first = materialized_graph.execute(executor=executor)
+
+        call_count = 0
+        original_apply = Doubler.apply
+
+        def counting_apply(self: Doubler, lf: pl.LazyFrame | None) -> pl.LazyFrame:
+            nonlocal call_count
+            call_count += 1
+            return original_apply(self, lf)
+
+        with patch.object(Doubler, "apply", counting_apply):
+            second = lazy_graph.execute(executor=executor)
+
+        assert first["value"].to_list() == second["value"].to_list()
+        # The lazy graph hit the cache written by the materialized graph, so
+        # the transform's apply was never invoked again.
+        assert call_count == 0
+
+
+# ---------------------------------------------------------------------------
 # Cache persists across executions
 # ---------------------------------------------------------------------------
 

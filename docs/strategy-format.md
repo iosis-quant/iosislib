@@ -80,7 +80,10 @@ inputs:
 - `params` contains operation-specific, JSON-compatible values.
 - `inputs` maps the operation's input names to `node.output` references.
 - `materialize` is optional. Omission lets the operation contract choose its
-  required behavior; an explicit value is a strategy declaration.
+  required behavior; an explicit value is a strategy declaration. It is execution
+  state only and never contributes to node or graph identity. Declared nodes are
+  collected and their frames persisted to the executor's cache; every node's
+  cached frame is read back regardless of this flag.
 - `outputs` gives public names to one or more `node.output` references and
   determines which nodes belong to the strategy.
 

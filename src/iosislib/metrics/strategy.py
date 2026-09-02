@@ -18,9 +18,9 @@ output name must match the configured column name; renaming is not supported.
 
 Metric configuration never affects graph identity: it is validated during
 compilation but contributes nothing to node definitions or output graphs.
-Resolution only guarantees that each referenced node is one whose output the
-executor will cache, so the metrics can be computed after the fact from cached
-frames without re-execution.
+Because the executor reads and writes the cache for every node regardless of
+the current materialization boundary, any referenced node's frame can be
+materialized for metric extraction without re-execution.
 """
 
 from __future__ import annotations
@@ -220,11 +220,12 @@ def parse_metric_specs(
 
 
 def _is_cached(node: CoreNode[Any], root_nodes: set[CoreNode[Any]]) -> bool:
-    if node.materialize:
-        return True
-    if node in root_nodes:
-        return True
-    return not node.bindings
+    # The executor reads the cache for every node regardless of the current
+    # materialization boundary, and any node can be made the root of its own
+    # graph (which always materializes).  Every node referenced by a metric
+    # is therefore cacheable.
+    del node, root_nodes
+    return True
 
 
 def resolve_metric_specs(

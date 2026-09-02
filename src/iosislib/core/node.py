@@ -362,7 +362,6 @@ class Node(Generic[ConfigT]):
         node_definition = {
             "bindings": serialized_bindings,
             "function": _format_function_identity(self.function_cls, self.function),
-            "materialize": self.materialize,
             "null_fill_values": self.null_fill_values,
             "null_handlers": _format_null_handlers(
                 self.null_handlers,

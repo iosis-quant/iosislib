@@ -122,14 +122,6 @@ class Executor(abc.ABC):
         self,
         s3_credentials: S3CredentialsProvider | None = None,
     ) -> None:
-        """Optionally scope explicit S3 credentials for the whole execution.
-
-        ``s3_credentials`` may be an ``S3Credentials`` value or a provider
-        callable that returns fresh credentials (or ``None``) each execution,
-        so a long-running process can keep temporary task-role credentials
-        valid. Credentials are execution state only and never contribute to
-        node or graph identity.
-        """
         self._s3_credentials: S3CredentialsProvider | None = s3_credentials
 
     def execute(self, graph: Graph) -> pl.DataFrame:
@@ -241,15 +233,10 @@ class Executor(abc.ABC):
 class LocalExecutor(Executor):
     """Execute a graph on one machine using Polars' local query engine.
 
-    When a ``cache_dir`` is provided (or ``IOSIS_CACHE_DIR`` is set),
-    materialized node results are persisted as Parquet files and reused
-    on subsequent executions with identical node identity.  Cache hits
-    replace the node's computation with a lazy Parquet scan, skipping
-    ``lower_node()`` and ``materialize()`` entirely.
-
-    ``cache_dir`` may be a local filesystem path or an S3 URI such as
-    ``s3://bucket/cache``.  S3 reads use the scoped ``S3Credentials``
-    from the executor; S3 writes use PyArrow's ``S3FileSystem``.
+    Materialized node results are persisted as Parquet files and reused
+    on subsequent executions. Backward reachability search determines the
+    minimal execution frontier, skipping computation and cache retrieval
+    for superseded upstream nodes.
     """
 
     def __init__(
@@ -271,13 +258,17 @@ class LocalExecutor(Executor):
         )
         self._no_cache = no_cache
 
+        # Ensure local directory exists so caching is enabled on new paths
+        if self._cache_dir is not None and not self._no_cache and not self._cache_s3:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+
     @property
     def _cache_enabled(self) -> bool:
         if self._no_cache or self._cache_raw is None:
             return False
         if self._cache_s3:
             return True
-        return self._cache_dir is not None and self._cache_dir.is_dir()
+        return self._cache_dir is not None
 
     def _cache_entry_key(self, node_id: str) -> str:
         assert self._cache_raw is not None
@@ -430,49 +421,67 @@ class LocalExecutor(Executor):
         except Exception:
             pass
 
-    def execute(self, graph: Graph) -> pl.DataFrame:
-        if self._cache_enabled:
-            cached = self._read_cache(graph.root_node.ID)
+    def _resolve_cache_frontier(
+        self, graph: Graph
+    ) -> tuple[set[str], dict[str, pl.LazyFrame]]:
+        """Walk backward from root_node to identify required nodes and cache hits.
+
+        Stops searching upstream along any branch as soon as a cached node is found.
+        Returns:
+            required_ids: set of node IDs that must be evaluated or read from cache.
+            cached_frames: dict mapping node_id -> pl.LazyFrame for frontier cache hits.
+        """
+        if not self._cache_enabled:
+            return {node.ID for node in graph.node_list}, {}
+
+        required_ids: set[str] = set()
+        cached_frames: dict[str, pl.LazyFrame] = {}
+        queue: list[Node] = [graph.root_node]
+
+        while queue:
+            node = queue.pop()
+            if node.ID in required_ids:
+                continue
+
+            required_ids.add(node.ID)
+
+            cached = self._read_cache(node.ID)
             if cached is not None:
-                return cached.collect()
+                cached_frames[node.ID] = cached
+                # Frontier cache hit: stop traversing upstream along this branch!
+                continue
+
+            # Cache miss: traverse upstream to parent input nodes
+            parents = set(node.inputs) | {
+                parent for parent, _ in node.bindings.values()
+            }
+            for parent_node in parents:
+                queue.append(parent_node)
+
+        return required_ids, cached_frames
+
+    def execute(self, graph: Graph) -> pl.DataFrame:
         with _s3_credentials_scope(self._s3_credentials):
             root_lf = self._evaluate_to_root(graph)
             result = self.materialize(graph.root_node, root_lf)
-            if self._cache_enabled and graph.root_node.ID in graph.materialized_node_ids:
+            if (
+                self._cache_enabled
+                and graph.root_node.ID in graph.materialized_node_ids
+            ):
                 self._write_cache(graph.root_node.ID, result)
             return result
 
     def _evaluate_to_root(self, graph: Graph) -> pl.LazyFrame:
+        required_ids, cached_frames = self._resolve_cache_frontier(graph)
         results: dict[str, pl.LazyFrame] = {}
 
         for node in graph.node_list:
-            if node.ID not in graph.materialized_node_ids:
-                try:
-                    node_input_lf = (
-                        None
-                        if not node.bindings
-                        else self.align_inputs(node, results)
-                    )
-                    results[node.ID] = self.lower_node(node, node_input_lf)
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"Execution failed at node "
-                        f"'{node.name or node.ID[:8]}' "
-                        f"({node.function_cls.__name__}@"
-                        f"{node.function.version}): {exc}"
-                    ) from exc
+            if node.ID not in required_ids:
+                continue  # Skip unneeded upstream nodes entirely
+
+            if node.ID in cached_frames:
+                results[node.ID] = cached_frames[node.ID]
                 continue
-
-            is_root = node.ID == graph.root_node.ID
-
-            if self._cache_enabled:
-                cached = self._read_cache(node.ID)
-                if cached is not None:
-                    if is_root:
-                        results[node.ID] = cached
-                    else:
-                        results[node.ID] = cached.lazy()
-                    continue
 
             try:
                 node_input_lf = (
@@ -489,13 +498,19 @@ class LocalExecutor(Executor):
                     f"{node.function.version}): {exc}"
                 ) from exc
 
-            if is_root:
-                results[node.ID] = lf
+            is_root = node.ID == graph.root_node.ID
+            is_materialized = node.ID in graph.materialized_node_ids
+
+            if is_materialized:
+                if is_root:
+                    results[node.ID] = lf
+                else:
+                    df = self.materialize(node, lf)
+                    if self._cache_enabled:
+                        self._write_cache(node.ID, df)
+                    results[node.ID] = df.lazy()
             else:
-                df = self.materialize(node, lf)
-                if self._cache_enabled:
-                    self._write_cache(node.ID, df)
-                results[node.ID] = df.lazy()
+                results[node.ID] = lf
 
         return results[graph.root_node.ID]
 

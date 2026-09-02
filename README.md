@@ -66,6 +66,14 @@ the graph declaration or ID. CSV and Parquet sources read, hash, and parse the
 same in-memory byte snapshot. This gives an exact content guarantee at the cost
 of holding the full source bytes and parsed frame at that boundary.
 
+Node materialization flags are execution state only - they never contribute to
+node or graph identity. The same node declared with `materialize: true` or
+`materialize: false` produces the identical content-address and can share cache
+entries. The executor reads the cache for every node regardless of its
+materialization declaration, so previously-computed frames are reused across
+runs and strategies sharing the same node identity. Only nodes declared with
+`materialize: true` are collected and written back to the cache.
+
 ## Parquet data sources
 
 `ParquetSource` accepts a local file, a local directory, an S3 object, or an S3

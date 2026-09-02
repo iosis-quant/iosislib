@@ -153,24 +153,26 @@ def test_unknown_fill_metadata_reaches_graph_validation() -> None:
     ]
 
 
-def test_materialization_is_effective_node_and_graph_identity() -> None:
+def test_materialization_is_execution_state_not_identity() -> None:
     lazy = Node(IntegerSource, materialize=False)
     materialized = Node(IntegerSource, materialize=True)
 
-    assert lazy.ID != materialized.ID
-    assert lazy.definition["materialize"] is False
-    assert materialized.definition["materialize"] is True
-    assert Graph(lazy).ID != Graph(materialized).ID
+    # Materialization is execution state only; it never contributes to node or
+    # graph identity.
+    assert lazy.ID == materialized.ID
+    assert lazy.definition == materialized.definition
+    assert Graph(lazy).ID == Graph(materialized).ID
 
 
-def test_mixed_materialization_declarations_do_not_deduplicate() -> None:
+def test_mixed_materialization_declarations_share_identity() -> None:
     lazy = Node(IntegerSource, materialize=False)
     materialized = Node(IntegerSource, materialize=True)
     root = Node(Pair, bindings={"left": lazy.value, "right": materialized.value})
     graph = Graph(root)
 
-    assert lazy.ID != materialized.ID
-    assert len(graph.node_list) == 3
+    # Same node identity regardless of the materialization flag.
+    assert lazy.ID == materialized.ID
+    assert len(graph.node_list) == 2
     assert graph.execute()["pair"].to_list() == [[1, 1]]
 
 
