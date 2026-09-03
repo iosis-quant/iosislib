@@ -14,8 +14,6 @@ from typing import Any
 
 import polars as pl
 
-_LOG = logging.getLogger(__name__)
-
 from iosislib.core.node import Node
 from iosislib.core.tsfn import (
     NullHandler,
@@ -34,6 +32,8 @@ from iosislib.core.utils import (
     _serialize_value,
     current_s3_credentials,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
