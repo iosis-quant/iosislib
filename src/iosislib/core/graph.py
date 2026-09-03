@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import hashlib
 import json
+import logging
 import os
 from collections import defaultdict
 from collections.abc import Mapping
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
+
+_LOG = logging.getLogger(__name__)
 
 from iosislib.core.node import Node
 from iosislib.core.tsfn import (
@@ -387,7 +390,7 @@ class LocalExecutor(Executor):
                 json.dumps(manifest, indent=2, sort_keys=True)
             )
         except Exception:
-            pass
+            _LOG.warning("cache write failed for node %s", node_id[:12], exc_info=True)
 
     def _write_cache_s3(self, node_id: str, df: pl.DataFrame) -> None:
         try:
@@ -419,7 +422,7 @@ class LocalExecutor(Executor):
                     json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
                 )
         except Exception:
-            pass
+            _LOG.warning("S3 cache write failed for node %s", node_id[:12], exc_info=True)
 
     def _resolve_cache_frontier(
         self, graph: Graph
