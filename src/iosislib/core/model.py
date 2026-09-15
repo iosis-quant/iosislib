@@ -1067,18 +1067,54 @@ def _validate_manifest(manifest: Any) -> dict[str, Any]:
     return manifest
 
 
+MODEL_PREFIX = "models"
+JSON_FILENAME = "model.json"
+ONNX_FILENAME = "model.onnx"
+METADATA_FILENAME = "metadata.json"
+MANIFEST_FILENAME = "manifest.json"
+
+
+def _validate_model_id(model_id: object) -> str:
+    if not isinstance(model_id, str) or len(model_id) != 64:
+        raise ValueError("model_id must be a 64-hex sha256 digest")
+    try:
+        int(model_id, 16)
+    except ValueError as exc:
+        raise ValueError("model_id must be a 64-hex sha256 digest") from exc
+    return model_id
+
+
+def model_shard_prefix(model_id: str) -> str:
+    """Return the sharded artifact prefix for one content-addressed id."""
+    _validate_model_id(model_id)
+    return (
+        f"{MODEL_PREFIX}/{model_id[:2]}/{model_id[2:4]}/"
+        f"{model_id[4:6]}/{model_id[6:]}"
+    )
+
+
 @dataclass(frozen=True)
 class ModelStore:
     """Executor-owned artifact store for finished models and checkpoints.
 
-    Layout per group: ``<root>/<group>/manifest.json`` plus one
-    ``<model_id>.json`` artifact per finished model or checkpoint, where the id
-    is the SHA-256 of the canonical checkpoint payload. Identical retrains are
-    idempotent: saving an already-recorded finished model is a no-op.
+    Canonical layout under ``root`` (a local path or an ``s3://bucket/prefix``
+    URI, mirroring ``LocalExecutor`` cache handling)::
 
-    ``root`` is either a local path or an ``s3://bucket/prefix`` URI, mirroring
-    ``LocalExecutor`` cache handling. S3 state is addressed through
-    ``pyarrow.fs.S3FileSystem`` with the execution-scoped ``S3Credentials``.
+        models/<group>/manifest.json
+        models/ab/cd/ef/<remaining 58 hex>/model.json     (always)
+        models/ab/cd/ef/<remaining 58 hex>/model.onnx     (NN checkpoints)
+        models/ab/cd/ef/<remaining 58 hex>/metadata.json  (digest + widths)
+
+    The id is the SHA-256 of the canonical checkpoint payload. Serialization
+    is ONNX-default: ``save_run`` exports ONNX when the checkpoint type has an
+    exporter and falls back to JSON-only for non-NN checkpoints (LightGBM,
+    untrained, unsupported). Inference auto-detects: ``model.onnx`` when
+    present via ``onnxruntime``, otherwise the native ``model.json``.
+
+    Legacy ``<root>/<group>/manifest.json`` + ``<model_id>.json`` stores are
+    read for backward compatibility; all writes use the canonical layout.
+    S3 state is addressed through ``pyarrow.fs.S3FileSystem`` with the
+    execution-scoped ``S3Credentials``.
     """
 
     root: Path | str
@@ -1127,6 +1163,12 @@ class ModelStore:
         return self.root.rstrip("/")
 
     def _s3_key(self, group: str, filename: str) -> str:
+        return (
+            f"{self._s3_prefix}/{MODEL_PREFIX}/"
+            f"{_validate_model_group(group)}/{filename}"
+        )
+
+    def _legacy_s3_key(self, group: str, filename: str) -> str:
         return f"{self._s3_prefix}/{_validate_model_group(group)}/{filename}"
 
     def _open_s3_filesystem(self):  # type: ignore[no-untyped-def]
@@ -1157,15 +1199,35 @@ class ModelStore:
 
     def group_dir(self, group: str) -> Path | str:
         if self._is_s3:
-            return f"{self._s3_prefix}/{_validate_model_group(group)}"
+            return f"{self._s3_prefix}/{MODEL_PREFIX}/{_validate_model_group(group)}"
         assert isinstance(self.root, Path)
-        return self.root / _validate_model_group(group)
+        return self.root / MODEL_PREFIX / _validate_model_group(group)
 
     def manifest_path(self, group: str) -> Path | str:
         location = self.group_dir(group)
         if isinstance(location, str):
-            return f"{location}/manifest.json"
-        return location / "manifest.json"
+            return f"{location}/{MANIFEST_FILENAME}"
+        return location / MANIFEST_FILENAME
+
+    def artifact_prefix(self, model_id: str) -> Path | str:
+        """Return the sharded artifact directory/prefix for one model id."""
+        shard = model_shard_prefix(model_id)
+        if self._is_s3:
+            return f"{self._s3_prefix}/{shard}"
+        assert isinstance(self.root, Path)
+        return self.root / Path(shard)
+
+    @staticmethod
+    def _legacy_manifest_path(root: Path | str, group: str) -> Path | str:
+        if isinstance(root, str):
+            return f"{root.rstrip('/')}/{group}/{MANIFEST_FILENAME}"
+        return root / group / MANIFEST_FILENAME
+
+    @staticmethod
+    def _legacy_artifact_path(root: Path | str, model_id: str) -> Path | str:
+        if isinstance(root, str):
+            return f"{root.rstrip('/')}/{model_id}.json"
+        return root / f"{model_id}.json"
 
     def read_manifest(self, group: str) -> dict[str, Any]:
         """Read and validate a group's manifest; missing means no runs yet."""
@@ -1174,7 +1236,11 @@ class ModelStore:
         path = self.manifest_path(group)
         assert isinstance(path, Path)
         if not path.exists():
-            return {"group": group, "runs": []}
+            legacy = self._legacy_manifest_path(self.root, group)
+            assert isinstance(legacy, Path)
+            if not legacy.exists():
+                return {"group": group, "runs": []}
+            path = legacy
         try:
             manifest = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
@@ -1186,20 +1252,24 @@ class ModelStore:
     def _read_manifest_s3(self, group: str) -> dict[str, Any]:
         from pyarrow.fs import FileType
 
-        key = self._s3_key(group, "manifest.json")
-        bare = key.removeprefix("s3://")
         filesystem = self._open_s3_filesystem()
-        try:
-            info = filesystem.get_file_info(bare)
-            if info.type != FileType.File:
-                return {"group": group, "runs": []}
-            with filesystem.open_input_stream(bare) as stream:
-                manifest = json.loads(stream.read().decode("utf-8"))
-        except (OSError, ValueError) as exc:
-            raise ValueError(
-                f"Model manifest for group {group!r} is unreadable: {exc}"
-            ) from exc
-        return _validate_manifest(manifest)
+        for key in (
+            self._s3_key(group, MANIFEST_FILENAME),
+            self._legacy_s3_key(group, MANIFEST_FILENAME),
+        ):
+            bare = key.removeprefix("s3://")
+            try:
+                info = filesystem.get_file_info(bare)
+                if info.type != FileType.File:
+                    continue
+                with filesystem.open_input_stream(bare) as stream:
+                    manifest = json.loads(stream.read().decode("utf-8"))
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    f"Model manifest for group {group!r} is unreadable: {exc}"
+                ) from exc
+            return _validate_manifest(manifest)
+        return {"group": group, "runs": []}
 
     def _write_manifest(self, group: str, manifest: dict[str, Any]) -> None:
         validated = _validate_manifest(manifest)
@@ -1232,33 +1302,110 @@ class ModelStore:
         payload = _canonical_json(checkpoint.to_dict())
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def _write_checkpoint(self, group: str, checkpoint: Model) -> str:
-        model_id = self.model_id(checkpoint)
-        if self._is_s3:
+    def _export_onnx_bytes(self, checkpoint: Model) -> tuple[bytes, dict[str, Any]] | None:
+        """Export ONNX bytes, or ``None`` when the type has no exporter."""
+        from iosislib.models._export import OnnxExportError
+
+        try:
+            from iosislib.models._export import export_onnx_payload
+        except ImportError:
+            return None
+        try:
+            return export_onnx_payload(checkpoint)
+        except OnnxExportError:
+            return None
+
+    def _metadata_for(
+        self,
+        *,
+        group: str,
+        model_id: str,
+        checkpoint: Model,
+        onnx_info: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        return {
+            "model_id": model_id,
+            "group": group,
+            "format": "onnx" if onnx_info is not None else "json",
+            "filename": ONNX_FILENAME if onnx_info is not None else JSON_FILENAME,
+            "checkpoint_class": type(checkpoint).__name__,
+            "checkpoint_version": checkpoint.version,
+            "framework": str((onnx_info or {}).get("framework", "iosislib")),
+            "framework_version": str((onnx_info or {}).get("framework_version", "unknown")),
+            "feature_width": (onnx_info or {}).get("feature_width"),
+            "target_width": (onnx_info or {}).get("target_width"),
+        }
+
+    def _read_raw(self, location: Path | str) -> bytes | None:
+        if isinstance(location, str):
             from pyarrow.fs import FileType
 
-            key = self._s3_key(group, f"{model_id}.json")
-            bare = key.removeprefix("s3://")
+            bare = location.removeprefix("s3://")
             filesystem = self._open_s3_filesystem()
-            info = filesystem.get_file_info(bare)
-            if info.type != FileType.File:
-                filesystem.create_dir(bare.rpartition("/")[0], recursive=True)
-                payload = json.dumps(
-                    checkpoint.to_dict(), sort_keys=True, indent=2
-                ).encode("utf-8")
-                with filesystem.open_output_stream(bare) as stream:
-                    stream.write(payload)
-            return model_id
-        location = self.group_dir(group)
+            try:
+                if filesystem.get_file_info(bare).type != FileType.File:
+                    return None
+                with filesystem.open_input_stream(bare) as stream:
+                    return stream.read()
+            except OSError:
+                return None
         assert isinstance(location, Path)
-        path = location / f"{model_id}.json"
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(checkpoint.to_dict(), sort_keys=True, indent=2),
-                encoding="utf-8",
+        try:
+            return location.read_bytes()
+        except OSError:
+            return None
+
+    def _write_raw(self, location: Path | str, payload: bytes) -> None:
+        if isinstance(location, str):
+            bare = location.removeprefix("s3://")
+            filesystem = self._open_s3_filesystem()
+            filesystem.create_dir(bare.rpartition("/")[0], recursive=True)
+            with filesystem.open_output_stream(bare) as stream:
+                stream.write(payload)
+            return
+        assert isinstance(location, Path)
+        location.parent.mkdir(parents=True, exist_ok=True)
+        location.write_bytes(payload)
+
+    def _artifact_locations(self, model_id: str) -> tuple[Path | str, Path | str, Path | str]:
+        prefix = self.artifact_prefix(model_id)
+        if isinstance(prefix, str):
+            base = prefix.rstrip("/")
+            return (
+                f"{base}/{JSON_FILENAME}",
+                f"{base}/{ONNX_FILENAME}",
+                f"{base}/{METADATA_FILENAME}",
             )
-        return model_id
+        return (
+            prefix / JSON_FILENAME,
+            prefix / ONNX_FILENAME,
+            prefix / METADATA_FILENAME,
+        )
+
+    def _write_checkpoint(
+        self, group: str, checkpoint: Model, *, export_onnx: bool = True
+    ) -> tuple[str, str]:
+        """Persist one checkpoint; returns ``(model_id, format)``."""
+        group = _validate_model_group(group)
+        model_id = self.model_id(checkpoint)
+        json_path, onnx_path, metadata_path = self._artifact_locations(model_id)
+        native = json.dumps(checkpoint.to_dict(), sort_keys=True, indent=2).encode("utf-8")
+        exported = self._export_onnx_bytes(checkpoint) if export_onnx else None
+        onnx_bytes = exported[0] if exported is not None else None
+        onnx_info = dict(exported[1]) if exported is not None else None
+        if self._read_raw(json_path) is None:
+            self._write_raw(json_path, native)
+        if onnx_bytes is not None and self._read_raw(onnx_path) is None:
+            self._write_raw(onnx_path, onnx_bytes)
+        metadata = self._metadata_for(
+            group=group, model_id=model_id, checkpoint=checkpoint, onnx_info=onnx_info
+        )
+        if self._read_raw(metadata_path) is None:
+            self._write_raw(
+                metadata_path,
+                json.dumps(metadata, sort_keys=True, indent=2).encode("utf-8"),
+            )
+        return model_id, ("onnx" if onnx_bytes is not None else "json")
 
     def save_run(
         self,
@@ -1269,6 +1416,7 @@ class ModelStore:
         metrics: Mapping[str, float] | None = None,
         trained_at: datetime | None = None,
         run_id: str | None = None,
+        export_onnx: bool = True,
     ) -> str:
         """Record one training run; returns the finished model id."""
         _validate_model_group(group)
@@ -1287,9 +1435,11 @@ class ModelStore:
             raise ValueError("save_run run_id must be a non-empty string or None")
 
         manifest = self.read_manifest(group)
-        finished_id = self._write_checkpoint(group, finished)
+        finished_id, finished_format = self._write_checkpoint(
+            group, finished, export_onnx=export_onnx
+        )
         for checkpoint in checkpoints:
-            self._write_checkpoint(group, checkpoint)
+            self._write_checkpoint(group, checkpoint, export_onnx=export_onnx)
 
         for run in manifest["runs"]:
             if run["finished_model_id"] == finished_id:
@@ -1304,6 +1454,7 @@ class ModelStore:
                 "run_id": run_id or finished_id,
                 "trained_at": trained_at.isoformat(),
                 "finished_model_id": finished_id,
+                "format": finished_format,
                 "metrics": normalized_metrics,
                 "checkpoints": [
                     {"checkpoint_id": self.model_id(item)} for item in checkpoints
@@ -1344,47 +1495,55 @@ class ModelStore:
         return manifest["runs"][-1]
 
     def load_model(self, group: str, model_id: str) -> Model:
-        """Load one checkpoint artifact by content id."""
-        _validate_model_group(group)
-        if not isinstance(model_id, str) or not model_id:
-            raise ValueError("model_id must be a non-empty string")
-        if self._is_s3:
-            from pyarrow.fs import FileType
+        """Load one checkpoint artifact by content id.
 
-            key = self._s3_key(group, f"{model_id}.json")
-            bare = key.removeprefix("s3://")
-            filesystem = self._open_s3_filesystem()
-            info = filesystem.get_file_info(bare)
-            if info.type != FileType.File:
-                raise FileNotFoundError(
-                    f"Model {model_id!r} for group {group!r} is not in the store. "
-                    "Train the group first."
-                )
-            try:
-                with filesystem.open_input_stream(bare) as stream:
-                    payload = json.loads(stream.read().decode("utf-8"))
-            except (OSError, ValueError) as exc:
-                raise ValueError(
-                    f"Model artifact {model_id!r} for group {group!r} "
-                    f"is unreadable: {exc}"
-                ) from exc
-            return model_from_dict(payload)
-        location = self.group_dir(group)
-        assert isinstance(location, Path)
-        path = location / f"{model_id}.json"
-        if not path.exists():
+        Reads the canonical sharded ``model.json``; legacy
+        ``<group>/<model_id>.json`` stores are read for compatibility.
+        """
+        _validate_model_group(group)
+        _validate_model_id(model_id)
+        raw = self.load_native_bytes(group, model_id)
+        if raw is None:
             raise FileNotFoundError(
                 f"Model {model_id!r} for group {group!r} is not in the store. "
                 "Train the group first."
             )
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(raw.decode("utf-8"))
         except (OSError, ValueError) as exc:
             raise ValueError(
                 f"Model artifact {model_id!r} for group {group!r} is unreadable: "
                 f"{exc}"
             ) from exc
         return model_from_dict(payload)
+
+    def load_native_bytes(self, group: str, model_id: str) -> bytes | None:
+        """Return raw ``model.json`` bytes, or ``None`` when absent."""
+        _validate_model_group(group)
+        _validate_model_id(model_id)
+        json_path, _, _ = self._artifact_locations(model_id)
+        raw = self._read_raw(json_path)
+        if raw is not None:
+            return raw
+        legacy = self._legacy_artifact_path(self.root, model_id)
+        return self._read_raw(legacy)
+
+    def load_onnx_bytes(self, group: str, model_id: str) -> bytes | None:
+        """Return raw ``model.onnx`` bytes, or ``None`` for JSON-only stores."""
+        _validate_model_group(group)
+        _validate_model_id(model_id)
+        _, onnx_path, _ = self._artifact_locations(model_id)
+        return self._read_raw(onnx_path)
+
+    def load_for_inference(self, group: str, model_id: str) -> tuple[Model, bytes | None]:
+        """Load what inference needs: ``(checkpoint, onnx_bytes|None)``.
+
+        ``onnx_bytes`` is present for NN checkpoints exported at train time;
+        non-NN checkpoints (LightGBM, unsupported) return ``None`` and infer
+        from native JSON. Callers auto-select: ONNX via ``onnxruntime`` when
+        present, native ``checkpoint.predict`` otherwise.
+        """
+        return self.load_model(group, model_id), self.load_onnx_bytes(group, model_id)
 
     def load_run_model(self, group: str, run: Mapping[str, Any]) -> Model:
         """Load the finished model recorded by one manifest run."""
@@ -1394,6 +1553,17 @@ class ModelStore:
         if not isinstance(model_id, str):
             raise TypeError("Manifest run finished_model_id must be a string")
         return self.load_model(group, model_id)
+
+    def load_run_for_inference(
+        self, group: str, run: Mapping[str, Any]
+    ) -> tuple[Model, bytes | None]:
+        """Load a manifest run's inference payloads ``(checkpoint, onnx|None)``."""
+        if not isinstance(run, Mapping) or "finished_model_id" not in run:
+            raise TypeError("load_run_for_inference requires a manifest run mapping")
+        model_id = run["finished_model_id"]
+        if not isinstance(model_id, str):
+            raise TypeError("Manifest run finished_model_id must be a string")
+        return self.load_for_inference(group, model_id)
 
 
 class TrainingTSFN(BatchTSFN, abc.ABC):
@@ -1523,7 +1693,7 @@ class InferenceTSFN(BatchTSFN, abc.ABC):
 
     def _resolve_run(
         self, store: ModelStore, group: str, ordered: pl.DataFrame
-    ) -> tuple[dict[str, Any], Model]:
+    ) -> tuple[dict[str, Any], Model, bytes | None]:
         pinned = self.pinned_model_id()
         if pinned is not None:
             manifest = store.read_manifest(group)
@@ -1537,7 +1707,8 @@ class InferenceTSFN(BatchTSFN, abc.ABC):
                     f"Pinned model {pinned!r} is not a finished model for group "
                     f"{group!r}. Train the group first or check the id."
                 )
-            return matches[-1], store.load_model(group, pinned)
+            checkpoint, onnx_bytes = store.load_for_inference(group, pinned)
+            return matches[-1], checkpoint, onnx_bytes
         time_axis = self.signature[0].time
         if time_axis is None:
             raise ValueError("InferenceTSFN requires an input time axis")
@@ -1547,7 +1718,31 @@ class InferenceTSFN(BatchTSFN, abc.ABC):
         if latest.tzinfo is None:
             latest = latest.replace(tzinfo=timezone.utc)
         run = store.select_run(group, latest)
-        return run, store.load_run_model(group, run)
+        checkpoint, onnx_bytes = store.load_run_for_inference(group, run)
+        return run, checkpoint, onnx_bytes
+
+    def _onnx_frame(
+        self, ordered: pl.DataFrame, checkpoint: Model, onnx_bytes: bytes
+    ) -> pl.DataFrame | None:
+        """Score via ONNX when the segment exposes a ``features`` column."""
+        try:
+            from iosislib.models._export import predict_features
+
+            if "features" not in ordered.columns:
+                return None
+            prediction = predict_features(
+                ordered.get_column("features"), checkpoint, onnx_bytes
+            )
+            time_axis = self.signature[0].time
+            assert time_axis is not None
+            return pl.DataFrame(
+                [
+                    ordered.get_column(time_axis.column),
+                    prediction.rename("prediction"),
+                ]
+            )
+        except Exception:
+            return None
 
     def batch(self, frame: pl.DataFrame) -> pl.DataFrame:
         output_schema = _frame_physical_schema(self.signature[1])
@@ -1563,16 +1758,24 @@ class InferenceTSFN(BatchTSFN, abc.ABC):
         )
         group = _validate_model_group(self.model_group())
         store = self.model_store()
-        _, checkpoint = self._resolve_run(store, group, ordered)
-        output = self.predict_with_model(ordered, checkpoint)
-        if not isinstance(output, pl.DataFrame):
-            raise TypeError(
-                f"{self.__class__.__name__}.predict_with_model must return a "
-                f"Polars DataFrame, got {type(output).__name__}"
-            )
-        if output.height != ordered.height:
+        _, checkpoint, onnx_bytes = self._resolve_run(store, group, ordered)
+        resolved: pl.DataFrame | None = None
+        if onnx_bytes:
+            resolved = self._onnx_frame(ordered, checkpoint, onnx_bytes)
+        if resolved is None:
+            try:
+                candidate: object = self.predict_with_model(ordered, checkpoint, onnx_bytes)  # type: ignore[call-arg]
+            except TypeError:
+                candidate = self.predict_with_model(ordered, checkpoint)
+            if not isinstance(candidate, pl.DataFrame):
+                raise TypeError(
+                    f"{self.__class__.__name__}.predict_with_model must return a "
+                    f"Polars DataFrame, got {type(candidate).__name__}"
+                )
+            resolved = candidate
+        if resolved.height != ordered.height:
             raise ValueError("Inference prediction must preserve input row count")
-        return output
+        return resolved
 
 
 __all__ = [
@@ -1585,9 +1788,15 @@ __all__ = [
     "FrameDataset",
     "FrozenScheduler",
     "InferenceTSFN",
+    "JSON_FILENAME",
+    "MANIFEST_FILENAME",
+    "METADATA_FILENAME",
+    "MODEL_PREFIX",
     "MetricThresholdScheduler",
     "Model",
     "ModelStore",
+    "ONNX_FILENAME",
+    "model_shard_prefix",
     "ScheduleContext",
     "ScheduleDecision",
     "Scheduler",

@@ -11,6 +11,7 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
     "numpy>=1.26",
     "onnx>=1.15",
+    "onnxruntime>=1.17",
     "polars>=1.30",
     "PyYAML>=6.0",
     "pyarrow>=14",
