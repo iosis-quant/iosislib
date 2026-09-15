@@ -1,0 +1,182 @@
+# L2 backtester scenarios: aggregated CLOB depth (101 ticks) execution
+# Tests L2 depth-walk performance across row counts and asset widths
+#
+# Run: python performance/test_perf.py --scenario backtest_l2_scale
+
+scenarios:
+  - name: l2_backtest_10k_1asset_market
+    description: "L2 baseline: 10K rows, 1 asset, market orders"
+    data:
+      name: perf_backtest_l2_10k_1a
+      rows: 10_000
+      width: 1
+      domain: l2_market_data
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: l2-backtest-10k-1a
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_backtest_l2_10k_1a.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid_depth:
+                  dtype: float64
+                  shape: [1, 101]
+                ask_depth:
+                  dtype: float64
+                  shape: [1, 101]
+                signal:
+                  dtype: float64
+                  shape: [1]
+        simulation:
+          op: backtest.backtest
+          version: "1.5.0"
+          inputs:
+            bid_depth: market_data.bid_depth
+            ask_depth: market_data.ask_depth
+            signal: market_data.signal
+          params:
+            initial_cash: 1000000
+            feed:
+              kind: l2
+              venue:
+                name: bench
+                universe: [A0]
+              depth_levels: 101
+              tick: 0.01
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 2000.0
+      max_memory_mb: 300
+
+  - name: l2_backtest_5k_8asset_market
+    description: "L2 wide: 5K rows, 8 assets, market orders"
+    data:
+      name: perf_backtest_l2_5k_8a
+      rows: 5_000
+      width: 8
+      domain: l2_market_data
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: l2-backtest-5k-8a
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_backtest_l2_5k_8a.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid_depth:
+                  dtype: float64
+                  shape: [8, 101]
+                ask_depth:
+                  dtype: float64
+                  shape: [8, 101]
+                signal:
+                  dtype: float64
+                  shape: [8]
+        simulation:
+          op: backtest.backtest
+          version: "1.5.0"
+          inputs:
+            bid_depth: market_data.bid_depth
+            ask_depth: market_data.ask_depth
+            signal: market_data.signal
+          params:
+            initial_cash: 1000000
+            feed:
+              kind: l2
+              venue:
+                name: bench
+                universe: [A0, A1, A2, A3, A4, A5, A6, A7]
+              depth_levels: 101
+              tick: 0.01
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 8000.0
+      max_memory_mb: 500
+
+  - name: l2_backtest_5k_8asset_limit
+    description: "L2 limit orders: 5K rows, 8 assets, mixed market/limit"
+    data:
+      name: perf_backtest_l2_5k_8a_limit
+      rows: 5_000
+      width: 8
+      domain: l2_market_data
+      with_limit: true
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: l2-backtest-5k-8a-limit
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.3.0"
+          params:
+            path: ../data/perf_backtest_l2_5k_8a_limit.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid_depth:
+                  dtype: float64
+                  shape: [8, 101]
+                ask_depth:
+                  dtype: float64
+                  shape: [8, 101]
+                signal:
+                  dtype: float64
+                  shape: [8]
+                limit:
+                  dtype: float64
+                  shape: [8]
+        simulation:
+          op: backtest.backtest
+          version: "1.5.0"
+          inputs:
+            bid_depth: market_data.bid_depth
+            ask_depth: market_data.ask_depth
+            signal: market_data.signal
+            limit: market_data.limit
+          params:
+            initial_cash: 1000000
+            limit_price_column: limit
+            feed:
+              kind: l2
+              venue:
+                name: bench
+                universe: [A0, A1, A2, A3, A4, A5, A6, A7]
+              depth_levels: 101
+              tick: 0.01
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 8000.0
+      max_memory_mb: 500

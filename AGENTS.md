@@ -95,6 +95,14 @@ A `Model` is an immutable, serializable checkpoint. `SupervisedModel.fit()` cons
 
 Do not add `available_at` or framework-wide bitemporality casually. The graph enforces causal parent alignment, and the model loop trains only on earlier rows. Domain-specific label availability and sophisticated purging/embargo behavior belong in explicit splitter/feature programs.
 
+### Train/Infer Split
+
+Training and inference are separate node kinds sharing one executor-owned `ModelStore` (`core/model.py`), resolved from explicit `model_dir` through the execution scope to `IOSIS_MODEL_DIR`. Never read the store path at graph construction time; it is runtime state and must not enter node identity.
+
+- `TrainingTSFN` fits over all input rows at once, persists a finished model plus submodel checkpoints to `<store>/<group>/` (`manifest.json` plus one `<model_id>.json` artifact per checkpoint, content-addressed), and emits an empty (0-row) frame matching its output schema. Trainers declare no value outputs, so nothing can bind to them: they are terminal nodes on a branch parallel to the inference path. Retraining appends a new finished run; it never adds an endpoint, and one group admits at most one trainer per graph (`MULTIPLE_TRAINERS`).
+- `InferenceTSFN` pins `model_id` for an exact checkpoint or resolves the latest finished run with `trained_at <= batch end` (backward asof over training runs; `trained_at` is data time, defaulting to the training window end). A graph without a trainer for the group is valid and runs frozen against preexisting store state. `frozen`, `model_dir`, and `run_id` are volatile between equivalent runs and are excluded from node identity via `TSFN.IDENTITY_EXCLUDED_PARAMS`; pinned `model_id` and `model_group` participate.
+- `Graph` accepts one root (legacy single-terminal) or a full node list from which terminals (nodes no member consumes) are derived; `execute()` returns one frame for a single terminal and a terminal-ID-keyed mapping otherwise. The executor evaluates live inference (unpinned, unfrozen, sharing a group with a trainer) after all other nodes and forces trainer collection during evaluation so the manifest side effect precedes inference resolution.
+
 ## Identity, Serialization, And Caching
 
 TSFN version, qualified class name, resolved signatures, normalized parameters, bindings, tolerances, effective null policies/relevant fill values, effective materialization, and outputs contribute to node identity. Names are human labels only. Graph IDs derive from the canonical topological tuple and root ID.

@@ -10,6 +10,9 @@ scenarios:
       domain: prices
       format: csv
     strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: csv-read-100k
       nodes:
         source:
           op: source.csv_source
@@ -39,6 +42,9 @@ scenarios:
       domain: sensors
       format: parquet
     strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: parquet-read-100k
       nodes:
         source:
           op: source.parquet_source
@@ -67,6 +73,9 @@ scenarios:
       domain: prices
       format: csv
     strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: csv-read-1m
       nodes:
         source:
           op: source.csv_source
@@ -96,6 +105,9 @@ scenarios:
       domain: sensors
       format: parquet
     strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: parquet-read-1m
       nodes:
         source:
           op: source.parquet_source
@@ -126,6 +138,9 @@ scenarios:
       stream: true
       chunk_rows: 50_000
     strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: csv-stream-read-500k
       nodes:
         source:
           op: source.csv_source
@@ -155,6 +170,9 @@ scenarios:
       domain: sensors
       format: parquet
     strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: parquet-write-vs-csv-write
       nodes:
         source:
           op: source.parquet_source

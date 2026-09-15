@@ -342,7 +342,7 @@ def test_parquet_schema_mismatch_is_clear_and_contextual(tmp_path: Path) -> None
         RuntimeError,
         match=(
             r"Execution failed at node 'wrong_value' "
-            r"\(ParquetSource@0\.3\.0\).*Column 'value' type mismatch"
+            r"\(ParquetSource@0\.4\.0\).*Column 'value' type mismatch"
         ),
     ):
         Graph(node).execute()
@@ -571,7 +571,7 @@ def test_parquet_source_rejects_invalid_remote_location(location: str) -> None:
 
 def test_source_versions_describe_verified_snapshot_behavior() -> None:
     assert CSVSource.VERSION == "0.2.0"
-    assert ParquetSource.VERSION == "0.3.0"
+    assert ParquetSource.VERSION == "0.4.0"
 
 
 def test_offline_quickstart_graph(tmp_path: Path) -> None:
@@ -621,3 +621,104 @@ def test_offline_quickstart_graph(tmp_path: Path) -> None:
         1.098612288668,
         1.098612288668,
     ]
+
+
+# ---------------------------------------------------------------------------
+# Source coercions: time units, string timestamps, List -> Array
+# ---------------------------------------------------------------------------
+
+
+def test_parquet_coerces_datetime_unit_to_declaration(tmp_path: Path) -> None:
+    path = tmp_path / "ms-unit.parquet"
+    pl.DataFrame(
+        {"timestamp": TIMESTAMP, "value": [1.0, 2.0, 3.0]},
+        schema={"timestamp": pl.Datetime("ms"), "value": pl.Float64},
+    ).write_parquet(path)
+    node = Node(ParquetSource, parameters=source_parameters(path), name="ms_unit")
+
+    result = Graph(node).execute()
+
+    assert result.schema["timestamp"] == pl.Datetime("us")
+    assert result["timestamp"].to_list() == TIMESTAMP
+    assert result["value"].to_list() == [1.0, 2.0, 3.0]
+
+
+def test_parquet_parses_string_timestamps_to_us(tmp_path: Path) -> None:
+    path = tmp_path / "string-time.parquet"
+    pl.DataFrame(
+        {
+            "timestamp": ["2026-01-01T00:00", "2026-01-01T00:01"],
+            "value": [1.0, 2.0],
+        }
+    ).write_parquet(path)
+    node = Node(ParquetSource, parameters=source_parameters(path), name="string_time")
+
+    result = Graph(node).execute()
+
+    assert result.schema["timestamp"] == pl.Datetime("us")
+    assert result["timestamp"].to_list() == [datetime(2026, 1, 1, 0, 0), datetime(2026, 1, 1, 0, 1)]
+
+
+def test_parquet_coerces_fixed_width_list_to_array(tmp_path: Path) -> None:
+    path = tmp_path / "list-feature.parquet"
+    pl.DataFrame(
+        {
+            "timestamp": [TIMESTAMP[0]] * 3,
+            "feature": [[0.2, None], [0.15, 0.8], None],
+        },
+        schema={"timestamp": pl.Datetime, "feature": pl.List(pl.Float64)},
+    ).write_parquet(path)
+    signature = FrameSignature(
+        columns=(ColumnSignature("feature", pl.Float64, (2,)),)
+    )
+    node = Node(
+        ParquetSource,
+        parameters=source_parameters(path, signature),
+        name="list_feature",
+    )
+
+    result = Graph(node).execute()
+
+    assert result.schema["feature"] == pl.Array(pl.Float64, 2)
+    assert result["feature"].to_list() == [[0.2, None], [0.15, 0.8], None]
+
+
+def test_parquet_ragged_list_fails_loudly(tmp_path: Path) -> None:
+    path = tmp_path / "ragged.parquet"
+    pl.DataFrame(
+        {"timestamp": TIMESTAMP[:1], "feature": [[1.0, 2.0, 3.0]]},
+        schema={"timestamp": pl.Datetime, "feature": pl.List(pl.Float64)},
+    ).write_parquet(path)
+    signature = FrameSignature(
+        columns=(ColumnSignature("feature", pl.Float64, (2,)),)
+    )
+    node = Node(
+        ParquetSource,
+        parameters=source_parameters(path, signature),
+        name="ragged",
+    )
+
+    with pytest.raises(RuntimeError, match="ragged"):
+        Graph(node).execute()
+
+
+def test_parquet_list_inner_dtype_is_not_widened(tmp_path: Path) -> None:
+    path = tmp_path / "int-list.parquet"
+    pl.DataFrame(
+        {"timestamp": TIMESTAMP[:1], "feature": [[1, 2]]},
+        schema={"timestamp": pl.Datetime, "feature": pl.List(pl.Int64)},
+    ).write_parquet(path)
+    signature = FrameSignature(
+        columns=(ColumnSignature("feature", pl.Float64, (2,)),)
+    )
+    node = Node(
+        ParquetSource,
+        parameters=source_parameters(path, signature),
+        name="int_list",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"Column 'feature' type mismatch",
+    ):
+        Graph(node).execute()

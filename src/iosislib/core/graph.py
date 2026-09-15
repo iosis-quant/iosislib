@@ -4,9 +4,10 @@ import abc
 import hashlib
 import json
 import logging
+import math
 import os
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,12 +29,80 @@ from iosislib.core.utils import (
     S3CredentialsProvider,
     _dtype_matches,
     _format_tolerance,
+    _model_dir_scope,
     _s3_credentials_scope,
     _serialize_value,
     current_s3_credentials,
 )
 
 _LOG = logging.getLogger(__name__)
+
+
+def _trainer_groups(nodes: Iterable[Node]) -> set[str]:
+    """Collect model groups published by trainer nodes, ignoring misconfigurations.
+
+    Misconfigured trainers are reported by graph validation; the executor only
+    needs the well-formed groups to order live inference after training.
+    """
+    groups: set[str] = set()
+    for node in nodes:
+        if getattr(node.function_cls, "IS_TRAINER", False) is not True:
+            continue
+        model_group = getattr(node.function, "model_group", None)
+        if not callable(model_group):
+            continue
+        try:
+            group = model_group()
+        except Exception:
+            continue
+        if isinstance(group, str) and group:
+            groups.add(group)
+    return groups
+
+
+def _is_trainer_node(node: Node) -> bool:
+    """Whether a node publishes finished models to the executor-owned store."""
+    return getattr(node.function_cls, "IS_TRAINER", False) is True
+
+
+def _is_source_node(node: Node) -> bool:
+    """Whether a node is a primary source (inputless type signature).
+
+    Sources are never cached: they are always re-pulled unless every
+    dependent is already cached (in which case the frontier prunes them
+    without evaluation). Detection is via the input frame signature,
+    falling back to bindings for robustness on unvalidated nodes.
+    """
+    try:
+        return bool(node.function.signature[0].is_empty())
+    except (AttributeError, IndexError, TypeError):
+        return not node.bindings
+
+
+def _is_live_inference(node: Node, trainer_groups: set[str]) -> bool:
+    """Whether an inference node must run after its group's trainer.
+
+    Live means unpinned, unfrozen, and sharing a group with a trainer in the
+    same graph. Frozen or pinned inference resolves purely from the store and
+    needs no ordering beyond its data parents.
+    """
+    if getattr(node.function_cls, "IS_INFERENCE", False) is not True:
+        return False
+    function: Any = node.function
+    is_frozen = getattr(function, "is_frozen", None)
+    pinned_model_id = getattr(function, "pinned_model_id", None)
+    model_group = getattr(function, "model_group", None)
+    if not callable(is_frozen) or not callable(pinned_model_id):
+        return False
+    if not callable(model_group):
+        return False
+    try:
+        frozen = is_frozen()
+        pinned = pinned_model_id()
+        group = model_group()
+    except Exception:
+        return False
+    return (not frozen) and pinned is None and group in trainer_groups
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,39 +193,75 @@ class Executor(abc.ABC):
     def __init__(
         self,
         s3_credentials: S3CredentialsProvider | None = None,
+        *,
+        model_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         self._s3_credentials: S3CredentialsProvider | None = s3_credentials
+        self._model_dir_raw: str | os.PathLike[str] | None = model_dir
 
-    def execute(self, graph: Graph) -> pl.DataFrame:
+    def execute(self, graph: Graph) -> pl.DataFrame | dict[str, pl.DataFrame]:
+        """Execute every terminal branch; single-terminal graphs return a frame."""
         with _s3_credentials_scope(self._s3_credentials):
-            root_lf = self._evaluate_to_root(graph)
-            return self.materialize(graph.root_node, root_lf)
+            with _model_dir_scope(self._model_dir_raw):
+                terminal_frames = self._evaluate_to_terminals(graph)
+                if len(graph.terminal_nodes) == 1:
+                    sole = graph.terminal_nodes[0]
+                    return self.materialize(sole, terminal_frames[sole.ID])
+                return {
+                    node.ID: self.materialize(node, terminal_frames[node.ID])
+                    for node in graph.terminal_nodes
+                }
 
-    def _evaluate_to_root(self, graph: Graph) -> pl.LazyFrame:
-        """Evaluate required boundaries and return the root lazy value."""
+    def _evaluate_to_terminals(
+        self, graph: Graph
+    ) -> dict[str, pl.LazyFrame]:
+        """Evaluate required boundaries and return each terminal lazy value.
+
+        Live inference (unpinned, unfrozen, sharing a group with a trainer in
+        the same graph) evaluates after every other node so the trainer's
+        manifest entry is visible in the executor-owned model store.
+        """
         results: dict[str, pl.LazyFrame] = {}
+        terminal_ids = {node.ID for node in graph.terminal_nodes}
+        trainer_groups = _trainer_groups(graph.node_list)
+        deferred_ids = {
+            node.ID
+            for node in graph.node_list
+            if _is_live_inference(node, trainer_groups)
+        }
+        ordered = [node for node in graph.node_list if node.ID not in deferred_ids]
+        ordered.extend(node for node in graph.node_list if node.ID in deferred_ids)
+        for node in ordered:
+            self._evaluate_node(node, graph, results, terminal_ids)
+        return {node.ID: results[node.ID] for node in graph.terminal_nodes}
 
-        for node in graph.node_list:
-            try:
-                node_input_lf = (
-                    None
-                    if not node.bindings
-                    else self.align_inputs(node, results)
-                )
-                results[node.ID] = self.lower_node(node, node_input_lf)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Execution failed at node '{node.name or node.ID[:8]}' "
-                    f"({node.function_cls.__name__}@{node.function.version}): {exc}"
-                ) from exc
+    def _evaluate_node(
+        self,
+        node: Node,
+        graph: Graph,
+        results: dict[str, pl.LazyFrame],
+        terminal_ids: set[str],
+    ) -> None:
+        try:
+            node_input_lf = (
+                None
+                if not node.bindings
+                else self.align_inputs(node, results)
+            )
+            results[node.ID] = self.lower_node(node, node_input_lf)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Execution failed at node '{node.name or node.ID[:8]}' "
+                f"({node.function_cls.__name__}@{node.function.version}): {exc}"
+            ) from exc
 
-            if (
-                node.ID in graph.materialized_node_ids
-                and node.ID != graph.root_node.ID
-            ):
-                results[node.ID] = self.materialize(node, results[node.ID]).lazy()
-
-        return results[graph.root_node.ID]
+        if _is_trainer_node(node):
+            # Force the manifest side effect now so deferred live inference
+            # resolves against a populated store. The kept lazy frame is
+            # already in memory, so the later terminal collect is free.
+            results[node.ID] = self.materialize(node, results[node.ID]).lazy()
+        elif node.ID in graph.materialized_node_ids and node.ID not in terminal_ids:
+            results[node.ID] = self.materialize(node, results[node.ID]).lazy()
 
     def lower_node(
         self,
@@ -242,13 +347,17 @@ class LocalExecutor(Executor):
     for superseded upstream nodes.
     """
 
+    _DEFAULT_SHARD_BYTES: int = 512 * 1024 * 1024  # 512 MB
+
     def __init__(
         self,
         cache_dir: str | os.PathLike[str] | None = None,
         no_cache: bool = False,
         s3_credentials: S3CredentialsProvider | None = None,
+        cache_shard_bytes: int | None = None,
+        model_dir: str | os.PathLike[str] | None = None,
     ) -> None:
-        super().__init__(s3_credentials=s3_credentials)
+        super().__init__(s3_credentials=s3_credentials, model_dir=model_dir)
         raw: str | None = None
         if cache_dir is not None:
             raw = str(cache_dir)
@@ -260,6 +369,23 @@ class LocalExecutor(Executor):
             None if raw is None or self._cache_s3 else Path(raw)
         )
         self._no_cache = no_cache
+
+        # Resolve shard size: explicit param > env var > default
+        if cache_shard_bytes is not None:
+            self._cache_shard_bytes: int = cache_shard_bytes
+        else:
+            env_shard = os.environ.get("IOSIS_CACHE_SHARD_BYTES")
+            if env_shard is not None:
+                try:
+                    self._cache_shard_bytes = int(env_shard)
+                except ValueError:
+                    _LOG.warning(
+                        "Invalid IOSIS_CACHE_SHARD_BYTES=%r, using default",
+                        env_shard,
+                    )
+                    self._cache_shard_bytes = self._DEFAULT_SHARD_BYTES
+            else:
+                self._cache_shard_bytes = self._DEFAULT_SHARD_BYTES
 
         # Ensure local directory exists so caching is enabled on new paths
         if self._cache_dir is not None and not self._no_cache and not self._cache_s3:
@@ -287,6 +413,44 @@ class LocalExecutor(Executor):
             / node_id[4:6]
             / node_id[6:]
         )
+
+    def _split_into_shards(
+        self, df: pl.DataFrame
+    ) -> list[pl.DataFrame]:
+        """Split a DataFrame into byte-budgeted shards."""
+        if df.is_empty() or self._cache_shard_bytes <= 0:
+            return [df]
+        estimated = df.estimated_size()
+        if estimated <= self._cache_shard_bytes:
+            return [df]
+        total_rows = df.shape[0]
+        n_shards = math.ceil(estimated / self._cache_shard_bytes)
+        n_shards = min(n_shards, total_rows)
+        if n_shards <= 1:
+            return [df]
+        rows_per = math.ceil(total_rows / n_shards)
+        return [
+            df.slice(i * rows_per, min(rows_per, total_rows - i * rows_per))
+            for i in range(n_shards)
+        ]
+
+    @staticmethod
+    def _delete_legacy_shards(
+        filesystem: Any,
+        bare: str,
+        manifest_path: str,
+    ) -> None:
+        """Remove a legacy ``data.parquet`` and any stale ``part-*`` files."""
+        from pyarrow.fs import FileType
+
+        for name in ("data.parquet",):
+            key = f"{bare}/{name}"
+            info = filesystem.get_file_info(key)
+            if info.type == FileType.File:
+                filesystem.delete_file(key)
+        manifest_info = filesystem.get_file_info(manifest_path)
+        if manifest_info.type == FileType.File:
+            filesystem.delete_file(manifest_path)
 
     def _s3_storage_options(self) -> dict[str, str]:
         credentials = current_s3_credentials()
@@ -374,8 +538,26 @@ class LocalExecutor(Executor):
         try:
             entry = self._cache_entry_dir(node_id)
             entry.mkdir(parents=True, exist_ok=True)
-            data_path = entry / "data.parquet"
-            df.write_parquet(data_path)
+
+            # Remove legacy single-file cache if present
+            legacy = entry / "data.parquet"
+            if legacy.exists():
+                legacy.unlink()
+
+            # Remove stale shards from a previous (different) write
+            for stale in sorted(entry.glob("part-*.parquet")):
+                stale.unlink()
+
+            shards = self._split_into_shards(df)
+            for idx, shard in enumerate(shards):
+                shard_path = entry / f"part-{idx:05d}.parquet"
+                shard.write_parquet(shard_path)
+
+            total_bytes = sum(
+                (entry / f"part-{i:05d}.parquet").stat().st_size
+                for i in range(len(shards))
+            )
+
             manifest = {
                 "node_id": node_id,
                 "success": True,
@@ -383,7 +565,8 @@ class LocalExecutor(Executor):
                 "column_count": df.shape[1],
                 "columns": df.columns,
                 "schema": {col: str(df.schema[col]) for col in df.columns},
-                "byte_size": data_path.stat().st_size,
+                "byte_size": total_bytes,
+                "shard_count": len(shards),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             (entry / "manifest.json").write_text(
@@ -394,18 +577,36 @@ class LocalExecutor(Executor):
 
     def _write_cache_s3(self, node_id: str, df: pl.DataFrame) -> None:
         try:
+            from pyarrow.fs import FileType
+
             key_prefix = self._cache_entry_key(node_id)
             bare = key_prefix.removeprefix("s3://")
             filesystem = self._open_s3_filesystem()
+            filesystem.create_dir(bare, recursive=True)
+
+            # Remove legacy single-file cache and stale shards
+            manifest_key = f"{bare}/manifest.json"
+            self._delete_legacy_shards(filesystem, bare, manifest_key)
+
+            # Remove stale part-*.parquet from previous writes
+            for shard_info in filesystem.get_file_info(
+                f"{bare}/part-*.parquet"
+            ):
+                if shard_info.type == FileType.File:
+                    filesystem.delete_file(shard_info.path)
 
             import io
 
-            buffer = io.BytesIO()
-            df.write_parquet(buffer)
-            parquet_bytes = buffer.getvalue()
-            filesystem.create_dir(bare, recursive=True)
-            with filesystem.open_output_stream(f"{bare}/data.parquet") as stream:
-                stream.write(parquet_bytes)
+            shards = self._split_into_shards(df)
+            total_bytes = 0
+            for idx, shard in enumerate(shards):
+                buffer = io.BytesIO()
+                shard.write_parquet(buffer)
+                shard_bytes = buffer.getvalue()
+                total_bytes += len(shard_bytes)
+                shard_key = f"{bare}/part-{idx:05d}.parquet"
+                with filesystem.open_output_stream(shard_key) as stream:
+                    stream.write(shard_bytes)
 
             manifest = {
                 "node_id": node_id,
@@ -414,10 +615,11 @@ class LocalExecutor(Executor):
                 "column_count": df.shape[1],
                 "columns": df.columns,
                 "schema": {col: str(df.schema[col]) for col in df.columns},
-                "byte_size": len(parquet_bytes),
+                "byte_size": total_bytes,
+                "shard_count": len(shards),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
-            with filesystem.open_output_stream(f"{bare}/manifest.json") as stream:
+            with filesystem.open_output_stream(manifest_key) as stream:
                 stream.write(
                     json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
                 )
@@ -427,9 +629,11 @@ class LocalExecutor(Executor):
     def _resolve_cache_frontier(
         self, graph: Graph
     ) -> tuple[set[str], dict[str, pl.LazyFrame]]:
-        """Walk backward from root_node to identify required nodes and cache hits.
+        """Walk backward from every terminal to identify required nodes and hits.
 
         Stops searching upstream along any branch as soon as a cached node is found.
+        Source nodes (inputless type signature) are never read from cache: they
+        are always re-pulled unless every dependent already hit (pruned above).
         Returns:
             required_ids: set of node IDs that must be evaluated or read from cache.
             cached_frames: dict mapping node_id -> pl.LazyFrame for frontier cache hits.
@@ -439,7 +643,7 @@ class LocalExecutor(Executor):
 
         required_ids: set[str] = set()
         cached_frames: dict[str, pl.LazyFrame] = {}
-        queue: list[Node] = [graph.root_node]
+        queue: list[Node] = list(graph.terminal_nodes)
 
         while queue:
             node = queue.pop()
@@ -448,7 +652,7 @@ class LocalExecutor(Executor):
 
             required_ids.add(node.ID)
 
-            cached = self._read_cache(node.ID)
+            cached = None if _is_source_node(node) else self._read_cache(node.ID)
             if cached is not None:
                 cached_frames[node.ID] = cached
                 # Frontier cache hit: stop traversing upstream along this branch!
@@ -463,22 +667,51 @@ class LocalExecutor(Executor):
 
         return required_ids, cached_frames
 
-    def execute(self, graph: Graph) -> pl.DataFrame:
+    def execute(
+        self, graph: Graph
+    ) -> pl.DataFrame | dict[str, pl.DataFrame]:
         with _s3_credentials_scope(self._s3_credentials):
-            root_lf = self._evaluate_to_root(graph)
-            result = self.materialize(graph.root_node, root_lf)
-            if (
-                self._cache_enabled
-                and graph.root_node.ID in graph.materialized_node_ids
-            ):
-                self._write_cache(graph.root_node.ID, result)
-            return result
+            with _model_dir_scope(self._model_dir_raw):
+                terminal_frames, cached_ids = self._evaluate_to_terminals_with_hits(
+                    graph
+                )
+                outputs: dict[str, pl.DataFrame] = {}
+                for node in graph.terminal_nodes:
+                    result = self.materialize(node, terminal_frames[node.ID])
+                    if (
+                        self._cache_enabled
+                        and node.ID in graph.materialized_node_ids
+                        and node.ID not in cached_ids
+                        and not _is_source_node(node)
+                    ):
+                        self._write_cache(node.ID, result)
+                    outputs[node.ID] = result
+                if len(graph.terminal_nodes) == 1:
+                    return outputs[graph.terminal_nodes[0].ID]
+                return outputs
 
-    def _evaluate_to_root(self, graph: Graph) -> pl.LazyFrame:
+    def _evaluate_to_terminals(
+        self, graph: Graph
+    ) -> dict[str, pl.LazyFrame]:
+        frames, _ = self._evaluate_to_terminals_with_hits(graph)
+        return frames
+
+    def _evaluate_to_terminals_with_hits(
+        self, graph: Graph
+    ) -> tuple[dict[str, pl.LazyFrame], set[str]]:
         required_ids, cached_frames = self._resolve_cache_frontier(graph)
         results: dict[str, pl.LazyFrame] = {}
+        terminal_ids = {node.ID for node in graph.terminal_nodes}
+        trainer_groups = _trainer_groups(graph.node_list)
+        deferred_ids = {
+            node.ID
+            for node in graph.node_list
+            if _is_live_inference(node, trainer_groups)
+        }
+        ordered = [node for node in graph.node_list if node.ID not in deferred_ids]
+        ordered.extend(node for node in graph.node_list if node.ID in deferred_ids)
 
-        for node in graph.node_list:
+        for node in ordered:
             if node.ID not in required_ids:
                 continue  # Skip unneeded upstream nodes entirely
 
@@ -501,21 +734,27 @@ class LocalExecutor(Executor):
                     f"{node.function.version}): {exc}"
                 ) from exc
 
-            is_root = node.ID == graph.root_node.ID
+            is_terminal = node.ID in terminal_ids
             is_materialized = node.ID in graph.materialized_node_ids
 
-            if is_materialized:
-                if is_root:
-                    results[node.ID] = lf
-                else:
-                    df = self.materialize(node, lf)
-                    if self._cache_enabled:
-                        self._write_cache(node.ID, df)
-                    results[node.ID] = df.lazy()
+            if _is_trainer_node(node):
+                # Force the manifest side effect now; the terminal cache
+                # write still happens once in execute().
+                results[node.ID] = self.materialize(node, lf).lazy()
+            elif is_materialized and not is_terminal and not _is_source_node(node):
+                df = self.materialize(node, lf)
+                if self._cache_enabled and node.ID not in cached_frames:
+                    self._write_cache(node.ID, df)
+                results[node.ID] = df.lazy()
+            elif is_materialized and not is_terminal:
+                # Source with materialize:true: collect for run-local reuse
+                # but never persist. `materialize` is ignored for caching.
+                results[node.ID] = self.materialize(node, lf).lazy()
             else:
                 results[node.ID] = lf
 
-        return results[graph.root_node.ID]
+        frames = {node.ID: results[node.ID] for node in graph.terminal_nodes}
+        return frames, set(cached_frames)
 
     def materialize(self, node: Node, lf: pl.LazyFrame) -> pl.DataFrame:
         try:
@@ -536,6 +775,7 @@ class Graph:
         "materialized_node_ids",
         "node_list",
         "root_node",
+        "terminal_nodes",
     )
 
     ID: str
@@ -544,21 +784,33 @@ class Graph:
     materialized_node_ids: frozenset[str]
     node_list: tuple[Node, ...]
     root_node: Node
+    terminal_nodes: tuple[Node, ...]
 
     def __setattr__(self, name: str, value: Any) -> None:
         if getattr(self, "_frozen", False):
             raise AttributeError("Graph instances are immutable")
         object.__setattr__(self, name, value)
 
-    def __init__(self, root_node: Node):
-        if not isinstance(root_node, Node):
-            raise TypeError("Graph root_node must be a Node")
+    def __init__(self, root: Node | Iterable[Node]):
+        """Build a validated graph from one root or a full node list.
 
-        node_list, report = self._validated_declaration(root_node)
+        A single ``Node`` preserves the legacy single-terminal graph. An
+        iterable is treated as the full graph membership: terminals (nodes no
+        other member consumes) are derived automatically and every branch
+        executes. Trainers are terminal by construction and run alongside the
+        inference path over the same data.
+        """
+        terminals, membership = self._coerce_terminals(root)
+
+        node_list, report = self._validated_declaration(terminals, membership)
         if not report.is_valid:
             raise GraphValidationError(report)
 
-        object.__setattr__(self, "root_node", root_node)
+        primary = min(terminals, key=lambda node: node.ID)
+        object.__setattr__(self, "root_node", primary)
+        object.__setattr__(
+            self, "terminal_nodes", tuple(sorted(terminals, key=lambda n: n.ID))
+        )
         object.__setattr__(self, "node_list", node_list)
         object.__setattr__(self, "_validation_report", report)
         object.__setattr__(
@@ -569,10 +821,57 @@ class Graph:
         object.__setattr__(self, "ID", self._generate_persistent_id())
         object.__setattr__(self, "_frozen", True)
 
+    @staticmethod
+    def _coerce_terminals(
+        root: Node | Iterable[Node],
+    ) -> tuple[tuple[Node, ...], tuple[Node, ...] | None]:
+        """Normalize constructor input to (terminals, membership-or-None)."""
+        if isinstance(root, Node):
+            return (root,), None
+        if isinstance(root, Iterable):
+            members = tuple(dict.fromkeys(root))
+        else:
+            raise TypeError("Graph root must be a Node or an iterable of Nodes")
+        if not members:
+            raise ValueError("Graph requires at least one node")
+        for member in members:
+            if not isinstance(member, Node):
+                raise TypeError("Graph membership must contain only Nodes")
+        parent_ids = {
+            parent.ID
+            for member in members
+            for parent, _ in member.bindings.values()
+        }
+        terminals = tuple(member for member in members if member.ID not in parent_ids)
+        if not terminals:
+            raise GraphValidationError(
+                ValidationReport(
+                    (
+                        ValidationIssue(
+                            code="NO_TERMINALS",
+                            category="structure",
+                            message=(
+                                "Graph membership has no terminal nodes: every "
+                                "node is consumed by another member, so the "
+                                "declaration contains a cycle."
+                            ),
+                            node_id=members[0].ID,
+                            node_name=members[0].name,
+                            tsfn_class=(
+                                f"{members[0].function_cls.__module__}."
+                                f"{members[0].function_cls.__qualname__}"
+                            ),
+                            tsfn_version=members[0].function.version,
+                        ),
+                    )
+                )
+            )
+        return terminals, members
+
     def __repr__(self) -> str:
         return (
             f"Graph(id={self.ID[:8]!r}, root={self.root_node.ID[:8]!r}, "
-            f"nodes={len(self.node_list)})"
+            f"nodes={len(self.node_list)}, terminals={len(self.terminal_nodes)})"
         )
 
     def verify(self) -> None:
@@ -581,20 +880,20 @@ class Graph:
             raise GraphValidationError(self._validation_report)
 
     @classmethod
-    def validate(cls, root_node: Node) -> ValidationReport:
+    def validate(cls, root: Node | Iterable[Node]) -> ValidationReport:
         """Return all safely diagnosable declaration issues without executing TSFNs."""
-        if not isinstance(root_node, Node):
-            raise TypeError("Graph root_node must be a Node")
+        terminals, membership = cls._coerce_terminals(root)
 
-        _, report = cls._validated_declaration(root_node)
+        _, report = cls._validated_declaration(terminals, membership)
         return report
 
     @classmethod
     def _validated_declaration(
         cls,
-        root_node: Node,
+        terminals: tuple[Node, ...],
+        membership: tuple[Node, ...] | None = None,
     ) -> tuple[tuple[Node, ...], ValidationReport]:
-        ordered_nodes, cycle = cls._dependency_order(root_node)
+        ordered_nodes, cycle = cls._multi_dependency_order(terminals)
         if cycle is not None:
             cycle_node = cycle[-1]
             cycle_path = " -> ".join(node.name or node.ID for node in cycle)
@@ -628,6 +927,7 @@ class Graph:
         lookahead_tainted = cls._lookahead_taint(ordered_nodes)
         for node in ordered_nodes:
             cls._collect_node_issues(node, node_ids, issues, lookahead_tainted)
+        cls._collect_training_issues(ordered_nodes, membership, issues)
 
         positions = {node.ID: index for index, node in enumerate(ordered_nodes)}
         positioned_issues = tuple(
@@ -640,11 +940,155 @@ class Graph:
         return ordered_nodes, ValidationReport(positioned_issues)
 
     @classmethod
+    def _collect_training_issues(
+        cls,
+        ordered_nodes: tuple[Node, ...],
+        membership: tuple[Node, ...] | None,
+        issues: list[ValidationIssue],
+    ) -> None:
+        """Validate trainer/inference pairing and nodelist reachability."""
+        from iosislib.core.model import _validate_model_group
+
+        trainers_by_group: dict[str, list[Node]] = defaultdict(list)
+        for node in ordered_nodes:
+            if getattr(node.function_cls, "IS_TRAINER", False) is not True:
+                continue
+            function: Any = node.function
+            model_group = getattr(function, "model_group", None)
+            if not callable(model_group):
+                issues.append(
+                    cls._issue(
+                        node,
+                        code="INVALID_MODEL_GROUP",
+                        category="training",
+                        message=(
+                            f"Training validation failed for node "
+                            f"'{node.name or node.ID}': "
+                            f"{node.function_cls.__name__} does not expose "
+                            "model_group()"
+                        ),
+                    )
+                )
+                continue
+            try:
+                group = _validate_model_group(model_group())
+            except (TypeError, ValueError) as exc:
+                issues.append(
+                    cls._issue(
+                        node,
+                        code="INVALID_MODEL_GROUP",
+                        category="training",
+                        message=(
+                            f"Training validation failed for node "
+                            f"'{node.name or node.ID}': {exc}"
+                        ),
+                    )
+                )
+                continue
+            trainers_by_group[group].append(node)
+
+        for group in sorted(trainers_by_group):
+            trainers = trainers_by_group[group]
+            if len(trainers) < 2:
+                continue
+            for extra in trainers[1:]:
+                issues.append(
+                    cls._issue(
+                        extra,
+                        code="MULTIPLE_TRAINERS",
+                        category="training",
+                        message=(
+                            f"Training validation failed for node "
+                            f"'{extra.name or extra.ID}': group {group!r} "
+                            "already has a trainer. Retraining appends a new "
+                            "finished model run; it never adds an endpoint."
+                        ),
+                    )
+                )
+
+        for node in ordered_nodes:
+            if getattr(node.function_cls, "IS_INFERENCE", False) is not True:
+                continue
+            function = node.function
+            model_group = getattr(function, "model_group", None)
+            pinned_model_id = getattr(function, "pinned_model_id", None)
+            is_frozen = getattr(function, "is_frozen", None)
+            if not callable(model_group):
+                issues.append(
+                    cls._issue(
+                        node,
+                        code="INVALID_MODEL_GROUP",
+                        category="training",
+                        message=(
+                            f"Training validation failed for node "
+                            f"'{node.name or node.ID}': "
+                            f"{node.function_cls.__name__} does not expose "
+                            "model_group()"
+                        ),
+                    )
+                )
+                continue
+            try:
+                _validate_model_group(model_group())
+                if callable(pinned_model_id):
+                    pinned = pinned_model_id()
+                    if pinned is not None and (
+                        not isinstance(pinned, str) or not pinned
+                    ):
+                        raise ValueError(
+                            "pinned model_id must be a non-empty string or None"
+                        )
+                if callable(is_frozen):
+                    is_frozen()
+            except (TypeError, ValueError, LookupError) as exc:
+                issues.append(
+                    cls._issue(
+                        node,
+                        code="INVALID_MODEL_REFERENCE",
+                        category="training",
+                        message=(
+                            f"Training validation failed for node "
+                            f"'{node.name or node.ID}': {exc}"
+                        ),
+                    )
+                )
+
+        if membership is not None:
+            reachable = {node.ID for node in ordered_nodes}
+            for member in membership:
+                if member.ID not in reachable:
+                    issues.append(
+                        cls._issue(
+                            member,
+                            code="UNREACHABLE_NODE",
+                            category="structure",
+                            message=(
+                                f"Membership validation failed for node "
+                                f"'{member.name or member.ID}': the node is not "
+                                "reachable from any terminal and would never "
+                                "execute."
+                            ),
+                        )
+                    )
+
+    @classmethod
     def _dependency_order(
         cls,
         target_node: Node,
     ) -> tuple[tuple[Node, ...], tuple[Node, ...] | None]:
         """Return one canonical, ID-deduplicated dependency traversal."""
+        return cls._multi_dependency_order((target_node,))
+
+    @classmethod
+    def _multi_dependency_order(
+        cls,
+        terminals: tuple[Node, ...],
+    ) -> tuple[tuple[Node, ...], tuple[Node, ...] | None]:
+        """Return one canonical traversal over every terminal's ancestors.
+
+        Terminals are visited in ID order with shared visited state, so shared
+        ancestors are evaluated once however many branches consume them.
+        """
         visited: set[str] = set()
         visiting: dict[str, int] = {}
         stack: list[Node] = []
@@ -672,7 +1116,8 @@ class Graph:
             visited.add(node.ID)
             ordered_nodes.append(node)
 
-        dfs(target_node)
+        for terminal in sorted(terminals, key=lambda node: node.ID):
+            dfs(terminal)
         return tuple(ordered_nodes), cycle
 
     @staticmethod
@@ -1063,6 +1508,7 @@ class Graph:
         return {
             "id": self.ID,
             "root_id": self.root_node.ID,
+            "terminal_ids": [node.ID for node in self.terminal_nodes],
             "nodes": [self._describe_node(node) for node in self.node_list],
         }
 
@@ -1141,14 +1587,27 @@ class Graph:
         }
 
     def _generate_persistent_id(self) -> str:
-        graph_definition = {
-            "root_id": self.root_node.ID,
-            "nodes": tuple(node.ID for node in self.node_list),
-        }
+        if len(self.terminal_nodes) == 1:
+            graph_definition = {
+                "root_id": self.root_node.ID,
+                "nodes": tuple(node.ID for node in self.node_list),
+            }
+        else:
+            graph_definition = {
+                "terminal_ids": sorted(node.ID for node in self.terminal_nodes),
+                "nodes": tuple(node.ID for node in self.node_list),
+            }
         serialized_data = json.dumps(graph_definition, sort_keys=True)
         return hashlib.sha256(serialized_data.encode("utf-8")).hexdigest()
 
-    def execute(self, executor: Executor | None = None) -> pl.DataFrame:
+    def execute(
+        self, executor: Executor | None = None
+    ) -> pl.DataFrame | dict[str, pl.DataFrame]:
+        """Execute every terminal branch.
+
+        Single-terminal graphs return one frame (legacy behavior);
+        multi-terminal graphs return a mapping of terminal node ID to frame.
+        """
         selected_executor = LocalExecutor() if executor is None else executor
         if not isinstance(selected_executor, Executor):
             raise TypeError("Graph executor must be an Executor")

@@ -8,7 +8,7 @@ from iosislib.backtest.backtest import (
     register_policy,
     register_risk_policy,
 )
-from iosislib.backtest.feeds import Feed, L1Feed
+from iosislib.backtest.feeds import Feed, L1Feed, L2Feed
 from iosislib.backtest.policy import (
     Array,
     FeatureBuffer,
@@ -45,6 +45,7 @@ __all__ = [
     "FractionalKellyPolicy",
     "FractionalLimitPolicy",
     "L1Feed",
+    "L2Feed",
     "MarketState",
     "ModelPolicy",
     "ModelPolicyState",

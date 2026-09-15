@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import abc
 import json
@@ -402,6 +402,7 @@ class TSFN(abc.ABC, Generic[ConfigT]):
     DEFAULT_NULL_POLICY: ClassVar[NullPolicy] = NullPolicy.PROPAGATE
     LOOKAHEAD: ClassVar[bool] = False
     ALLOW_LOOKAHEAD_INPUTS: ClassVar[frozenset[str]] = frozenset()
+    IDENTITY_EXCLUDED_PARAMS: ClassVar[frozenset[str]] = frozenset()
 
     def __setattr__(self, name: str, value: Any) -> None:
         if self.__dict__.get("_node_definition_frozen", False):
@@ -419,6 +420,7 @@ class TSFN(abc.ABC, Generic[ConfigT]):
             cls._validate_materialization_requirement()
             cls._validate_default_null_policy()
             cls._validate_lookahead_contract()
+            cls._validate_identity_excluded_params()
 
     @classmethod
     def _validate_version(cls) -> str:
@@ -472,6 +474,18 @@ class TSFN(abc.ABC, Generic[ConfigT]):
                 f"{cls.__name__}.ALLOW_LOOKAHEAD_INPUTS must be a frozenset of "
                 "non-empty strings"
             )
+
+    @classmethod
+    def _validate_identity_excluded_params(cls) -> frozenset[str]:
+        excluded = cls.IDENTITY_EXCLUDED_PARAMS
+        if not isinstance(excluded, frozenset) or not all(
+            isinstance(name, str) and name for name in excluded
+        ):
+            raise TypeError(
+                f"{cls.__name__}.IDENTITY_EXCLUDED_PARAMS must be a frozenset "
+                "of non-empty strings"
+            )
+        return excluded
 
     @property
     def requires_materialization(self) -> bool:

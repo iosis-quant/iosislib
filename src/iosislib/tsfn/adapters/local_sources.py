@@ -5,7 +5,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import polars as pl
 
@@ -17,8 +17,14 @@ from iosislib.core.tsfn import (
     TSFNConfig,
     _column_signatures,
     _frame_physical_schema,
+    _time_axis_physical_dtype,
 )
-from iosislib.core.utils import current_s3_credentials
+from iosislib.core.utils import (
+    _dtype_matches,
+    _flat_size,
+    _is_list_instance,
+    current_s3_credentials,
+)
 
 if TYPE_CHECKING:
     from pyarrow.fs import FileInfo, FileSystem
@@ -312,11 +318,110 @@ def _read_verified_parquet_snapshot(
     return snapshot
 
 
+def _time_coercion_expr(
+    time_axis: TimeAxis,
+    actual: pl.DataType | None,
+) -> pl.Expr:
+    """Build the projection expression for a source time column.
+
+    Coercions (all value-preserving, never widening):
+
+    - ``Datetime`` with a different ``time_unit`` is cast to the declared
+      unit. Timezone mismatches stay loud: dropping or inventing a timezone
+      silently would corrupt alignment.
+    - ``String`` timestamps are parsed to the declared ``Datetime`` unit.
+      Unparseable strings raise instead of becoming null.
+    - Anything else passes through so output validation reports the
+      standard mismatch error.
+    """
+    name = time_axis.column
+    if actual is None:
+        return pl.col(name)
+    declared = _time_axis_physical_dtype(time_axis)
+    declared_is_datetime = declared is pl.Datetime or isinstance(
+        declared, pl.Datetime
+    )
+    if isinstance(actual, pl.Datetime) and declared_is_datetime:
+        declared_tz = (
+            declared.time_zone if isinstance(declared, pl.Datetime) else None
+        )
+        if actual.time_zone != declared_tz:
+            return pl.col(name).alias(name)
+        return pl.col(name).cast(declared).alias(name)
+    if actual == pl.String and declared_is_datetime:
+        unit = declared.time_unit if isinstance(declared, pl.Datetime) else "us"
+        return pl.col(name).str.to_datetime(time_unit=unit).alias(name)
+    if actual == declared:
+        return pl.col(name).alias(name)
+    return pl.col(name).alias(name)
+
+
+def _value_coercion_expr(
+    column: ColumnSignature,
+    actual: pl.DataType | None,
+) -> pl.Expr:
+    """Build the projection expression for a declared source value column.
+
+    The only cross-type coercion is fixed-width ``List`` to ``Array`` when
+    the list inner dtype matches the declared element dtype exactly (no
+    numeric widening) and every row has the declared width. Ragged rows
+    raise loudly at collect time. All other mismatches pass through so
+    output validation reports the standard mismatch error.
+    """
+    name = column.name
+    if actual is None:
+        return pl.col(name).alias(name)
+    expected = cast(pl.DataType, column.physical_dtype)
+    if _dtype_matches(actual, expected):
+        return pl.col(name).alias(name)
+    declared_dtype = column.dtype
+    declared_is_datetime = declared_dtype is pl.Datetime or isinstance(
+        declared_dtype, pl.Datetime
+    )
+    if (
+        not column.shape
+        and isinstance(actual, pl.Datetime)
+        and declared_is_datetime
+    ):
+        declared_tz = (
+            declared_dtype.time_zone
+            if isinstance(declared_dtype, pl.Datetime)
+            else None
+        )
+        if actual.time_zone == declared_tz:
+            return pl.col(name).cast(expected).alias(name)
+        return pl.col(name).alias(name)
+    if column.shape and _is_list_instance(actual):
+        inner = cast(pl.List, actual).inner
+        if _dtype_matches(inner, cast(pl.DataType, column.dtype)):
+            return pl.col(name).list.to_array(_flat_size(column.shape)).alias(name)
+    return pl.col(name).alias(name)
+
+
+def _projection_exprs(
+    signature: FrameSignature,
+    actual: Mapping[str, pl.DataType],
+) -> list[pl.Expr]:
+    """Build projection expressions for declared columns from an actual schema.
+
+    ``actual`` maps column name to physical dtype without reading row data
+    (a footer read or an in-memory schema). The expressions themselves stay
+    lazy: building them touches no data.
+    """
+    if signature.time is None:
+        raise ValueError("Source output signature must declare a time axis")
+    time_axis = signature.time
+    expressions = [_time_coercion_expr(time_axis, actual.get(time_axis.column))]
+    for column in _column_signatures(signature):
+        expressions.append(_value_coercion_expr(column, actual.get(column.name)))
+    return expressions
+
+
 def _project_declared_columns(
     frame: pl.LazyFrame,
     signature: FrameSignature,
 ) -> pl.LazyFrame:
-    return frame.select(*_frame_physical_schema(signature))
+    return frame.select(*_projection_exprs(signature, frame.collect_schema()))
 
 
 @dataclass(frozen=True)
@@ -400,9 +505,15 @@ class ParquetSource(TSFN):
     A location may be a file/object or a directory/prefix. Dataset files are read
     recursively in lexicographic path order. Execution holds all source bytes plus
     parsed frames in memory and creates no staging artifacts.
+
+    Declared columns are coerced conservatively before validation: ``Datetime``
+    time columns with a different ``time_unit`` are cast (timezones must still
+    match), ``String`` timestamps are parsed, and fixed-width ``List`` columns
+    whose inner dtype matches are converted to the declared ``Array`` shape.
+    Every other mismatch still fails loudly; no numeric widening is applied.
     """
 
-    VERSION = "0.3.0"
+    VERSION = "0.4.0"
     CONFIG_CLS = ParquetSourceConfig
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:

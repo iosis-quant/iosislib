@@ -30,6 +30,7 @@ from iosislib.tsfn.adapters.local_sources import (
     _normalize_pathlike,
     _open_parquet_filesystem,
     _project_declared_columns,
+    _projection_exprs,
     _resolve_output_signature,
     _validate_output_signature,
     _UNRESOLVED_SIGNATURE,
@@ -404,9 +405,13 @@ class StreamingParquetSource(TSFN):
     then lazily scans the chunk objects in manifest order with projection and
     predicate pushdown. Optional ``verify_layout`` stats object sizes without
     downloading chunk bytes.
+
+    Declared columns use the shared source coercions: ``Datetime`` unit casts
+    (timezones must still match), ``String`` timestamp parsing, and fixed-width
+    ``List`` to ``Array`` conversion. All other mismatches fail loudly.
     """
 
-    VERSION = "0.1.0"
+    VERSION = "0.2.0"
     CONFIG_CLS = StreamingParquetSourceConfig
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
@@ -428,7 +433,33 @@ class StreamingParquetSource(TSFN):
         uris = [_join_location(base, chunk.key) for chunk in manifest.chunks]
         storage_options = _scan_storage_options() if base.startswith("s3://") else None
         frame = pl.scan_parquet(uris, storage_options=storage_options)
-        return _project_declared_columns(frame, params.output_signature)
+        if not manifest.chunks:
+            return _project_declared_columns(frame, params.output_signature)
+        actual = _first_chunk_schema(base, manifest.chunks[0].key)
+        return frame.select(
+            *_projection_exprs(params.output_signature, actual)
+        )
+
+
+def _first_chunk_schema(base: str, key: str) -> pl.Schema:
+    """Return the first chunk's schema from its footer without reading rows.
+
+    Footer reads go through the configured filesystem (mockable in tests),
+    so ``apply()`` still never downloads chunk row data: only the manifest
+    and one footer are touched. Chunks are producer-guaranteed uniform; a
+    divergent chunk fails loudly at collect time.
+    """
+    import pyarrow as pa
+    from pyarrow import parquet as pq
+
+    filesystem, fs_path = _open_parquet_filesystem(base)
+    with filesystem.open_input_file(f"{fs_path}/{key}") as handle:
+        arrow_schema = pq.read_metadata(handle).schema.to_arrow_schema()
+    empty = pa.Table.from_arrays(
+        [pa.array([], type=field.type) for field in arrow_schema],
+        schema=arrow_schema,
+    )
+    return pl.from_arrow(empty).schema
 
 
 def merkle_sha256_parquet_source(path: PathLike) -> str:

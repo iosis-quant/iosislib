@@ -1,7 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping
+from dataclasses import fields as _dataclass_fields
+from dataclasses import is_dataclass as _is_dataclass
 from types import MappingProxyType
 from typing import Any, Generic, TypeVar, cast
 
@@ -349,6 +351,43 @@ class Node(Generic[ConfigT]):
         serialized_data = _canonical_identity_json(self.definition)
         return hashlib.sha256(serialized_data.encode("utf-8")).hexdigest()
 
+    def _identity_parameters(self) -> Any:
+        """Return the parameters view that participates in persistent identity.
+
+        ``TSFN.IDENTITY_EXCLUDED_PARAMS`` names volatile config fields (store
+        paths, run ids, freeze flags) that vary between equivalent runs and
+        must not invalidate node identity. Only declared config fields may be
+        excluded; anything else is a construction error.
+        """
+        excluded: Any = getattr(
+            self.function_cls, "IDENTITY_EXCLUDED_PARAMS", frozenset()
+        )
+        if not excluded:
+            return self.parameters
+        if not isinstance(excluded, frozenset) or not all(
+            isinstance(name, str) and name for name in excluded
+        ):
+            raise TypeError(
+                f"{self.function_cls.__name__}.IDENTITY_EXCLUDED_PARAMS must be "
+                "a frozenset of non-empty strings"
+            )
+        if not _is_dataclass(self.parameters):
+            raise TypeError(
+                f"{self.function_cls.__name__} declares "
+                "IDENTITY_EXCLUDED_PARAMS but its parameters are not a dataclass"
+            )
+        available = {item.name for item in _dataclass_fields(self.parameters)}
+        unknown = set(excluded) - available
+        if unknown:
+            raise ValueError(
+                f"{self.function_cls.__name__}.IDENTITY_EXCLUDED_PARAMS names "
+                f"unknown config fields: {sorted(unknown)}"
+            )
+        return {
+            name: getattr(self.parameters, name)
+            for name in sorted(available - set(excluded))
+        }
+
     def _normalized_definition(self) -> Mapping[str, Any]:
         serialized_bindings = {
             input_name: {
@@ -367,7 +406,7 @@ class Node(Generic[ConfigT]):
                 self.null_handlers,
                 self.null_handler_versions,
             ),
-            "parameters": self.parameters,
+            "parameters": self._identity_parameters(),
             "outputs": tuple(sorted(self.outputs.items())),
         }
         return cast(Mapping[str, Any], _normalize_identity_value(node_definition))

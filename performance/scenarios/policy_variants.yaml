@@ -35,7 +35,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "1.2.0"
+          version: "1.5.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -90,7 +90,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "1.2.0"
+          version: "1.5.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -148,7 +148,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "1.2.0"
+          version: "1.5.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -168,7 +168,7 @@ scenarios:
               short_qty: 10.0
             risk_policy:
               kind: fractional_kelly
-              fraction: 0.25
+              custom_fraction: 0.25
       outputs:
         equity: simulation.equity
     outputs: [equity]
@@ -209,7 +209,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "1.2.0"
+          version: "1.5.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -264,7 +264,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "1.2.0"
+          version: "1.5.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -325,7 +325,7 @@ scenarios:
                   shape: [16]
         simulation:
           op: backtest.backtest
-          version: "1.2.0"
+          version: "1.5.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask

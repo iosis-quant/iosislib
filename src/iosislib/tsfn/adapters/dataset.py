@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +94,16 @@ def _validate_time_range(value: object) -> tuple[str, str] | None:
     if not isinstance(end, str) or not end:
         raise ValueError("time_range end must be a non-empty string")
     return (start, end)
+
+
+def _parse_time_bound(value: str, *, label: str) -> datetime:
+    """Parse a time_range bound, accepting bare dates ("2021-08-01")."""
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"time_range {label} must be ISO-8601 ({value!r} is not parseable)"
+        ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,9 +225,14 @@ class DatasetSource(TSFN):
     No data is downloaded until ``collect()``.  Projection pushdown ensures
     only requested columns are fetched, and optional time-range filtering
     prunes entire partition directories.
+
+    Declared columns use the shared source coercions: ``Datetime`` unit casts
+    (timezones must still match), ``String`` timestamp parsing, and fixed-width
+    ``List`` to ``Array`` conversion. All other mismatches fail loudly.
+    ``time_range`` bounds accept bare dates (``"2021-08-01"``).
     """
 
-    VERSION = "0.1.0"
+    VERSION = "0.2.0"
     CONFIG_CLS = DatasetSourceConfig
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
@@ -240,9 +256,11 @@ class DatasetSource(TSFN):
                 col_name = time_col.column
                 start, end = params.time_range
                 time_dtype = _time_axis_physical_dtype(time_col)
+                start_dt = _parse_time_bound(start, label="start")
+                end_dt = _parse_time_bound(end, label="end")
                 lazy_table = lazy_table.filter(
-                    (pl.col(col_name).cast(time_dtype) >= pl.lit(start).cast(time_dtype))
-                    & (pl.col(col_name).cast(time_dtype) < pl.lit(end).cast(time_dtype))
+                    (pl.col(col_name).cast(time_dtype) >= pl.lit(start_dt).cast(time_dtype))
+                    & (pl.col(col_name).cast(time_dtype) < pl.lit(end_dt).cast(time_dtype))
                 )
 
         return _project_declared_columns(lazy_table, params.output_signature)

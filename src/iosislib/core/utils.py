@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -84,6 +85,81 @@ def _s3_credentials_scope(
         yield
     finally:
         _CURRENT_S3_CREDENTIALS.reset(token)
+
+
+MODEL_DIR_ENV_VAR = "IOSIS_MODEL_DIR"
+
+_CURRENT_MODEL_DIR: ContextVar[Path | str | None] = ContextVar(
+    "current_model_dir", default=None
+)
+
+
+def _normalize_model_dir_value(value: str) -> Path | str:
+    """Normalize a model store location to a local Path or an S3 prefix."""
+    if value.startswith("s3://"):
+        without_scheme = value.removeprefix("s3://").rstrip("/")
+        bucket, _, key = without_scheme.partition("/")
+        if not bucket:
+            raise ValueError("s3:// model location must include a bucket name")
+        if any(character in bucket for character in "?#"):
+            raise ValueError("s3:// bucket name must not contain a query or fragment")
+        if "?" in key or "#" in key:
+            raise ValueError("s3:// model location must not contain a query or fragment")
+        normalized_key = key.rstrip("/")
+        return (
+            f"s3://{bucket}/{normalized_key}" if normalized_key else f"s3://{bucket}"
+        )
+    return Path(value)
+
+
+def current_model_dir() -> Path | str | None:
+    """Return the model store location scoped to the current execution, if any."""
+    return _CURRENT_MODEL_DIR.get()
+
+
+def resolve_model_dir(
+    explicit: str | os.PathLike[str] | None = None,
+) -> Path | str | None:
+    """Resolve the model store location: explicit override, scope, then env."""
+    if explicit is not None:
+        return _normalize_model_dir_value(os.fspath(explicit))
+    scoped = _CURRENT_MODEL_DIR.get()
+    if scoped is not None:
+        return scoped
+    raw = os.environ.get(MODEL_DIR_ENV_VAR)
+    return _normalize_model_dir_value(raw) if raw else None
+
+
+@contextmanager
+def _model_dir_scope(
+    model_dir: str | os.PathLike[str] | None,
+) -> Iterator[Path | str | None]:
+    """Scope one model store location for a single execution.
+
+    The resolved location is published through a ContextVar (primary) and mirrored
+    into ``os.environ`` so child processes inherit it. Both are restored after.
+    """
+    raw = os.environ.get(MODEL_DIR_ENV_VAR)
+    if model_dir is not None:
+        resolved: Path | str | None = _normalize_model_dir_value(
+            os.fspath(model_dir)
+        )
+    elif raw:
+        resolved = _normalize_model_dir_value(raw)
+    else:
+        resolved = None
+    token: Token[Path | str | None] = _CURRENT_MODEL_DIR.set(resolved)
+    previous = os.environ.get(MODEL_DIR_ENV_VAR)
+    if resolved is not None:
+        os.environ[MODEL_DIR_ENV_VAR] = str(resolved)
+    try:
+        yield resolved
+    finally:
+        _CURRENT_MODEL_DIR.reset(token)
+        if previous is None:
+            os.environ.pop(MODEL_DIR_ENV_VAR, None)
+        else:
+            os.environ[MODEL_DIR_ENV_VAR] = previous
 
 
 def _normalize_shape(shape: tuple[int, ...]) -> tuple[int, ...]:
@@ -685,7 +761,10 @@ def _serialize_value(value: Any) -> Any:
 
 __all__ = [
     "AsofTolerance",
+    "MODEL_DIR_ENV_VAR",
     "S3Credentials",
     "S3CredentialsProvider",
+    "current_model_dir",
     "current_s3_credentials",
+    "resolve_model_dir",
 ]

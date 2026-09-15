@@ -1,0 +1,1690 @@
+# TSFN sweep: every local (non-network) TSFN at two data sizes.
+# Reuses existing perf datasets; catches slow or super-linear ops.
+# Excluded by design: source.data_frame_source (in-memory only),
+# source.polymarket_price_history + source.y_finance_ohlcv (live network),
+# model.cnn1_d (torch-conv perf belongs in model unit tests, not a row sweep).
+#
+# Run: python performance/test_perf.py --scenario tsfn_sweep --scale-report
+
+scenarios:
+  - name: sweep_negate_100k
+    description: "Negate on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-negate-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        negated:
+          op: transform.negate
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: negated
+      outputs:
+        negated: negated.negated
+    outputs: [negated]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 200
+
+  - name: sweep_negate_1m
+    description: "Negate on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-negate-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        negated:
+          op: transform.negate
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: negated
+      outputs:
+        negated: negated.negated
+    outputs: [negated]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 800
+
+  - name: sweep_exp_100k
+    description: "Exp on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-exp-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        exp:
+          op: transform.exp
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: exp
+      outputs:
+        exp: exp.exp
+    outputs: [exp]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 200
+
+  - name: sweep_exp_1m
+    description: "Exp on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-exp-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        exp:
+          op: transform.exp
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: exp
+      outputs:
+        exp: exp.exp
+    outputs: [exp]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 800
+
+  - name: sweep_log_return_100k
+    description: "LogReturn on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-log-return-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        log_return:
+          op: transform.log_return
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: log_return
+            periods: 1
+      outputs:
+        log_return: log_return.log_return
+    outputs: [log_return]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 200
+
+  - name: sweep_log_return_1m
+    description: "LogReturn on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-log-return-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        log_return:
+          op: transform.log_return
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: log_return
+            periods: 1
+      outputs:
+        log_return: log_return.log_return
+    outputs: [log_return]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 800
+
+  - name: sweep_lag_100k
+    description: "Lag(5) on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-lag-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        lagged:
+          op: transform.lag
+          version: "0.2.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: lagged
+            periods: 5
+      outputs:
+        lagged: lagged.lagged
+    outputs: [lagged]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 200
+
+  - name: sweep_lag_1m
+    description: "Lag(5) on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-lag-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        lagged:
+          op: transform.lag
+          version: "0.2.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: lagged
+            periods: 5
+      outputs:
+        lagged: lagged.lagged
+    outputs: [lagged]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 800
+
+  - name: sweep_lead_100k
+    description: "Lead(5) on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-lead-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        lead:
+          op: transform.lead
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: lead
+            periods: 5
+      outputs:
+        lead: lead.lead
+    outputs: [lead]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 200
+
+  - name: sweep_lead_1m
+    description: "Lead(5) on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-lead-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        lead:
+          op: transform.lead
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: lead
+            periods: 5
+      outputs:
+        lead: lead.lead
+    outputs: [lead]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 800
+
+  - name: sweep_ratio_100k
+    description: "Ratio(close/open) on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-ratio-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        ratio:
+          op: transform.ratio
+          version: "0.1.0"
+          inputs:
+            numerator: source.close
+            denominator: source.open
+          params:
+            numerator_column: numerator
+            denominator_column: denominator
+            output_column: ratio
+      outputs:
+        ratio: ratio.ratio
+    outputs: [ratio]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 200
+
+  - name: sweep_ratio_1m
+    description: "Ratio(close/open) on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-ratio-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        ratio:
+          op: transform.ratio
+          version: "0.1.0"
+          inputs:
+            numerator: source.close
+            denominator: source.open
+          params:
+            numerator_column: numerator
+            denominator_column: denominator
+            output_column: ratio
+      outputs:
+        ratio: ratio.ratio
+    outputs: [ratio]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 800
+
+  - name: sweep_log_ratio_100k
+    description: "LogRatio(close/open) on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-log-ratio-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        log_ratio:
+          op: transform.log_ratio
+          version: "0.1.0"
+          inputs:
+            numerator: source.close
+            denominator: source.open
+          params:
+            numerator_column: numerator
+            denominator_column: denominator
+            output_column: log_ratio
+      outputs:
+        log_ratio: log_ratio.log_ratio
+    outputs: [log_ratio]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 200
+
+  - name: sweep_log_ratio_1m
+    description: "LogRatio(close/open) on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-log-ratio-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        log_ratio:
+          op: transform.log_ratio
+          version: "0.1.0"
+          inputs:
+            numerator: source.close
+            denominator: source.open
+          params:
+            numerator_column: numerator
+            denominator_column: denominator
+            output_column: log_ratio
+      outputs:
+        log_ratio: log_ratio.log_ratio
+    outputs: [log_ratio]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 800
+
+  - name: sweep_spread_100k
+    description: "Spread(high/low) on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-spread-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        spread:
+          op: transform.spread
+          version: "0.1.0"
+          inputs:
+            left: source.high
+            right: source.low
+          params:
+            left_column: left
+            right_column: right
+            output_column: spread
+      outputs:
+        spread: spread.spread
+    outputs: [spread]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 200
+
+  - name: sweep_spread_1m
+    description: "Spread(high/low) on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-spread-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        spread:
+          op: transform.spread
+          version: "0.1.0"
+          inputs:
+            left: source.high
+            right: source.low
+          params:
+            left_column: left
+            right_column: right
+            output_column: spread
+      outputs:
+        spread: spread.spread
+    outputs: [spread]
+    thresholds:
+      max_us_per_row: 60.0
+      max_memory_mb: 800
+
+  - name: sweep_rolling_max_100k
+    description: "RollingMax(20) on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-max-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_max:
+          op: transform.rolling_max
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: rolling_max
+            periods: 20
+      outputs:
+        rolling_max: rolling_max.rolling_max
+    outputs: [rolling_max]
+    thresholds:
+      max_us_per_row: 300.0
+      max_memory_mb: 200
+
+  - name: sweep_rolling_max_1m
+    description: "RollingMax(20) on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-max-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_max:
+          op: transform.rolling_max
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: rolling_max
+            periods: 20
+      outputs:
+        rolling_max: rolling_max.rolling_max
+    outputs: [rolling_max]
+    thresholds:
+      max_us_per_row: 300.0
+      max_memory_mb: 800
+
+  - name: sweep_rolling_min_100k
+    description: "RollingMin(20) on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-min-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_min:
+          op: transform.rolling_min
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: rolling_min
+            periods: 20
+      outputs:
+        rolling_min: rolling_min.rolling_min
+    outputs: [rolling_min]
+    thresholds:
+      max_us_per_row: 300.0
+      max_memory_mb: 200
+
+  - name: sweep_rolling_min_1m
+    description: "RollingMin(20) on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-min-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_min:
+          op: transform.rolling_min
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: rolling_min
+            periods: 20
+      outputs:
+        rolling_min: rolling_min.rolling_min
+    outputs: [rolling_min]
+    thresholds:
+      max_us_per_row: 300.0
+      max_memory_mb: 800
+
+  - name: sweep_rolling_sum_100k
+    description: "RollingSum(20) on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-sum-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_sum:
+          op: transform.rolling_sum
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: rolling_sum
+            periods: 20
+      outputs:
+        rolling_sum: rolling_sum.rolling_sum
+    outputs: [rolling_sum]
+    thresholds:
+      max_us_per_row: 300.0
+      max_memory_mb: 200
+
+  - name: sweep_rolling_sum_1m
+    description: "RollingSum(20) on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-sum-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_sum:
+          op: transform.rolling_sum
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: rolling_sum
+            periods: 20
+      outputs:
+        rolling_sum: rolling_sum.rolling_sum
+    outputs: [rolling_sum]
+    thresholds:
+      max_us_per_row: 300.0
+      max_memory_mb: 800
+
+  - name: sweep_rolling_median_100k
+    description: "RollingMedian(20) on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-median-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_median:
+          op: transform.rolling_median
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: rolling_median
+            periods: 20
+      outputs:
+        rolling_median: rolling_median.rolling_median
+    outputs: [rolling_median]
+    thresholds:
+      max_us_per_row: 2000.0
+      max_memory_mb: 200
+
+  - name: sweep_rolling_median_1m
+    description: "RollingMedian(20) on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-median-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_median:
+          op: transform.rolling_median
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: rolling_median
+            periods: 20
+      outputs:
+        rolling_median: rolling_median.rolling_median
+    outputs: [rolling_median]
+    thresholds:
+      max_us_per_row: 2000.0
+      max_memory_mb: 800
+
+  - name: sweep_rolling_var_100k
+    description: "RollingVar(20) on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-var-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_var:
+          op: transform.rolling_var
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: rolling_var
+            periods: 20
+      outputs:
+        rolling_var: rolling_var.rolling_var
+    outputs: [rolling_var]
+    thresholds:
+      max_us_per_row: 300.0
+      max_memory_mb: 200
+
+  - name: sweep_rolling_var_1m
+    description: "RollingVar(20) on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-var-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_var:
+          op: transform.rolling_var
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: rolling_var
+            periods: 20
+      outputs:
+        rolling_var: rolling_var.rolling_var
+    outputs: [rolling_var]
+    thresholds:
+      max_us_per_row: 300.0
+      max_memory_mb: 800
+
+  - name: sweep_rolling_zscore_100k
+    description: "RollingZScore(20) on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-zscore-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_z_score:
+          op: transform.rolling_z_score
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: rolling_z_score
+            periods: 20
+      outputs:
+        rolling_z_score: rolling_z_score.rolling_z_score
+    outputs: [rolling_z_score]
+    thresholds:
+      max_us_per_row: 300.0
+      max_memory_mb: 200
+
+  - name: sweep_rolling_zscore_1m
+    description: "RollingZScore(20) on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-zscore-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_z_score:
+          op: transform.rolling_z_score
+          version: "0.1.0"
+          inputs:
+            value: source.close
+          params:
+            input_column: value
+            output_column: rolling_z_score
+            periods: 20
+      outputs:
+        rolling_z_score: rolling_z_score.rolling_z_score
+    outputs: [rolling_z_score]
+    thresholds:
+      max_us_per_row: 300.0
+      max_memory_mb: 800
+
+  - name: sweep_rolling_cov_100k
+    description: "RollingCov(close,open,20) on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-cov-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_cov:
+          op: transform.rolling_cov
+          version: "0.1.0"
+          inputs:
+            left: source.close
+            right: source.open
+          params:
+            left_column: left
+            right_column: right
+            output_column: rolling_cov
+            periods: 20
+      outputs:
+        rolling_cov: rolling_cov.rolling_cov
+    outputs: [rolling_cov]
+    thresholds:
+      max_us_per_row: 600.0
+      max_memory_mb: 200
+
+  - name: sweep_rolling_cov_1m
+    description: "RollingCov(close,open,20) on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-cov-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        rolling_cov:
+          op: transform.rolling_cov
+          version: "0.1.0"
+          inputs:
+            left: source.close
+            right: source.open
+          params:
+            left_column: left
+            right_column: right
+            output_column: rolling_cov
+            periods: 20
+      outputs:
+        rolling_cov: rolling_cov.rolling_cov
+    outputs: [rolling_cov]
+    thresholds:
+      max_us_per_row: 600.0
+      max_memory_mb: 800
+
+  - name: sweep_rolling_cov_matrix_100k
+    description: "RollingCovMatrix([close,open],20) on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-cov-matrix-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        cov_matrix:
+          op: transform.rolling_cov_matrix
+          version: "0.1.0"
+          inputs:
+            close: source.close
+            open: source.open
+          params:
+            input_columns: [close, open]
+            output_column: cov_matrix
+            periods: 20
+      outputs:
+        cov_matrix: cov_matrix.cov_matrix
+    outputs: [cov_matrix]
+    thresholds:
+      max_us_per_row: 1500.0
+      max_memory_mb: 300
+
+  - name: sweep_rolling_cov_matrix_1m
+    description: "RollingCovMatrix([close,open],20) on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-rolling-cov-matrix-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        cov_matrix:
+          op: transform.rolling_cov_matrix
+          version: "0.1.0"
+          inputs:
+            close: source.close
+            open: source.open
+          params:
+            input_columns: [close, open]
+            output_column: cov_matrix
+            periods: 20
+      outputs:
+        cov_matrix: cov_matrix.cov_matrix
+    outputs: [cov_matrix]
+    thresholds:
+      max_us_per_row: 1500.0
+      max_memory_mb: 1000
+
+  - name: sweep_packer_unpacker_100k
+    description: "FeaturePacker+Unpacker on 100K price rows"
+    data:
+      name: perf_prices_100k
+      rows: 100_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-packer-100k
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_100k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        features:
+          op: transform.feature_packer
+          version: "0.2.0"
+          inputs:
+            close: source.close
+            volume: source.volume
+          params:
+            input_columns: [close, volume]
+            output_column: features
+        unpacked:
+          op: transform.feature_unpacker
+          version: "0.1.0"
+          inputs:
+            features: features.features
+          params:
+            input_column: features
+            base_name: feature
+            features: 2
+      outputs:
+        unpacked: unpacked.feature_0
+    outputs: [unpacked]
+    thresholds:
+      max_us_per_row: 300.0
+      max_memory_mb: 200
+
+  - name: sweep_packer_unpacker_1m
+    description: "FeaturePacker+Unpacker on 1M price rows"
+    data:
+      name: perf_prices_1m
+      rows: 1_000_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-packer-1m
+      nodes:
+        source:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_1m.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        features:
+          op: transform.feature_packer
+          version: "0.2.0"
+          inputs:
+            close: source.close
+            volume: source.volume
+          params:
+            input_columns: [close, volume]
+            output_column: features
+        unpacked:
+          op: transform.feature_unpacker
+          version: "0.1.0"
+          inputs:
+            features: features.features
+          params:
+            input_column: features
+            base_name: feature
+            features: 2
+      outputs:
+        unpacked: unpacked.feature_0
+    outputs: [unpacked]
+    thresholds:
+      max_us_per_row: 300.0
+      max_memory_mb: 800
+
+  - name: sweep_dataset_source_100k
+    description: "DatasetSource scan of 100K sensor rows"
+    data:
+      name: perf_sensors_100k
+      rows: 100_000
+      domain: sensors
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-dataset-100k
+      nodes:
+        source:
+          op: source.dataset_source
+          version: "0.1.0"
+          params:
+            path: ../data/perf_sensors_100k.parquet
+            schema:
+              time: timestamp
+              columns:
+                temperature: float64
+                pressure: float64
+                humidity: float64
+                vibration: float64
+      outputs:
+        temperature: source.temperature
+    outputs: [temperature]
+    thresholds:
+      max_us_per_row: 100.0
+      max_memory_mb: 200
+
+  - name: sweep_dataset_source_1m
+    description: "DatasetSource scan of 1M sensor rows"
+    data:
+      name: perf_sensors_1m
+      rows: 1_000_000
+      domain: sensors
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-dataset-1m
+      nodes:
+        source:
+          op: source.dataset_source
+          version: "0.1.0"
+          params:
+            path: ../data/perf_sensors_1m.parquet
+            schema:
+              time: timestamp
+              columns:
+                temperature: float64
+                pressure: float64
+                humidity: float64
+                vibration: float64
+      outputs:
+        temperature: source.temperature
+    outputs: [temperature]
+    thresholds:
+      max_us_per_row: 100.0
+      max_memory_mb: 500
+
+  - name: sweep_streaming_100k
+    description: "StreamingParquetSource over 100K chunked sensor rows"
+    data:
+      name: chunks_perf_stream_100k
+      rows: 100_000
+      domain: streaming_parquet
+      format: parquet
+      chunk_rows: 25_000
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-streaming-100k
+      nodes:
+        source:
+          op: source.streaming_parquet_source
+          version: "0.1.0"
+          params:
+            path: ../data/chunks_perf_stream_100k
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                temperature: float64
+                pressure: float64
+                humidity: float64
+                vibration: float64
+      outputs:
+        temperature: source.temperature
+    outputs: [temperature]
+    thresholds:
+      max_us_per_row: 300.0
+      max_memory_mb: 300
+
+  - name: sweep_lightgbm_10k
+    description: "LightGBM train/predict on 10K price rows"
+    data:
+      name: perf_prices_10k
+      rows: 10_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-lightgbm-10k
+      nodes:
+        prices:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_10k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        features:
+          op: transform.feature_packer
+          version: "0.2.0"
+          inputs:
+            close: prices.close
+            volume: prices.volume
+          params:
+            input_columns: [close, volume]
+            output_column: features
+        target:
+          op: transform.feature_packer
+          version: "0.2.0"
+          inputs:
+            forward_return: prices.open
+          params:
+            input_columns: [forward_return]
+            output_column: target
+        model:
+          op: model.light_gbm
+          version: "0.3.0"
+          inputs:
+            features: features.features
+            target: target.target
+          params:
+            num_boost_round: 20
+            learning_rate: 0.05
+            num_leaves: 31
+            max_depth: -1
+            min_data_in_leaf: 20
+            early_stopping_rounds: 0
+            scheduler:
+              every: 5000
+            splitter:
+              validation_size: 0.2
+              purge_window: 1
+      outputs:
+        prediction: model.prediction
+    outputs: [prediction]
+    thresholds:
+      max_us_per_row: 50000.0
+      max_memory_mb: 1000
+
+  - name: sweep_dense_mlp_10k
+    description: "DenseMLP train/predict on 10K price rows"
+    data:
+      name: perf_prices_10k
+      rows: 10_000
+      domain: prices
+      format: csv
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: sweep-dense-mlp-10k
+      nodes:
+        prices:
+          op: source.csv_source
+          version: "0.2.0"
+          params:
+            path: ../data/perf_prices_10k.csv
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                open: float64
+                high: float64
+                low: float64
+                close: float64
+                volume: int64
+        features:
+          op: transform.feature_packer
+          version: "0.2.0"
+          inputs:
+            close: prices.close
+            volume: prices.volume
+          params:
+            input_columns: [close, volume]
+            output_column: features
+        target:
+          op: transform.feature_packer
+          version: "0.2.0"
+          inputs:
+            forward_return: prices.open
+          params:
+            input_columns: [forward_return]
+            output_column: target
+        model:
+          op: model.dense_mlp
+          version: "0.3.0"
+          inputs:
+            features: features.features
+            target: target.target
+          params:
+            hidden_layers: [8]
+            epochs: 1
+            learning_rate: 0.01
+            scheduler:
+              every: 10000
+            splitter:
+              validation_size: 0.2
+              purge_window: 1
+      outputs:
+        prediction: model.prediction
+    outputs: [prediction]
+    thresholds:
+      max_us_per_row: 100000.0
+      max_memory_mb: 1500

@@ -9,7 +9,7 @@ import pytest
 
 from iosislib.core.graph import Graph
 from iosislib.core.node import Node
-from iosislib.core.tsfn import FrameSignature
+from iosislib.core.tsfn import ColumnSignature, FrameSignature
 from iosislib.tsfn.adapters import (
     DatasetManifest,
     DatasetSource,
@@ -259,3 +259,72 @@ class TestDatasetSource:
 
         assert result.height == 2
         assert sorted(result["value"].to_list()) == [55.1, 72.5]
+
+    def test_time_range_accepts_bare_dates(self, tmp_path: Path) -> None:
+        base = tmp_path / "data"
+        write_hive_dataset(base)
+
+        result = Graph(
+            Node(
+                DatasetSource,
+                parameters={
+                    "path": str(base / "**" / "*.parquet"),
+                    "output_signature": FLOAT_SIGNATURE,
+                    "time_range": ("2026-01-02", "2026-01-03"),
+                },
+                name="prices",
+            )
+        ).execute()
+
+        assert result.height == 2
+        assert result["value"].to_list() == [4.0, 5.0]
+
+    def test_time_range_rejects_unparseable_bound(self, tmp_path: Path) -> None:
+        base = tmp_path / "data"
+        write_hive_dataset(base)
+
+        with pytest.raises(RuntimeError, match="time_range"):
+            Graph(
+                Node(
+                    DatasetSource,
+                    parameters={
+                        "path": str(base / "**" / "*.parquet"),
+                        "output_signature": FLOAT_SIGNATURE,
+                        "time_range": ("not-a-date", "2026-01-03"),
+                    },
+                    name="prices",
+                )
+            ).execute()
+
+    def test_coerces_list_to_array(self, tmp_path: Path) -> None:
+        flat = tmp_path / "features"
+        flat.mkdir()
+        buffer = io.BytesIO()
+        pl.DataFrame(
+            {
+                "timestamp": [datetime(2026, 1, 1)],
+                "feature": [[0.2, None]],
+            },
+            schema={"timestamp": pl.Datetime, "feature": pl.List(pl.Float64)},
+        ).write_parquet(buffer)
+        (flat / "a.parquet").write_bytes(buffer.getvalue())
+        signature = FrameSignature(
+            columns=(ColumnSignature("feature", pl.Float64, (2,)),)
+        )
+
+        result = Graph(
+            Node(
+                DatasetSource,
+                parameters={
+                    "path": str(flat / "*.parquet"),
+                    "output_signature": signature,
+                },
+                name="features",
+            )
+        ).execute()
+
+        assert result.schema["feature"] == pl.Array(pl.Float64, 2)
+        assert result["feature"].to_list() == [[0.2, None]]
+
+    def test_source_version(self) -> None:
+        assert DatasetSource.VERSION == "0.2.0"

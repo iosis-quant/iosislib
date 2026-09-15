@@ -1,4 +1,4 @@
-﻿"""Typed graph, transformation, and modelling infrastructure."""
+"""Typed graph, transformation, and modelling infrastructure."""
 
 from iosislib.core.graph import (
     Executor,
@@ -17,13 +17,18 @@ from iosislib.core.model import (
     EveryNTicksScheduler,
     FrameDataset,
     FrozenScheduler,
+    InferenceTSFN,
     MetricThresholdScheduler,
     Model,
+    ModelStore,
     ScheduleContext,
     ScheduleDecision,
     Scheduler,
     SupervisedModel,
     SupervisedModelTSFN,
+    TrainingResult,
+    TrainingTSFN,
+    model_from_dict,
 )
 from iosislib.core.node import Node
 from iosislib.core.tsfn import (
@@ -38,7 +43,12 @@ from iosislib.core.tsfn import (
     TSFNConfig,
     TimeAxis,
 )
-from iosislib.core.utils import AsofTolerance
+from iosislib.core.utils import (
+    MODEL_DIR_ENV_VAR,
+    AsofTolerance,
+    current_model_dir,
+    resolve_model_dir,
+)
 
 
 __all__ = [
@@ -57,11 +67,14 @@ __all__ = [
     "FrozenScheduler",
     "Graph",
     "GraphValidationError",
+    "InferenceTSFN",
     "ItemwiseStructTSFN",
     "ItemwiseUnaryTSFN",
     "LocalExecutor",
+    "MODEL_DIR_ENV_VAR",
     "MetricThresholdScheduler",
     "Model",
+    "ModelStore",
     "Node",
     "NullHandler",
     "NullPolicy",
@@ -70,9 +83,14 @@ __all__ = [
     "Scheduler",
     "SupervisedModel",
     "SupervisedModelTSFN",
+    "TrainingResult",
+    "TrainingTSFN",
     "TSFN",
     "TSFNConfig",
     "TimeAxis",
     "ValidationIssue",
     "ValidationReport",
+    "current_model_dir",
+    "model_from_dict",
+    "resolve_model_dir",
 ]

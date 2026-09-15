@@ -94,16 +94,16 @@ def _cache_files(cache_dir: Path) -> list[Path]:
 
 class TestCacheHitAndMiss:
     def test_first_execution_is_cache_miss(self, tmp_path: Path) -> None:
-        graph = _make_source_graph()
+        graph = _make_transform_graph()
         executor = LocalExecutor(cache_dir=tmp_path)
         result = graph.execute(executor=executor)
 
-        assert result["value"].to_list() == [1.0, 2.0, 3.0]
+        assert result["value"].to_list() == [2.0, 4.0, 6.0]
         manifests = _cache_files(tmp_path)
         assert len(manifests) == 1
 
     def test_second_execution_is_cache_hit(self, tmp_path: Path) -> None:
-        graph = _make_source_graph()
+        graph = _make_transform_graph()
         executor = LocalExecutor(cache_dir=tmp_path)
 
         result1 = graph.execute(executor=executor)
@@ -113,13 +113,21 @@ class TestCacheHitAndMiss:
         assert len(_cache_files(tmp_path)) == 1
 
     def test_cache_hit_returns_identical_result(self, tmp_path: Path) -> None:
-        graph = _make_source_graph()
+        graph = _make_transform_graph()
         executor = LocalExecutor(cache_dir=tmp_path)
 
         result1 = graph.execute(executor=executor)
         result2 = graph.execute(executor=executor)
 
         assert result1.equals(result2)
+
+    def test_source_only_graph_never_caches(self, tmp_path: Path) -> None:
+        graph = _make_source_graph()
+        executor = LocalExecutor(cache_dir=tmp_path)
+        result = graph.execute(executor=executor)
+
+        assert result["value"].to_list() == [1.0, 2.0, 3.0]
+        assert _cache_files(tmp_path) == []
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +179,7 @@ class TestNoCacheDir:
 
 class TestManifestContent:
     def test_manifest_has_correct_fields(self, tmp_path: Path) -> None:
-        graph = _make_source_graph()
+        graph = _make_transform_graph()
         executor = LocalExecutor(cache_dir=tmp_path)
         graph.execute(executor=executor)
 
@@ -188,7 +196,7 @@ class TestManifestContent:
         assert "created_at" in manifest
 
     def test_manifest_schema_matches_data(self, tmp_path: Path) -> None:
-        graph = _make_source_graph()
+        graph = _make_transform_graph()
         executor = LocalExecutor(cache_dir=tmp_path)
         graph.execute(executor=executor)
 
@@ -283,15 +291,29 @@ class TestMissingParquet:
 
 class TestDifferentNodeIds:
     def test_different_graphs_different_entries(self, tmp_path: Path) -> None:
-        graph1 = Graph(Node(SimpleSource, name="a", materialize=True))
-        graph2 = Graph(Node(IncrementSource, name="b", materialize=True))
+        source1 = Node(SimpleSource, name="a", materialize=True)
+        doubled1 = Node(
+            Doubler,
+            bindings={"value": source1.output("value")},
+            name="doubled",
+            materialize=True,
+        )
+        graph1 = Graph(doubled1)
+        source2 = Node(IncrementSource, name="b", materialize=True)
+        doubled2 = Node(
+            Doubler,
+            bindings={"value": source2.output("value")},
+            name="doubled",
+            materialize=True,
+        )
+        graph2 = Graph(doubled2)
 
         executor = LocalExecutor(cache_dir=tmp_path)
         result1 = graph1.execute(executor=executor)
         result2 = graph2.execute(executor=executor)
 
-        assert result1["value"].to_list() == [1.0, 2.0, 3.0]
-        assert result2["value"].to_list() == [10.0, 20.0, 30.0]
+        assert result1["value"].to_list() == [2.0, 4.0, 6.0]
+        assert result2["value"].to_list() == [20.0, 40.0, 60.0]
         assert len(_cache_files(tmp_path)) == 2
 
 
@@ -302,12 +324,12 @@ class TestDifferentNodeIds:
 
 class TestEnvVarCacheDir:
     def test_env_var_respected(self, tmp_path: Path) -> None:
-        graph = _make_source_graph()
+        graph = _make_transform_graph()
         with patch.dict("os.environ", {"IOSIS_CACHE_DIR": str(tmp_path)}):
             executor = LocalExecutor()
             result = graph.execute(executor=executor)
 
-        assert result["value"].to_list() == [1.0, 2.0, 3.0]
+        assert result["value"].to_list() == [2.0, 4.0, 6.0]
         assert len(_cache_files(tmp_path)) == 1
 
 
@@ -318,6 +340,25 @@ class TestEnvVarCacheDir:
 
 class TestCacheHitSkipsComputation:
     def test_cache_hit_skips_lower_node(self, tmp_path: Path) -> None:
+        call_count = 0
+        original_apply = Doubler.apply
+
+        def counting_apply(self: Doubler, lf: pl.LazyFrame | None) -> pl.LazyFrame:
+            nonlocal call_count
+            call_count += 1
+            return original_apply(self, lf)
+
+        graph = _make_transform_graph()
+        executor = LocalExecutor(cache_dir=tmp_path)
+
+        with patch.object(Doubler, "apply", counting_apply):
+            graph.execute(executor=executor)
+            assert call_count == 1
+
+            graph.execute(executor=executor)
+            assert call_count == 1
+
+    def test_source_always_repulled(self, tmp_path: Path) -> None:
         call_count = 0
         original_apply = SimpleSource.apply
 
@@ -334,7 +375,7 @@ class TestCacheHitSkipsComputation:
             assert call_count == 1
 
             graph.execute(executor=executor)
-            assert call_count == 1
+            assert call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +384,7 @@ class TestCacheHitSkipsComputation:
 
 
 class TestSourceNodeCached:
-    def test_source_result_persisted(self, tmp_path: Path) -> None:
+    def test_source_result_not_persisted(self, tmp_path: Path) -> None:
         graph = _make_source_graph()
         executor = LocalExecutor(cache_dir=tmp_path)
         graph.execute(executor=executor)
@@ -352,7 +393,19 @@ class TestSourceNodeCached:
         entry = (
             tmp_path / node_id[:2] / node_id[2:4] / node_id[4:6] / node_id[6:]
         )
-        assert (entry / "data.parquet").exists()
+        assert list(entry.glob("part-*.parquet")) == []
+        assert not (entry / "manifest.json").exists()
+
+    def test_transform_result_persisted(self, tmp_path: Path) -> None:
+        graph = _make_transform_graph()
+        executor = LocalExecutor(cache_dir=tmp_path)
+        graph.execute(executor=executor)
+
+        node_id = graph.root_node.ID
+        entry = (
+            tmp_path / node_id[:2] / node_id[2:4] / node_id[4:6] / node_id[6:]
+        )
+        assert list(entry.glob("part-*.parquet")) != []
         assert (entry / "manifest.json").exists()
 
 
@@ -373,11 +426,27 @@ class TestNonMaterializedNotCached:
         executor = LocalExecutor(cache_dir=tmp_path)
         graph.execute(executor=executor)
 
+        # Sources are never cached, even with materialize=True, and the
+        # non-materialized transform is not cached either.
+        assert _cache_files(tmp_path) == []
+
+    def test_materialized_transform_cached_source_ignored(self, tmp_path: Path) -> None:
+        source = Node(SimpleSource, name="source", materialize=True)
+        doubled = Node(
+            Doubler,
+            bindings={"value": source.output("value")},
+            name="doubler",
+            materialize=True,
+        )
+        graph = Graph(doubled)
+        executor = LocalExecutor(cache_dir=tmp_path)
+        graph.execute(executor=executor)
+
         manifests = _cache_files(tmp_path)
         assert len(manifests) == 1
 
         manifest = json.loads(manifests[0].read_text())
-        assert manifest["node_id"] == source.ID
+        assert manifest["node_id"] == doubled.ID
 
 
 # ---------------------------------------------------------------------------
@@ -392,15 +461,17 @@ class TestMaterializedTransformCached:
         graph.execute(executor=executor)
 
         manifests = _cache_files(tmp_path)
-        assert len(manifests) >= 1
+        assert len(manifests) == 1
 
         node_ids = set()
         for m in manifests:
             data = json.loads(m.read_text())
             node_ids.add(data["node_id"])
 
-        source = graph.node_list[0]
-        assert source.ID in node_ids
+        assert graph.root_node.ID in node_ids
+        for node in graph.node_list:
+            if node.ID != graph.root_node.ID:
+                assert node.ID not in node_ids
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +531,7 @@ class TestCacheReuseAcrossMaterialization:
 
 class TestCachePersists:
     def test_cache_survives_between_calls(self, tmp_path: Path) -> None:
-        graph = _make_source_graph()
+        graph = _make_transform_graph()
         executor = LocalExecutor(cache_dir=tmp_path)
 
         result1 = graph.execute(executor=executor)
@@ -490,7 +561,7 @@ class TestS3Cache:
         assert key == "s3://my-bucket/cache/ab/cd/ef/0123456789" + "0" * 48
 
     def test_s3_cache_round_trip(self, tmp_path: Path) -> None:
-        graph = _make_source_graph()
+        graph = _make_transform_graph()
         node_id = graph.root_node.ID
 
         local_cache = tmp_path / "local"
@@ -537,3 +608,186 @@ class TestS3Cache:
         with _s3_credentials_scope(None):
             opts = executor._s3_storage_options()
         assert opts == {}
+
+
+# ---------------------------------------------------------------------------
+# Sharded cache
+# ---------------------------------------------------------------------------
+
+
+def _make_large_transform_graph(frame: pl.DataFrame) -> Graph:
+    from datetime import timedelta
+
+    base = datetime(2026, 1, 1)
+    distinct = frame.with_columns(
+        pl.Series(
+            "timestamp",
+            [base + timedelta(microseconds=i) for i in range(frame.height)],
+            dtype=pl.Datetime,
+        )
+    )
+
+    class LargeSource(TSFN):
+        VERSION = "1.0.0"
+
+        def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
+            return FrameSignature.empty(), VALUE_FRAME
+
+        def apply(self) -> pl.LazyFrame:
+            return distinct.lazy()
+
+    source = Node(LargeSource, name="source", materialize=True)
+    doubled = Node(
+        Doubler,
+        bindings={"value": source.output("value")},
+        name="doubler",
+        materialize=True,
+    )
+    return Graph(doubled)
+
+
+class TestShardedCache:
+    def test_small_frame_single_shard(self, tmp_path: Path) -> None:
+        graph = _make_transform_graph()
+        executor = LocalExecutor(cache_dir=tmp_path, cache_shard_bytes=10 * 1024 * 1024)
+        graph.execute(executor=executor)
+
+        node_id = graph.root_node.ID
+        entry = tmp_path / node_id[:2] / node_id[2:4] / node_id[4:6] / node_id[6:]
+        shards = sorted(entry.glob("part-*.parquet"))
+        assert len(shards) == 1
+
+        manifest = json.loads((entry / "manifest.json").read_text())
+        assert manifest["shard_count"] == 1
+
+    def test_many_rows_triggers_multiple_shards(self, tmp_path: Path) -> None:
+        df = pl.DataFrame(
+            {
+                "timestamp": [datetime(2026, 1, 1) for _ in range(10_000)],
+                "value": [float(i) for i in range(10_000)],
+            }
+        )
+
+        graph = _make_large_transform_graph(df)
+        # 10k rows × (8+8 bytes) ≈ 160KB; use very small shard size to force split
+        executor = LocalExecutor(cache_dir=tmp_path, cache_shard_bytes=64_000)
+        graph.execute(executor=executor)
+
+        node_id = graph.root_node.ID
+        entry = tmp_path / node_id[:2] / node_id[2:4] / node_id[4:6] / node_id[6:]
+        shards = sorted(entry.glob("part-*.parquet"))
+        assert len(shards) > 1
+
+        manifest = json.loads((entry / "manifest.json").read_text())
+        assert manifest["shard_count"] == len(shards)
+        assert manifest["row_count"] == 10_000
+
+    def test_sharded_round_trip_preserves_data(self, tmp_path: Path) -> None:
+        df = pl.DataFrame(
+            {
+                "timestamp": [datetime(2026, 1, 1) for _ in range(10_000)],
+                "value": [float(i) for i in range(10_000)],
+            }
+        )
+
+        graph = _make_large_transform_graph(df)
+        executor = LocalExecutor(cache_dir=tmp_path, cache_shard_bytes=64_000)
+
+        result = graph.execute(executor=executor)
+        # Second execution reads transform from shards (source re-pulled)
+        result2 = graph.execute(executor=executor)
+
+        assert result.equals(result2)
+        assert result["value"].to_list() == [float(i) * 2 for i in range(10_000)]
+
+    def test_manifest_has_shard_count(self, tmp_path: Path) -> None:
+        graph = _make_transform_graph()
+        executor = LocalExecutor(cache_dir=tmp_path, cache_shard_bytes=10 * 1024 * 1024)
+        graph.execute(executor=executor)
+
+        node_id = graph.root_node.ID
+        entry = tmp_path / node_id[:2] / node_id[2:4] / node_id[4:6] / node_id[6:]
+        manifest = json.loads((entry / "manifest.json").read_text())
+        assert "shard_count" in manifest
+        assert isinstance(manifest["shard_count"], int)
+        assert manifest["shard_count"] >= 1
+
+    def test_byte_size_sums_shards(self, tmp_path: Path) -> None:
+        df = pl.DataFrame(
+            {
+                "timestamp": [datetime(2026, 1, 1) for _ in range(10_000)],
+                "value": [float(i) for i in range(10_000)],
+            }
+        )
+
+        graph = _make_large_transform_graph(df)
+        executor = LocalExecutor(cache_dir=tmp_path, cache_shard_bytes=64_000)
+        graph.execute(executor=executor)
+
+        node_id = graph.root_node.ID
+        entry = tmp_path / node_id[:2] / node_id[2:4] / node_id[4:6] / node_id[6:]
+        shards = sorted(entry.glob("part-*.parquet"))
+        manifest = json.loads((entry / "manifest.json").read_text())
+        actual = sum(s.stat().st_size for s in shards)
+        assert manifest["byte_size"] == actual
+
+    def test_env_var_overrides_default(self, tmp_path: Path) -> None:
+        with patch.dict("os.environ", {"IOSIS_CACHE_SHARD_BYTES": "4096"}):
+            executor = LocalExecutor(cache_dir=tmp_path)
+            assert executor._cache_shard_bytes == 4096
+
+    def test_invalid_env_var_falls_back_to_default(self, tmp_path: Path) -> None:
+        with patch.dict("os.environ", {"IOSIS_CACHE_SHARD_BYTES": "notanumber"}):
+            executor = LocalExecutor(cache_dir=tmp_path)
+            assert executor._cache_shard_bytes == LocalExecutor._DEFAULT_SHARD_BYTES
+
+    def test_legacy_data_parquet_cleaned_up(self, tmp_path: Path) -> None:
+        graph = _make_transform_graph()
+        executor = LocalExecutor(cache_dir=tmp_path)
+        graph.execute(executor=executor)
+
+        node_id = graph.root_node.ID
+        entry = tmp_path / node_id[:2] / node_id[2:4] / node_id[4:6] / node_id[6:]
+
+        # Remove the part-*.parquet shards so only legacy data.parquet remains,
+        # and drop the manifest so the next run is a miss (hits skip rewrite).
+        for shard in entry.glob("part-*.parquet"):
+            shard.unlink()
+        (entry / "manifest.json").unlink()
+
+        # Write a legacy data.parquet with the correct schema
+        legacy = entry / "data.parquet"
+        pl.DataFrame(
+            {
+                "timestamp": [datetime(2026, 1, 1)],
+                "value": [99.0],
+            }
+        ).write_parquet(legacy)
+        assert legacy.exists()
+
+        # Re-execute on a miss; shards rewrite should remove data.parquet
+        executor2 = LocalExecutor(cache_dir=tmp_path)
+        graph.execute(executor=executor2)
+        assert not legacy.exists()
+        assert list(entry.glob("part-*.parquet")) != []
+
+    def test_executor_param_overrides_env_var(self, tmp_path: Path) -> None:
+        with patch.dict("os.environ", {"IOSIS_CACHE_SHARD_BYTES": "9999"}):
+            executor = LocalExecutor(cache_dir=tmp_path, cache_shard_bytes=2048)
+            assert executor._cache_shard_bytes == 2048
+
+    def test_s3_cache_shard_bytes_env_var(self) -> None:
+        with patch.dict("os.environ", {"IOSIS_CACHE_SHARD_BYTES": "8192"}):
+            executor = LocalExecutor(cache_dir="s3://bucket/cache")
+            assert executor._cache_shard_bytes == 8192
+
+    def test_manifest_byte_size_sums_local(self, tmp_path: Path) -> None:
+        graph = _make_transform_graph()
+        executor = LocalExecutor(cache_dir=tmp_path, cache_shard_bytes=10 * 1024 * 1024)
+        graph.execute(executor=executor)
+
+        node_id = graph.root_node.ID
+        entry = tmp_path / node_id[:2] / node_id[2:4] / node_id[4:6] / node_id[6:]
+        shards = list(entry.glob("part-*.parquet"))
+        manifest = json.loads((entry / "manifest.json").read_text())
+        assert manifest["byte_size"] == sum(s.stat().st_size for s in shards)

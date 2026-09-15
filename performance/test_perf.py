@@ -9,6 +9,8 @@ This is a standalone CLI tool. Run directly, not via pytest:
     python performance/test_perf.py                                # all scenarios
     python performance/test_perf.py --scenario backtest_scale      # one group
     python performance/test_perf.py --scenario backtest_scale --profile  # with cProfile
+    python performance/test_perf.py --scenario tsfn_sweep --scale-report  # scaling verdicts
+    python performance/test_perf.py --scenario all --profile --csv results/perf_run  # all + CSVs
     python performance/test_perf.py --list-scenarios               # show available
     python performance/test_perf.py --generate-only                # data only
     python performance/test_perf.py --profile-top 50               # more profile lines
@@ -19,10 +21,12 @@ This is a standalone CLI tool. Run directly, not via pytest:
 from __future__ import annotations
 
 import cProfile
+import csv
 import gc
 import hashlib
 import io
 import json
+import os
 import pstats
 import re
 import statistics
@@ -48,7 +52,9 @@ from generate_data import CSV_GENERATORS, sha256_file  # noqa: E402
 from stream_data import (  # noqa: E402
     DatasetSpec,
     generate_all,
+    generate_l2_market_data,
     generate_market_data,
+    stream_chunked_parquet,
     stream_csv,
     stream_parquet,
 )
@@ -82,6 +88,8 @@ class ScenarioData:
     format: str = "csv"
     stream: bool = False
     chunk_rows: int = 50_000
+    levels: int = 101
+    with_limit: bool = False
 
 
 @dataclass(frozen=True)
@@ -107,6 +115,8 @@ class Scenario:
                 format=data_raw.get("format", "csv"),
                 stream=data_raw.get("stream", False),
                 chunk_rows=data_raw.get("chunk_rows", 50_000),
+                levels=data_raw.get("levels", 101),
+                with_limit=data_raw.get("with_limit", False),
             ),
             strategy=d["strategy"],
             outputs=d.get("outputs", []),
@@ -294,7 +304,27 @@ def _run_cprofile(
 def _generate_scenario_data(
     scenario: Scenario, out_dir: Path, seed: int = 42
 ) -> tuple[Path, str]:
+    from iosislib.tsfn.adapters import build_parquet_chunk_manifest
+
     spec = scenario.data
+
+    if spec.domain == "streaming_parquet":
+        chunk_dir = out_dir / spec.name
+        manifest_file = chunk_dir / "manifest.json"
+        if manifest_file.exists():
+            root = json.loads(manifest_file.read_text())["merkle"]["root"]
+            return chunk_dir, root
+        rng = np.random.default_rng(seed + hash(spec.name) % 10000)
+        from stream_data import DOMAINS as _DOMAINS
+
+        df = _DOMAINS["sensors"](spec.rows, rng)
+        t0 = time.perf_counter()
+        stream_chunked_parquet(df, chunk_dir / "chunk.parquet", spec.chunk_rows)
+        root = build_parquet_chunk_manifest(chunk_dir)
+        elapsed = time.perf_counter() - t0
+        print(f"    Generated {chunk_dir.name}/: {df.height:,} rows, {elapsed:.2f}s")
+        return chunk_dir, root
+
     ext = ".parquet" if "parquet" in spec.format else ".csv"
     path = out_dir / f"{spec.name}{ext}"
 
@@ -306,6 +336,11 @@ def _generate_scenario_data(
 
     if spec.domain == "market_data":
         df = generate_market_data(spec.rows, spec.width, rng)
+    elif spec.domain == "l2_market_data":
+        df = generate_l2_market_data(
+            spec.rows, spec.width, rng,
+            levels=spec.levels, with_limit=spec.with_limit,
+        )
     elif spec.domain in CSV_GENERATORS:
         df = CSV_GENERATORS[spec.domain](spec.rows, rng)
     else:
@@ -536,6 +571,44 @@ def print_summary(results: list[BenchResult]) -> None:
     print(f"\n{passed}/{len(results)} passed")
 
 
+def print_scale_report(results: list[BenchResult]) -> None:
+    groups: dict[str, list[BenchResult]] = {}
+    for r in results:
+        head, _, tail = r.scenario.rpartition("_")
+        if not head or not tail:
+            continue
+        size = tail.lower()
+        if size.endswith(("k", "m")) and size[:-1].replace(".", "").isdigit():
+            groups.setdefault(head, []).append(r)
+    pairs = {name: items for name, items in groups.items() if len(items) >= 2}
+    if not pairs:
+        print("\nNo size-paired scenarios for scale report.")
+        return
+    print(f"\n{'=' * 110}")
+    print("SCALE REPORT (us/row large vs small; ratio ~1.0 means linear scaling)")
+    print(f"{'=' * 110}")
+    print(f"{'Op':<32s} {'Small':>12s} {'Large':>12s} {'Ratio':>7s}  Verdict")
+    print("-" * 110)
+    bad = 0
+    for name in sorted(pairs):
+        items = sorted(pairs[name], key=lambda r: r.rows)
+        small, large = items[0], items[-1]
+        ratio = large.us_per_row / small.us_per_row if small.us_per_row > 0 else 0.0
+        if ratio <= 1.5:
+            verdict = "SCALABLE"
+        elif ratio <= 3.0:
+            verdict = "WATCH"
+            bad += 1
+        else:
+            verdict = "SUPERLINEAR"
+            bad += 1
+        print(
+            f"{name:<32s} {small.us_per_row:>9.1f}u  "
+            f"{large.us_per_row:>9.1f}u {ratio:>6.2f}x  {verdict}"
+        )
+    print(f"\n{bad}/{len(pairs)} paired ops need attention")
+
+
 def export_json(results: list[BenchResult]) -> str:
     return json.dumps(
         [
@@ -572,6 +645,91 @@ def export_json(results: list[BenchResult]) -> str:
     )
 
 
+RESULTS_CSV_FIELDS = [
+    "scenario", "description", "rows", "width",
+    "elapsed_s", "median_s", "stddev_s", "min_s", "max_s",
+    "us_per_row", "rows_per_sec", "peak_memory_mb", "data_bytes",
+    "passed", "failures",
+]
+
+NODES_CSV_FIELDS = [
+    "scenario", "node", "tsfn_class", "elapsed_s", "pct_total",
+]
+
+HOTSPOTS_CSV_FIELDS = [
+    "scenario", "calls", "tottime_s", "percall_s",
+    "cumtime_s", "percall_cum_s", "function", "file", "line",
+]
+
+
+def results_csv_path(base: Path) -> Path:
+    return base.with_suffix(".csv")
+
+
+def nodes_csv_path(base: Path) -> Path:
+    return base.with_name(f"{base.stem}_nodes.csv")
+
+
+def hotspots_csv_path(base: Path) -> Path:
+    return base.with_name(f"{base.stem}_hotspots.csv")
+
+
+def write_results_csv(results: list[BenchResult], base: Path) -> tuple[Path, Path, Path]:
+    results_path = results_csv_path(base)
+    nodes_path = nodes_csv_path(base)
+    hotspots_path = hotspots_csv_path(base)
+    with results_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=RESULTS_CSV_FIELDS)
+        writer.writeheader()
+        for r in results:
+            writer.writerow({
+                "scenario": r.scenario,
+                "description": r.description,
+                "rows": r.rows,
+                "width": r.width,
+                "elapsed_s": round(r.elapsed, 4),
+                "median_s": round(r.median, 4),
+                "stddev_s": round(r.stddev, 4),
+                "min_s": round(r.min_time, 4),
+                "max_s": round(r.max_time, 4),
+                "us_per_row": round(r.us_per_row, 2),
+                "rows_per_sec": round(r.rows_per_sec),
+                "peak_memory_mb": round(r.peak_memory_mb, 2),
+                "data_bytes": r.data_bytes,
+                "passed": r.passed,
+                "failures": "; ".join(r.failures),
+            })
+    with nodes_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=NODES_CSV_FIELDS)
+        writer.writeheader()
+        for r in results:
+            for n in r.node_timings:
+                writer.writerow({
+                    "scenario": r.scenario,
+                    "node": n.name,
+                    "tsfn_class": n.class_name,
+                    "elapsed_s": round(n.elapsed, 4),
+                    "pct_total": round(n.pct_total, 1),
+                })
+    with hotspots_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=HOTSPOTS_CSV_FIELDS)
+        writer.writeheader()
+        for r in results:
+            for h in r.profile_hotspots:
+                writer.writerow({
+                    "scenario": r.scenario,
+                    "calls": h.ncalls,
+                    "tottime_s": h.tottime,
+                    "percall_s": h.percall,
+                    "cumtime_s": h.cumtime,
+                    "percall_cum_s": h.percall_cum,
+                    "function": h.function_name,
+                    "file": h.filename,
+                    "line": h.lineno,
+                })
+    return results_path, nodes_path, hotspots_path
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -583,6 +741,7 @@ def main() -> None:
     generate_only = "--generate-only" in args
     no_warmup = "--no-warmup" in args
     do_profile = "--profile" in args
+    do_scale_report = "--scale-report" in args
 
     # Parse --scenario <group|all>
     group_filter = None
@@ -607,6 +766,14 @@ def main() -> None:
     if "--profile-top" in args:
         idx = args.index("--profile-top")
         profile_top_n = int(args[idx + 1])
+    csv_base: Path | None = None
+    if "--csv" in args:
+        idx = args.index("--csv")
+        if idx + 1 < len(args):
+            csv_base = Path(args[idx + 1])
+        else:
+            print("Error: --csv requires a file path", file=sys.stderr)
+            sys.exit(1)
 
     scenarios_dir = Path(__file__).parent / "scenarios"
     data_dir = Path(__file__).parent / "data"
@@ -628,10 +795,14 @@ def main() -> None:
         for s in all_scenarios:
             if s.data.name not in seen:
                 seen.add(s.data.name)
+                if s.data.domain == "streaming_parquet":
+                    _generate_scenario_data(s, data_dir)
+                    continue
                 specs.append(DatasetSpec(
                     name=s.data.name, rows=s.data.rows, width=s.data.width,
                     domain=s.data.domain, format=s.data.format,
                     stream=s.data.stream, chunk_rows=s.data.chunk_rows,
+                    levels=s.data.levels, with_limit=s.data.with_limit,
                 ))
         generate_all(specs, data_dir)
         return
@@ -647,6 +818,7 @@ def main() -> None:
         groups = [p.stem for p in sorted(scenarios_dir.glob("*.yaml"))]
 
     data_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("IOSIS_MODEL_DIR", str(data_dir / ".model_store"))
     all_results: list[BenchResult] = []
 
     for group in groups:
@@ -707,6 +879,9 @@ def main() -> None:
     if all_results:
         print_summary(all_results)
 
+        if do_scale_report:
+            print_scale_report(all_results)
+
         # Print profiles for all results if --profile
         if do_profile:
             print(f"\n{'=' * 110}")
@@ -719,6 +894,16 @@ def main() -> None:
 
         if do_json:
             print(f"\n{export_json(all_results)}")
+
+        if csv_base is not None:
+            csv_base.parent.mkdir(parents=True, exist_ok=True)
+            results_path, nodes_path, hotspots_path = write_results_csv(
+                all_results, csv_base
+            )
+            print(f"\nCSV results written to:")
+            print(f"  {results_path}")
+            print(f"  {nodes_path}")
+            print(f"  {hotspots_path}")
 
 
 if __name__ == "__main__":

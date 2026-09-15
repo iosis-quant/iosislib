@@ -12,7 +12,7 @@ import pytest
 import iosislib.tsfn.adapters.parquet_stream as parquet_stream
 from iosislib.core.graph import Graph
 from iosislib.core.node import Node
-from iosislib.core.tsfn import FrameSignature, TimeAxis
+from iosislib.core.tsfn import ColumnSignature, FrameSignature, TimeAxis
 from iosislib.tsfn.adapters import (
     StreamingParquetSource,
     StreamingParquetSourceConfig,
@@ -131,7 +131,11 @@ def test_apply_loads_only_the_manifest_bytes(
     monkeypatch.setattr(
         parquet_stream,
         "_open_parquet_filesystem",
-        lambda location: (CountingLocalFS(), manifest_path),
+        lambda location: (
+            (CountingLocalFS(), manifest_path)
+            if location.endswith("manifest.json")
+            else (CountingLocalFS(), str(directory))
+        ),
     )
     node = Node(
         StreamingParquetSource,
@@ -141,7 +145,8 @@ def test_apply_loads_only_the_manifest_bytes(
     lazy = node.function.apply()
 
     assert isinstance(lazy, pl.LazyFrame)
-    assert opened == [manifest_path]
+    # Manifest plus the first chunk footer (schema only); row data stays lazy.
+    assert opened == [manifest_path, f"{directory}/part-000.parquet"]
 
 
 def test_merkle_root_is_deterministic_and_order_sensitive(tmp_path: Path) -> None:
@@ -264,6 +269,10 @@ def test_s3_apply_reads_only_manifest_and_layout_stats_chunks(
     manifest_bytes = (directory / "manifest.json").read_bytes()
     manifest = parquet_stream.ChunkManifest.from_bytes(manifest_bytes)
     chunk_sizes = {chunk.key: chunk.size for chunk in manifest.chunks}
+    chunk_bytes = {
+        chunk.key: (directory / chunk.key).read_bytes() for chunk in manifest.chunks
+    }
+    first_key = manifest.chunks[0].key
     opened: list[str] = []
     statted: set[str] = set()
 
@@ -281,9 +290,13 @@ def test_s3_apply_reads_only_manifest_and_layout_stats_chunks(
 
         def open_input_file(self, path: str) -> io.BytesIO:
             opened.append(path)
-            if path != "market-data/prices/manifest.json":
-                raise AssertionError("chunk bytes must not be opened at apply time")
-            return io.BytesIO(manifest_bytes)
+            if path == "market-data/prices/manifest.json":
+                return io.BytesIO(manifest_bytes)
+            # Footer reads for schema coercion are allowed; row data is lazy
+            # and never collected here, so only the first chunk may be touched.
+            key = path.removeprefix("market-data/prices/")
+            assert key == first_key, f"only the first chunk footer may be read, got {key}"
+            return io.BytesIO(chunk_bytes[key])
 
     def fake_open(location: str):
         if location.endswith("/manifest.json"):
@@ -298,7 +311,10 @@ def test_s3_apply_reads_only_manifest_and_layout_stats_chunks(
 
     lazy = node.function.apply()
     assert isinstance(lazy, pl.LazyFrame)
-    assert opened == ["market-data/prices/manifest.json"]
+    assert opened == [
+        "market-data/prices/manifest.json",
+        f"market-data/prices/{first_key}",
+    ]
     assert not statted
 
     statted.clear()
@@ -391,7 +407,7 @@ def test_node_ids_are_deterministic(tmp_path: Path) -> None:
 
 
 def test_streaming_source_version() -> None:
-    assert StreamingParquetSource.VERSION == "0.1.0"
+    assert StreamingParquetSource.VERSION == "0.2.0"
     assert StreamingParquetSource.type_signature  # concrete class
 
 
@@ -779,3 +795,60 @@ def test_streaming_source_many_chunks(tmp_path: Path) -> None:
 
     assert len(result) == 10
     assert result["value"].to_list() == [float(i) for i in range(10)]
+
+
+# ---------------------------------------------------------------------------
+# StreamingParquetSource coercions: time units, List -> Array
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_source_coerces_datetime_unit(tmp_path: Path) -> None:
+    directory = tmp_path / "ms-prices"
+    directory.mkdir()
+    buffer = io.BytesIO()
+    pl.DataFrame(
+        {"timestamp": TIMESTAMP[:2], "value": [1.0, 2.0]},
+        schema={"timestamp": pl.Datetime("ms"), "value": pl.Float64},
+    ).write_parquet(buffer)
+    (directory / "part-000.parquet").write_bytes(buffer.getvalue())
+    root = build_parquet_chunk_manifest(directory)
+
+    result = Graph(
+        Node(
+            StreamingParquetSource,
+            parameters=source_parameters(directory, root),
+            name="ms_prices",
+        )
+    ).execute()
+
+    assert result.schema["timestamp"] == pl.Datetime("us")
+    assert result["timestamp"].to_list() == TIMESTAMP[:2]
+
+
+def test_streaming_source_coerces_list_to_array(tmp_path: Path) -> None:
+    directory = tmp_path / "list-features"
+    directory.mkdir()
+    buffer = io.BytesIO()
+    pl.DataFrame(
+        {
+            "timestamp": [TIMESTAMP[0]] * 2,
+            "feature": [[0.2, None], [0.15, 0.8]],
+        },
+        schema={"timestamp": pl.Datetime, "feature": pl.List(pl.Float64)},
+    ).write_parquet(buffer)
+    (directory / "part-000.parquet").write_bytes(buffer.getvalue())
+    root = build_parquet_chunk_manifest(directory)
+    signature = FrameSignature(
+        columns=(ColumnSignature("feature", pl.Float64, (2,)),)
+    )
+
+    result = Graph(
+        Node(
+            StreamingParquetSource,
+            parameters=source_parameters(directory, root, output_signature=signature),
+            name="list_features",
+        )
+    ).execute()
+
+    assert result.schema["feature"] == pl.Array(pl.Float64, 2)
+    assert result["feature"].to_list() == [[0.2, None], [0.15, 0.8]]

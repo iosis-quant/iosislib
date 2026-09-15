@@ -18,6 +18,10 @@ from iosislib.tsfn.transforms.negate import Negate, NegateConfig
 from iosislib.tsfn.transforms.pct_change import PctChange, PctChangeConfig
 from iosislib.tsfn.transforms.ratio import Ratio, RatioConfig
 from iosislib.tsfn.transforms.rolling import (
+    RollingCov,
+    RollingCovConfig,
+    RollingCovMatrix,
+    RollingCovMatrixConfig,
     RollingMax,
     RollingMaxConfig,
     RollingMean,
@@ -30,6 +34,8 @@ from iosislib.tsfn.transforms.rolling import (
     RollingStdConfig,
     RollingSum,
     RollingSumConfig,
+    RollingVar,
+    RollingVarConfig,
     RollingZScore,
     RollingZScoreConfig,
 )
@@ -66,6 +72,10 @@ __all__ = [
     "PctChangeConfig",
     "Ratio",
     "RatioConfig",
+    "RollingCov",
+    "RollingCovConfig",
+    "RollingCovMatrix",
+    "RollingCovMatrixConfig",
     "RollingMax",
     "RollingMaxConfig",
     "RollingMean",
@@ -78,6 +88,8 @@ __all__ = [
     "RollingStdConfig",
     "RollingSum",
     "RollingSumConfig",
+    "RollingVar",
+    "RollingVarConfig",
     "RollingZScore",
     "RollingZScoreConfig",
     "Spread",

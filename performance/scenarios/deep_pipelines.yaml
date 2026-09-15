@@ -198,7 +198,7 @@ scenarios:
                   shape: [16]
         simulation:
           op: backtest.backtest
-          version: "1.2.0"
+          version: "1.5.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -253,7 +253,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "1.2.0"
+          version: "1.5.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask

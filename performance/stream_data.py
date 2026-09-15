@@ -121,6 +121,52 @@ def generate_market_data(
     })
 
 
+def generate_l2_market_data(
+    rows: int,
+    width: int,
+    rng: np.random.Generator,
+    *,
+    levels: int = 101,
+    tick: float = 0.01,
+    with_limit: bool = False,
+) -> pl.DataFrame:
+    mid = np.full((rows, width), 0.5)
+    mid[0] = rng.uniform(0.2, 0.8, width)
+    for row in range(1, rows):
+        mid[row] = mid[row - 1] + rng.normal(0, 0.02, width) + (0.5 - mid[row - 1]) * 0.01
+    mid = np.clip(mid, 0.03, 0.97)
+    spread_ticks = 1 + rng.geometric(0.4, (rows, width)).astype(int)
+    thin = rng.random((rows, width)) < 0.08
+    spread_ticks = np.where(thin, spread_ticks + rng.integers(4, 20, (rows, width)), spread_ticks)
+    best_bid_idx = np.clip(np.round((mid - spread_ticks * tick / 2) / tick).astype(int), 1, levels - 2)
+    best_ask_idx = np.clip(best_bid_idx + spread_ticks, 1, levels - 1)
+    grid = np.arange(levels, dtype=np.float64)
+    bid_dist = best_bid_idx[:, :, None] - grid[None, None, :]
+    ask_dist = grid[None, None, :] - best_ask_idx[:, :, None]
+    base = rng.lognormal(3.0, 1.0, (rows, width, 1))
+    decay = rng.uniform(2.0, 6.0, (rows, width, 1))
+    noise = rng.lognormal(0.0, 0.5, (rows, width, levels))
+    bid_depth = np.where(bid_dist >= 0, base * np.exp(-bid_dist / decay) * noise, 0.0)
+    ask_depth = np.where(ask_dist >= 0, base * np.exp(-ask_dist / decay) * noise, 0.0)
+    empty_bid = rng.random((rows, width, 1)) < 0.03
+    empty_ask = rng.random((rows, width, 1)) < 0.03
+    bid_depth = np.where(empty_bid, 0.0, bid_depth)
+    ask_depth = np.where(empty_ask, 0.0, ask_depth)
+    signal = np.round(rng.normal(0, 8, (rows, width)), 2)
+    columns: dict[str, Any] = {
+        "timestamp": _timestamp_column(rows),
+        "bid_depth": numpy_to_series("bid_depth", np.round(bid_depth, 2), allow_copy=True, shape=(width, levels)),
+        "ask_depth": numpy_to_series("ask_depth", np.round(ask_depth, 2), allow_copy=True, shape=(width, levels)),
+        "signal": numpy_to_series("signal", signal, allow_copy=True, shape=(width,)),
+    }
+    if with_limit:
+        is_limit = rng.random((rows, width)) < 0.4
+        offsets = rng.integers(-4, 5, (rows, width)) * tick
+        limit = np.where(is_limit, np.clip(mid + offsets, tick, 1.0), np.nan)
+        columns["limit"] = numpy_to_series("limit", limit, allow_copy=True, shape=(width,))
+    return pl.DataFrame(columns)
+
+
 def generate_wide_prices(
     rows: int, width: int, rng: np.random.Generator
 ) -> pl.DataFrame:
@@ -272,6 +318,8 @@ class DatasetSpec:
     format: str = "csv"
     stream: bool = False
     chunk_rows: int = 50_000
+    levels: int = 101
+    with_limit: bool = False
 
 
 @dataclass
@@ -286,6 +334,11 @@ def generate_dataset(
 ) -> GeneratedDataset:
     if spec.domain == "market_data":
         df = generate_market_data(spec.rows, spec.width, rng)
+    elif spec.domain == "l2_market_data":
+        df = generate_l2_market_data(
+            spec.rows, spec.width, rng,
+            levels=spec.levels, with_limit=spec.with_limit,
+        )
     elif spec.domain == "wide_prices":
         df = generate_wide_prices(spec.rows, spec.width, rng)
     elif spec.domain in DOMAINS:

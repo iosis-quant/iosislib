@@ -1,4 +1,4 @@
-﻿from dataclasses import FrozenInstanceError, dataclass
+from dataclasses import FrozenInstanceError, dataclass
 import json
 
 import polars as pl
@@ -201,10 +201,11 @@ def test_graph_construction_is_the_only_meaningful_validation_pass() -> None:
         @classmethod
         def _validated_declaration(
             cls,
-            root_node: Node,
+            terminals: tuple[Node, ...],
+            membership: tuple[Node, ...] | None = None,
         ) -> tuple[tuple[Node, ...], ValidationReport]:
             cls.validation_passes += 1
-            return super()._validated_declaration(root_node)
+            return super()._validated_declaration(terminals, membership)
 
     graph = CountingGraph(int_source(1, "source"))
 
