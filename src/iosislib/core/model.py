@@ -1069,7 +1069,8 @@ def _validate_manifest(manifest: Any) -> dict[str, Any]:
 
 MODEL_PREFIX = "models"
 JSON_FILENAME = "model.json"
-ONNX_FILENAME = "model.onnx"
+PT_FILENAME = "model.pt"
+TXT_FILENAME = "model.txt"
 METADATA_FILENAME = "metadata.json"
 MANIFEST_FILENAME = "manifest.json"
 
@@ -1102,14 +1103,16 @@ class ModelStore:
 
         models/<group>/manifest.json
         models/ab/cd/ef/<remaining 58 hex>/model.json     (always)
-        models/ab/cd/ef/<remaining 58 hex>/model.onnx     (NN checkpoints)
+        models/ab/cd/ef/<remaining 58 hex>/model.pt       (torch checkpoints)
+        models/ab/cd/ef/<remaining 58 hex>/model.txt      (LightGBM checkpoints)
         models/ab/cd/ef/<remaining 58 hex>/metadata.json  (digest + widths)
 
     The id is the SHA-256 of the canonical checkpoint payload. Serialization
-    is ONNX-default: ``save_run`` exports ONNX when the checkpoint type has an
-    exporter and falls back to JSON-only for non-NN checkpoints (LightGBM,
-    untrained, unsupported). Inference auto-detects: ``model.onnx`` when
-    present via ``onnxruntime``, otherwise the native ``model.json``.
+    is native: ``save_run`` writes ``model.json`` always plus a framework
+    sidecar — ``model.pt`` (``torch.save`` of the state dict) for torch
+    checkpoints and ``model.txt`` (LightGBM model string) for LightGBM.
+    Untrained or unsupported checkpoints persist as JSON only. Inference
+    hydrates weights from the sidecar when present, otherwise from ``model.json``.
 
     Legacy ``<root>/<group>/manifest.json`` + ``<model_id>.json`` stores are
     read for backward compatibility; all writes use the canonical layout.
@@ -1302,17 +1305,17 @@ class ModelStore:
         payload = _canonical_json(checkpoint.to_dict())
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def _export_onnx_bytes(self, checkpoint: Model) -> tuple[bytes, dict[str, Any]] | None:
-        """Export ONNX bytes, or ``None`` when the type has no exporter."""
-        from iosislib.models._export import OnnxExportError
-
+    def _native_payload(
+        self, checkpoint: Model
+    ) -> tuple[str, bytes, dict[str, Any]] | None:
+        """Serialize a checkpoint with its framework-native format, or ``None``."""
         try:
-            from iosislib.models._export import export_onnx_payload
+            from iosislib.models._native import native_payload_for
         except ImportError:
             return None
         try:
-            return export_onnx_payload(checkpoint)
-        except OnnxExportError:
+            return native_payload_for(checkpoint)
+        except (ImportError, ValueError, TypeError):
             return None
 
     def _metadata_for(
@@ -1321,19 +1324,27 @@ class ModelStore:
         group: str,
         model_id: str,
         checkpoint: Model,
-        onnx_info: dict[str, Any] | None,
+        native_info: tuple[str, dict[str, Any]] | None,
     ) -> dict[str, Any]:
+        filename = native_info[0] if native_info is not None else JSON_FILENAME
+        info = native_info[1] if native_info is not None else {}
+        if filename == PT_FILENAME:
+            file_format = "pt"
+        elif filename == TXT_FILENAME:
+            file_format = "txt"
+        else:
+            file_format = "json"
         return {
             "model_id": model_id,
             "group": group,
-            "format": "onnx" if onnx_info is not None else "json",
-            "filename": ONNX_FILENAME if onnx_info is not None else JSON_FILENAME,
+            "format": file_format,
+            "filename": filename,
             "checkpoint_class": type(checkpoint).__name__,
             "checkpoint_version": checkpoint.version,
-            "framework": str((onnx_info or {}).get("framework", "iosislib")),
-            "framework_version": str((onnx_info or {}).get("framework_version", "unknown")),
-            "feature_width": (onnx_info or {}).get("feature_width"),
-            "target_width": (onnx_info or {}).get("target_width"),
+            "framework": str(info.get("framework", "iosislib")),
+            "framework_version": str(info.get("framework_version", "unknown")),
+            "feature_width": info.get("feature_width"),
+            "target_width": info.get("target_width"),
         }
 
     def _read_raw(self, location: Path | str) -> bytes | None:
@@ -1367,45 +1378,77 @@ class ModelStore:
         location.parent.mkdir(parents=True, exist_ok=True)
         location.write_bytes(payload)
 
-    def _artifact_locations(self, model_id: str) -> tuple[Path | str, Path | str, Path | str]:
+    def _artifact_locations(
+        self, model_id: str
+    ) -> tuple[Path | str, Path | str, Path | str, Path | str]:
         prefix = self.artifact_prefix(model_id)
         if isinstance(prefix, str):
             base = prefix.rstrip("/")
             return (
                 f"{base}/{JSON_FILENAME}",
-                f"{base}/{ONNX_FILENAME}",
+                f"{base}/{PT_FILENAME}",
+                f"{base}/{TXT_FILENAME}",
                 f"{base}/{METADATA_FILENAME}",
             )
         return (
             prefix / JSON_FILENAME,
-            prefix / ONNX_FILENAME,
+            prefix / PT_FILENAME,
+            prefix / TXT_FILENAME,
             prefix / METADATA_FILENAME,
         )
 
-    def _write_checkpoint(
-        self, group: str, checkpoint: Model, *, export_onnx: bool = True
-    ) -> tuple[str, str]:
+    def _sidecar_path(
+        self,
+        pt_path: Path | str,
+        txt_path: Path | str,
+        filename: str,
+    ) -> Path | str:
+        if filename == PT_FILENAME:
+            return pt_path
+        if filename == TXT_FILENAME:
+            return txt_path
+        raise ValueError(f"Unknown native payload filename {filename!r}")
+
+    def _write_checkpoint(self, group: str, checkpoint: Model) -> tuple[str, str]:
         """Persist one checkpoint; returns ``(model_id, format)``."""
         group = _validate_model_group(group)
         model_id = self.model_id(checkpoint)
-        json_path, onnx_path, metadata_path = self._artifact_locations(model_id)
-        native = json.dumps(checkpoint.to_dict(), sort_keys=True, indent=2).encode("utf-8")
-        exported = self._export_onnx_bytes(checkpoint) if export_onnx else None
-        onnx_bytes = exported[0] if exported is not None else None
-        onnx_info = dict(exported[1]) if exported is not None else None
+        json_path, pt_path, txt_path, metadata_path = self._artifact_locations(
+            model_id
+        )
+        native = json.dumps(checkpoint.to_dict(), sort_keys=True, indent=2).encode(
+            "utf-8"
+        )
+        native_payload = self._native_payload(checkpoint)
+        sidecar_filename: str | None = None
+        sidecar_info: dict[str, Any] | None = None
+        if native_payload is not None:
+            sidecar_filename, sidecar_bytes, sidecar_info = (
+                native_payload[0],
+                native_payload[1],
+                dict(native_payload[2]),
+            )
+            location = self._sidecar_path(pt_path, txt_path, sidecar_filename)
+            if self._read_raw(location) is None:
+                self._write_raw(location, sidecar_bytes)
         if self._read_raw(json_path) is None:
             self._write_raw(json_path, native)
-        if onnx_bytes is not None and self._read_raw(onnx_path) is None:
-            self._write_raw(onnx_path, onnx_bytes)
         metadata = self._metadata_for(
-            group=group, model_id=model_id, checkpoint=checkpoint, onnx_info=onnx_info
+            group=group,
+            model_id=model_id,
+            checkpoint=checkpoint,
+            native_info=(
+                (sidecar_filename, sidecar_info)
+                if sidecar_filename is not None and sidecar_info is not None
+                else None
+            ),
         )
         if self._read_raw(metadata_path) is None:
             self._write_raw(
                 metadata_path,
                 json.dumps(metadata, sort_keys=True, indent=2).encode("utf-8"),
             )
-        return model_id, ("onnx" if onnx_bytes is not None else "json")
+        return model_id, metadata["format"]
 
     def save_run(
         self,
@@ -1416,7 +1459,6 @@ class ModelStore:
         metrics: Mapping[str, float] | None = None,
         trained_at: datetime | None = None,
         run_id: str | None = None,
-        export_onnx: bool = True,
     ) -> str:
         """Record one training run; returns the finished model id."""
         _validate_model_group(group)
@@ -1435,11 +1477,9 @@ class ModelStore:
             raise ValueError("save_run run_id must be a non-empty string or None")
 
         manifest = self.read_manifest(group)
-        finished_id, finished_format = self._write_checkpoint(
-            group, finished, export_onnx=export_onnx
-        )
+        finished_id, finished_format = self._write_checkpoint(group, finished)
         for checkpoint in checkpoints:
-            self._write_checkpoint(group, checkpoint, export_onnx=export_onnx)
+            self._write_checkpoint(group, checkpoint)
 
         for run in manifest["runs"]:
             if run["finished_model_id"] == finished_id:
@@ -1521,29 +1561,41 @@ class ModelStore:
         """Return raw ``model.json`` bytes, or ``None`` when absent."""
         _validate_model_group(group)
         _validate_model_id(model_id)
-        json_path, _, _ = self._artifact_locations(model_id)
+        json_path, _, _, _ = self._artifact_locations(model_id)
         raw = self._read_raw(json_path)
         if raw is not None:
             return raw
         legacy = self._legacy_artifact_path(self.root, model_id)
         return self._read_raw(legacy)
 
-    def load_onnx_bytes(self, group: str, model_id: str) -> bytes | None:
-        """Return raw ``model.onnx`` bytes, or ``None`` for JSON-only stores."""
+    def load_native_payloads(self, group: str, model_id: str) -> dict[str, bytes]:
+        """Return available native sidecars (``model.pt``/``model.txt``)."""
         _validate_model_group(group)
         _validate_model_id(model_id)
-        _, onnx_path, _ = self._artifact_locations(model_id)
-        return self._read_raw(onnx_path)
+        _, pt_path, txt_path, _ = self._artifact_locations(model_id)
+        payloads: dict[str, bytes] = {}
+        for filename, location in (
+            (PT_FILENAME, pt_path),
+            (TXT_FILENAME, txt_path),
+        ):
+            raw = self._read_raw(location)
+            if raw is not None:
+                payloads[filename] = raw
+        return payloads
 
-    def load_for_inference(self, group: str, model_id: str) -> tuple[Model, bytes | None]:
-        """Load what inference needs: ``(checkpoint, onnx_bytes|None)``.
+    def load_for_inference(self, group: str, model_id: str) -> Model:
+        """Load a checkpoint with native weights hydrated from its sidecar.
 
-        ``onnx_bytes`` is present for NN checkpoints exported at train time;
-        non-NN checkpoints (LightGBM, unsupported) return ``None`` and infer
-        from native JSON. Callers auto-select: ONNX via ``onnxruntime`` when
-        present, native ``checkpoint.predict`` otherwise.
+        Falls back to the ``model.json`` envelope when no sidecar is stored
+        (untrained or JSON-only checkpoints).
         """
-        return self.load_model(group, model_id), self.load_onnx_bytes(group, model_id)
+        checkpoint = self.load_model(group, model_id)
+        payloads = self.load_native_payloads(group, model_id)
+        if not payloads:
+            return checkpoint
+        from iosislib.models._native import hydrate_checkpoint
+
+        return hydrate_checkpoint(checkpoint, payloads)
 
     def load_run_model(self, group: str, run: Mapping[str, Any]) -> Model:
         """Load the finished model recorded by one manifest run."""
@@ -1554,10 +1606,8 @@ class ModelStore:
             raise TypeError("Manifest run finished_model_id must be a string")
         return self.load_model(group, model_id)
 
-    def load_run_for_inference(
-        self, group: str, run: Mapping[str, Any]
-    ) -> tuple[Model, bytes | None]:
-        """Load a manifest run's inference payloads ``(checkpoint, onnx|None)``."""
+    def load_run_for_inference(self, group: str, run: Mapping[str, Any]) -> Model:
+        """Load a manifest run's finished checkpoint with native weights."""
         if not isinstance(run, Mapping) or "finished_model_id" not in run:
             raise TypeError("load_run_for_inference requires a manifest run mapping")
         model_id = run["finished_model_id"]
@@ -1693,7 +1743,7 @@ class InferenceTSFN(BatchTSFN, abc.ABC):
 
     def _resolve_run(
         self, store: ModelStore, group: str, ordered: pl.DataFrame
-    ) -> tuple[dict[str, Any], Model, bytes | None]:
+    ) -> tuple[dict[str, Any], Model]:
         pinned = self.pinned_model_id()
         if pinned is not None:
             manifest = store.read_manifest(group)
@@ -1707,8 +1757,7 @@ class InferenceTSFN(BatchTSFN, abc.ABC):
                     f"Pinned model {pinned!r} is not a finished model for group "
                     f"{group!r}. Train the group first or check the id."
                 )
-            checkpoint, onnx_bytes = store.load_for_inference(group, pinned)
-            return matches[-1], checkpoint, onnx_bytes
+            return matches[-1], store.load_for_inference(group, pinned)
         time_axis = self.signature[0].time
         if time_axis is None:
             raise ValueError("InferenceTSFN requires an input time axis")
@@ -1718,31 +1767,7 @@ class InferenceTSFN(BatchTSFN, abc.ABC):
         if latest.tzinfo is None:
             latest = latest.replace(tzinfo=timezone.utc)
         run = store.select_run(group, latest)
-        checkpoint, onnx_bytes = store.load_run_for_inference(group, run)
-        return run, checkpoint, onnx_bytes
-
-    def _onnx_frame(
-        self, ordered: pl.DataFrame, checkpoint: Model, onnx_bytes: bytes
-    ) -> pl.DataFrame | None:
-        """Score via ONNX when the segment exposes a ``features`` column."""
-        try:
-            from iosislib.models._export import predict_features
-
-            if "features" not in ordered.columns:
-                return None
-            prediction = predict_features(
-                ordered.get_column("features"), checkpoint, onnx_bytes
-            )
-            time_axis = self.signature[0].time
-            assert time_axis is not None
-            return pl.DataFrame(
-                [
-                    ordered.get_column(time_axis.column),
-                    prediction.rename("prediction"),
-                ]
-            )
-        except Exception:
-            return None
+        return run, store.load_run_for_inference(group, run)
 
     def batch(self, frame: pl.DataFrame) -> pl.DataFrame:
         output_schema = _frame_physical_schema(self.signature[1])
@@ -1758,21 +1783,13 @@ class InferenceTSFN(BatchTSFN, abc.ABC):
         )
         group = _validate_model_group(self.model_group())
         store = self.model_store()
-        _, checkpoint, onnx_bytes = self._resolve_run(store, group, ordered)
-        resolved: pl.DataFrame | None = None
-        if onnx_bytes:
-            resolved = self._onnx_frame(ordered, checkpoint, onnx_bytes)
-        if resolved is None:
-            try:
-                candidate: object = self.predict_with_model(ordered, checkpoint, onnx_bytes)  # type: ignore[call-arg]
-            except TypeError:
-                candidate = self.predict_with_model(ordered, checkpoint)
-            if not isinstance(candidate, pl.DataFrame):
-                raise TypeError(
-                    f"{self.__class__.__name__}.predict_with_model must return a "
-                    f"Polars DataFrame, got {type(candidate).__name__}"
-                )
-            resolved = candidate
+        _, checkpoint = self._resolve_run(store, group, ordered)
+        resolved = self.predict_with_model(ordered, checkpoint)
+        if not isinstance(resolved, pl.DataFrame):
+            raise TypeError(
+                f"{self.__class__.__name__}.predict_with_model must return a "
+                f"Polars DataFrame, got {type(resolved).__name__}"
+            )
         if resolved.height != ordered.height:
             raise ValueError("Inference prediction must preserve input row count")
         return resolved
@@ -1795,7 +1812,8 @@ __all__ = [
     "MetricThresholdScheduler",
     "Model",
     "ModelStore",
-    "ONNX_FILENAME",
+    "PT_FILENAME",
+    "TXT_FILENAME",
     "model_shard_prefix",
     "ScheduleContext",
     "ScheduleDecision",
