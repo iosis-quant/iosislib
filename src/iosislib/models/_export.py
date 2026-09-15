@@ -34,6 +34,12 @@ def export_onnx_payload(checkpoint: Model) -> tuple[bytes, dict[str, Any]]:
     Raises :class:`OnnxExportError` when the checkpoint type has no exporter.
     """
     _ = onnx.__version__  # required by torch.onnx at export time
+    try:
+        import onnxscript  # noqa: F401  # required by torch.onnx exporter
+    except ImportError as exc:
+        raise OnnxExportError(
+            "ONNX export requires the 'onnxscript' package"
+        ) from exc
 
     module, feature_width, target_width = _torch_module_for(checkpoint)
     module.eval()

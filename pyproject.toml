@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iosislib"
-version = "0.4.1"
+version = "0.4.2"
 description = "Typed, deterministic, time-aware computation graphs for Polars time series"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.26",
     "onnx>=1.15",
     "onnxruntime>=1.17",
+    "onnxscript>=0.1",
     "polars>=1.30",
     "PyYAML>=6.0",
     "pyarrow>=14",
