@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import onnx
 import pytest
 import torch
 
@@ -14,7 +15,6 @@ def _trained_mlp() -> DenseMLPModel:
 
 
 def test_mlp_exports_valid_onnx() -> None:
-    onnx = pytest.importorskip("onnx")
     payload, info = export_onnx_payload(_trained_mlp())
 
     assert isinstance(payload, bytes) and len(payload) > 0

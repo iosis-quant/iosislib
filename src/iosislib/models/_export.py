@@ -3,13 +3,14 @@ from __future__ import annotations
 import io
 from typing import Any
 
+import onnx
 import torch
 
 from iosislib.core.model import Model
 
 
 class OnnxExportError(RuntimeError):
-    """A checkpoint cannot be exported to ONNX in this environment."""
+    """A checkpoint cannot be exported to ONNX."""
 
 
 def export_onnx_payload(checkpoint: Model) -> tuple[bytes, dict[str, Any]]:
@@ -17,15 +18,9 @@ def export_onnx_payload(checkpoint: Model) -> tuple[bytes, dict[str, Any]]:
 
     Returns ``(payload, info)`` where ``info`` carries the framework, input
     width, and output width needed by publishers without loading the payload.
-    Raises :class:`OnnxExportError` when the ``onnx`` package is missing or
-    the checkpoint type has no exporter.
+    Raises :class:`OnnxExportError` when the checkpoint type has no exporter.
     """
-    try:
-        import onnx  # noqa: F401 - required by torch.onnx at export time
-    except ImportError as exc:
-        raise OnnxExportError(
-            "Exporting ONNX requires the 'onnx' package, which is not installed"
-        ) from exc
+    _ = onnx.__version__  # required by torch.onnx at export time
 
     module, feature_width, target_width = _torch_module_for(checkpoint)
     module.eval()
