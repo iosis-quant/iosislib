@@ -1107,15 +1107,18 @@ class ModelStore:
         models/ab/cd/ef/<remaining 58 hex>/model.txt      (LightGBM checkpoints)
         models/ab/cd/ef/<remaining 58 hex>/metadata.json  (digest + widths)
 
-    The id is the SHA-256 of the canonical checkpoint payload. Serialization
-    is native: ``save_run`` writes ``model.json`` always plus a framework
-    sidecar — ``model.pt`` (``torch.save`` of the state dict) for torch
-    checkpoints and ``model.txt`` (LightGBM model string) for LightGBM.
-    Untrained or unsupported checkpoints persist as JSON only. Inference
-    hydrates weights from the sidecar when present, otherwise from ``model.json``.
+    The id is the SHA-256 of the canonical ``model.json`` envelope, which
+    commits to weight bytes via digest without containing them; store paths
+    never enter the hash. Serialization is native: ``save_run`` writes the
+    config-only ``model.json`` envelope always plus a framework sidecar —
+    ``model.pt`` (``torch.save`` of the state dict) for torch checkpoints
+    and ``model.txt`` (LightGBM model string) for LightGBM. Untrained or
+    custom checkpoints persist as JSON only. Loads verify the sidecar digest
+    before hydrating weights.
 
-    Legacy ``<root>/<group>/manifest.json`` + ``<model_id>.json`` stores are
-    read for backward compatibility; all writes use the canonical layout.
+    Legacy ``<root>/<group>/manifest.json`` + ``<model_id>.json`` stores and
+    weights-inline envelopes are read for backward compatibility; all writes
+    use the canonical layout.
     S3 state is addressed through ``pyarrow.fs.S3FileSystem`` with the
     execution-scoped ``S3Credentials``.
     """
@@ -1299,24 +1302,30 @@ class ModelStore:
 
     @staticmethod
     def model_id(checkpoint: Model) -> str:
-        """Content-address a checkpoint from its canonical payload."""
+        """Content-address a checkpoint from its canonical envelope.
+
+        The envelope commits to weight bytes via digest without containing
+        them, so identical models share an id on any machine while store
+        paths and object keys never enter the hash.
+        """
         if not isinstance(checkpoint, Model):
             raise TypeError("ModelStore.model_id requires a Model")
-        payload = _canonical_json(checkpoint.to_dict())
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        try:
+            from iosislib.models._native import envelope_for, model_id_for_envelope
 
-    def _native_payload(
-        self, checkpoint: Model
-    ) -> tuple[str, bytes, dict[str, Any]] | None:
-        """Serialize a checkpoint with its framework-native format, or ``None``."""
-        try:
-            from iosislib.models._native import native_payload_for
+            envelope, _, _ = envelope_for(checkpoint)
+            return model_id_for_envelope(envelope)
         except ImportError:
-            return None
-        try:
-            return native_payload_for(checkpoint)
-        except (ImportError, ValueError, TypeError):
-            return None
+            payload = _canonical_json(checkpoint.to_dict())
+            return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _envelope_for(
+        self, checkpoint: Model
+    ) -> tuple[dict[str, Any], str | None, bytes | None]:
+        """Split a checkpoint into ``(envelope, sidecar_filename, sidecar)``."""
+        from iosislib.models._native import envelope_for
+
+        return envelope_for(checkpoint)
 
     def _metadata_for(
         self,
@@ -1324,13 +1333,15 @@ class ModelStore:
         group: str,
         model_id: str,
         checkpoint: Model,
-        native_info: tuple[str, dict[str, Any]] | None,
+        envelope: Mapping[str, Any],
+        sidecar_filename: str | None,
     ) -> dict[str, Any]:
-        filename = native_info[0] if native_info is not None else JSON_FILENAME
-        info = native_info[1] if native_info is not None else {}
-        if filename == PT_FILENAME:
+        from iosislib.models._native import envelope_info
+
+        info = envelope_info(envelope)
+        if sidecar_filename == PT_FILENAME:
             file_format = "pt"
-        elif filename == TXT_FILENAME:
+        elif sidecar_filename == TXT_FILENAME:
             file_format = "txt"
         else:
             file_format = "json"
@@ -1338,7 +1349,7 @@ class ModelStore:
             "model_id": model_id,
             "group": group,
             "format": file_format,
-            "filename": filename,
+            "filename": sidecar_filename or JSON_FILENAME,
             "checkpoint_class": type(checkpoint).__name__,
             "checkpoint_version": checkpoint.version,
             "framework": str(info.get("framework", "iosislib")),
@@ -1411,37 +1422,29 @@ class ModelStore:
 
     def _write_checkpoint(self, group: str, checkpoint: Model) -> tuple[str, str]:
         """Persist one checkpoint; returns ``(model_id, format)``."""
+        from iosislib.models._native import model_id_for_envelope
+
         group = _validate_model_group(group)
-        model_id = self.model_id(checkpoint)
+        envelope, sidecar_filename, sidecar_bytes = self._envelope_for(checkpoint)
+        model_id = model_id_for_envelope(envelope)
         json_path, pt_path, txt_path, metadata_path = self._artifact_locations(
             model_id
         )
-        native = json.dumps(checkpoint.to_dict(), sort_keys=True, indent=2).encode(
-            "utf-8"
-        )
-        native_payload = self._native_payload(checkpoint)
-        sidecar_filename: str | None = None
-        sidecar_info: dict[str, Any] | None = None
-        if native_payload is not None:
-            sidecar_filename, sidecar_bytes, sidecar_info = (
-                native_payload[0],
-                native_payload[1],
-                dict(native_payload[2]),
-            )
+        if sidecar_filename is not None and sidecar_bytes is not None:
             location = self._sidecar_path(pt_path, txt_path, sidecar_filename)
             if self._read_raw(location) is None:
                 self._write_raw(location, sidecar_bytes)
         if self._read_raw(json_path) is None:
-            self._write_raw(json_path, native)
+            self._write_raw(
+                json_path,
+                json.dumps(envelope, sort_keys=True, indent=2).encode("utf-8"),
+            )
         metadata = self._metadata_for(
             group=group,
             model_id=model_id,
             checkpoint=checkpoint,
-            native_info=(
-                (sidecar_filename, sidecar_info)
-                if sidecar_filename is not None and sidecar_info is not None
-                else None
-            ),
+            envelope=envelope,
+            sidecar_filename=sidecar_filename,
         )
         if self._read_raw(metadata_path) is None:
             self._write_raw(
@@ -1537,9 +1540,13 @@ class ModelStore:
     def load_model(self, group: str, model_id: str) -> Model:
         """Load one checkpoint artifact by content id.
 
-        Reads the canonical sharded ``model.json``; legacy
-        ``<group>/<model_id>.json`` stores are read for compatibility.
+        Reads the canonical sharded ``model.json`` envelope and hydrates
+        weights from the ``model.pt``/``model.txt`` sidecar after digest
+        verification; legacy ``<group>/<model_id>.json`` and weights-inline
+        stores are read for compatibility.
         """
+        from iosislib.models._native import materialize_envelope
+
         _validate_model_group(group)
         _validate_model_id(model_id)
         raw = self.load_native_bytes(group, model_id)
@@ -1549,13 +1556,15 @@ class ModelStore:
                 "Train the group first."
             )
         try:
-            payload = json.loads(raw.decode("utf-8"))
+            envelope = json.loads(raw.decode("utf-8"))
         except (OSError, ValueError) as exc:
             raise ValueError(
                 f"Model artifact {model_id!r} for group {group!r} is unreadable: "
                 f"{exc}"
             ) from exc
-        return model_from_dict(payload)
+        return materialize_envelope(
+            envelope, self.load_native_payloads(group, model_id)
+        )
 
     def load_native_bytes(self, group: str, model_id: str) -> bytes | None:
         """Return raw ``model.json`` bytes, or ``None`` when absent."""
@@ -1584,18 +1593,12 @@ class ModelStore:
         return payloads
 
     def load_for_inference(self, group: str, model_id: str) -> Model:
-        """Load a checkpoint with native weights hydrated from its sidecar.
+        """Load a checkpoint with weights hydrated from its verified sidecar.
 
         Falls back to the ``model.json`` envelope when no sidecar is stored
         (untrained or JSON-only checkpoints).
         """
-        checkpoint = self.load_model(group, model_id)
-        payloads = self.load_native_payloads(group, model_id)
-        if not payloads:
-            return checkpoint
-        from iosislib.models._native import hydrate_checkpoint
-
-        return hydrate_checkpoint(checkpoint, payloads)
+        return self.load_model(group, model_id)
 
     def load_run_model(self, group: str, run: Mapping[str, Any]) -> Model:
         """Load the finished model recorded by one manifest run."""

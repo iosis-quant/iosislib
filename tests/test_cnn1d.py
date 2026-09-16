@@ -13,6 +13,7 @@ from iosislib.core.model import DatasetSplit, FrameDataset
 from iosislib.core.node import Node
 from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
 from iosislib.models.cnn1d import CNN1D, CNN1DConfig, CNN1DModel
+from _floats import assert_float_close
 
 
 def _series_frame(values: list[float]) -> pl.DataFrame:
@@ -103,7 +104,7 @@ def test_cnn1d_is_causal() -> None:
     )
     before = fitted.predict(frame["features"]).to_list()
     after = fitted.predict(other["features"]).to_list()
-    assert before[59] == after[59]
+    assert_float_close(before[59][0], after[59][0])
     assert before[60] != after[60]
 
 

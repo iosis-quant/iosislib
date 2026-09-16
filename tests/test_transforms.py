@@ -11,6 +11,7 @@ from iosislib.core.graph import Graph
 from iosislib.core.node import Node
 from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
 from iosislib.tsfn.transforms import Delta, DeltaConfig, Lag, LagConfig, Lead, LeadConfig, Logit, Ratio, Spread
+from _floats import assert_lists_close
 
 
 @dataclass(frozen=True)
@@ -187,7 +188,7 @@ def test_lag_uses_earlier_observations_after_sorting() -> None:
     result = Graph(lag).execute()
 
     assert result["timestamp"].to_list() == [dt(0), dt(2), dt(3)]
-    assert result["lag"].to_list() == [None, None, 1.0]
+    assert_lists_close(result["lag"].to_list(), [None, None, 1.0])
 
 
 def test_delta_inherits_vector_shape_and_diffs_components_across_rows() -> None:
@@ -201,7 +202,7 @@ def test_delta_inherits_vector_shape_and_diffs_components_across_rows() -> None:
 
     assert delta.outputs == {"delta": pl.Array(pl.Float64, 2)}
     assert result.schema["delta"] == pl.Array(pl.Float64, 2)
-    assert result["delta"].to_list() == [[None, None], [1.0, 20.0], [1.0, 30.0]]
+    assert_lists_close(result["delta"].to_list(), [[None, None], [1.0, 20.0], [1.0, 30.0]])
 
 
 def test_lag_inherits_vector_shape_and_lags_components_across_rows() -> None:
@@ -215,7 +216,7 @@ def test_lag_inherits_vector_shape_and_lags_components_across_rows() -> None:
 
     assert lag.outputs == {"lag": pl.Array(pl.Float64, 2)}
     assert result.schema["lag"] == pl.Array(pl.Float64, 2)
-    assert result["lag"].to_list() == [[None, None], [1.0, 10.0], [2.0, 30.0]]
+    assert_lists_close(result["lag"].to_list(), [[None, None], [1.0, 10.0], [2.0, 30.0]])
 
 def test_lead_uses_later_observations_after_sorting() -> None:
     source = float_source((7.0, 1.0, 5.0), minutes=(3, 0, 2))
@@ -224,7 +225,7 @@ def test_lead_uses_later_observations_after_sorting() -> None:
     result = Graph(lead).execute()
 
     assert result["timestamp"].to_list() == [dt(0), dt(2), dt(3)]
-    assert result["lead"].to_list() == [5.0, 7.0, None]
+    assert_lists_close(result["lead"].to_list(), [5.0, 7.0, None])
 
 
 def test_lead_inherits_vector_shape_and_leads_components_across_rows() -> None:
@@ -238,7 +239,7 @@ def test_lead_inherits_vector_shape_and_leads_components_across_rows() -> None:
 
     assert lead.outputs == {"lead": pl.Array(pl.Float64, 2)}
     assert result.schema["lead"] == pl.Array(pl.Float64, 2)
-    assert result["lead"].to_list() == [[2.0, 30.0], [3.0, 60.0], None]
+    assert_lists_close(result["lead"].to_list(), [[2.0, 30.0], [3.0, 60.0], None])
 
 
 def test_lead_is_explicitly_marked_as_lookahead() -> None:

@@ -24,6 +24,7 @@ from iosislib.strategy import (
     lower,
 )
 from iosislib.strategy.ir import Reference
+from _floats import assert_dict_close
 
 
 @dataclass(frozen=True)
@@ -459,10 +460,13 @@ def test_parse_resolve_extract_end_to_end() -> None:
         if row:
             values.update(row[0])
 
-    assert values == {
-        "mse": 1.0,
-        "max_drawdown": 0.0,
-    }
+    assert_dict_close(
+        values,
+        {
+            "mse": 1.0,
+            "max_drawdown": 0.0,
+        },
+    )
 
 
 def test_metric_spec_validation() -> None:

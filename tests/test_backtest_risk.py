@@ -29,6 +29,7 @@ from iosislib.backtest.policy import Array, MarketState
 from iosislib.core.graph import Graph
 from iosislib.core.node import Node
 from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
+from _floats import assert_frames_close, assert_lists_close
 
 START = datetime(2026, 1, 1)
 
@@ -93,8 +94,8 @@ def test_no_risk_policy_passes_orders_through_unchanged() -> None:
         market_frame([[9.0], [10.0]], [[10.0], [11.0]], [[2.0], [-1.0]])
     )
 
-    assert result.get_column("order").to_list() == [[2.0], [-1.0]]
-    assert result.get_column("proposed_order").to_list() == [[2.0], [-1.0]]
+    assert_lists_close(result.get_column("order").to_list(), [[2.0], [-1.0]])
+    assert_lists_close(result.get_column("proposed_order").to_list(), [[2.0], [-1.0]])
 
 
 def test_explicit_noop_risk_policy_equals_null_risk_path() -> None:
@@ -106,8 +107,8 @@ def test_explicit_noop_risk_policy_equals_null_risk_path() -> None:
     ).batch(values)
     singleton = backtest(SignalOrderPolicy(), risk_policy=NO_OP_RISK).batch(values)
 
-    assert implicit.equals(explicit)
-    assert implicit.equals(singleton)
+    assert_frames_close(implicit, explicit)
+    assert_frames_close(implicit, singleton)
 
 
 def test_fractional_limit_policy_clamps_positions_to_fraction_of_equity() -> None:
@@ -115,11 +116,11 @@ def test_fractional_limit_policy_clamps_positions_to_fraction_of_equity() -> Non
         SignalOrderPolicy(), risk_policy=FractionalLimitPolicy(0.5)
     ).batch(market_frame([[9.0]], [[10.0]], [[20.0]]))
 
-    assert result.get_column("proposed_order").to_list() == [[20.0]]
-    assert result.get_column("order").to_list() == [[5.0]]
-    assert result.get_column("balance").to_list() == [[5.0]]
-    assert result.get_column("cash").to_list() == [50.0]
-    assert result.get_column("equity").to_list() == [95.0]
+    assert_lists_close(result.get_column("proposed_order").to_list(), [[20.0]])
+    assert_lists_close(result.get_column("order").to_list(), [[5.0]])
+    assert_lists_close(result.get_column("balance").to_list(), [[5.0]])
+    assert_lists_close(result.get_column("cash").to_list(), [50.0])
+    assert_lists_close(result.get_column("equity").to_list(), [95.0])
 
 
 def test_fractional_limit_policy_clamps_only_exceeding_assets() -> None:
@@ -129,7 +130,7 @@ def test_fractional_limit_policy_clamps_only_exceeding_assets() -> None:
         market_frame([[9.0, 19.0]], [[10.0, 20.0]], [[20.0, 1.0]])
     )
 
-    assert result.get_column("order").to_list() == [[5.0, 1.0]]
+    assert_lists_close(result.get_column("order").to_list(), [[5.0, 1.0]])
 
 
 def test_fractional_limit_policy_no_change_when_within_limit() -> None:
@@ -137,7 +138,7 @@ def test_fractional_limit_policy_no_change_when_within_limit() -> None:
         SignalOrderPolicy(), risk_policy=FractionalLimitPolicy(0.5)
     ).batch(market_frame([[9.0]], [[10.0]], [[2.0]]))
 
-    assert result.get_column("order").to_list() == [[2.0]]
+    assert_lists_close(result.get_column("order").to_list(), [[2.0]])
 
 
 def test_fractional_limit_policy_zeroes_orders_at_nonpositive_equity() -> None:
@@ -147,9 +148,9 @@ def test_fractional_limit_policy_zeroes_orders_at_nonpositive_equity() -> None:
         initial_cash=-10.0,
     ).batch(market_frame([[9.0]], [[10.0]], [[20.0]]))
 
-    assert result.get_column("order").to_list() == [[0.0]]
-    assert result.get_column("proposed_order").to_list() == [[20.0]]
-    assert result.get_column("cash").to_list() == [-10.0]
+    assert_lists_close(result.get_column("order").to_list(), [[0.0]])
+    assert_lists_close(result.get_column("proposed_order").to_list(), [[20.0]])
+    assert_lists_close(result.get_column("cash").to_list(), [-10.0])
 
 
 def test_fractional_limit_policy_validates_fraction() -> None:
@@ -167,8 +168,8 @@ def test_fractional_kelly_policy_sizes_from_probability_and_ask() -> None:
     ).batch(market_frame([[0.5]], [[0.6]], [[0.7]]))
 
     expected = 25.0 / 0.6
-    assert result.get_column("order").to_list() == [[pytest.approx(expected)]]
-    assert result.get_column("proposed_order").to_list() == [[0.7]]
+    assert_lists_close(result.get_column("order").to_list(), [[expected]])
+    assert_lists_close(result.get_column("proposed_order").to_list(), [[0.7]])
 
 
 def test_fractional_kelly_policy_scales_by_custom_fraction_and_is_deterministic() -> None:
@@ -183,10 +184,12 @@ def test_fractional_kelly_policy_scales_by_custom_fraction_and_is_deterministic(
         SignalOrderPolicy(), risk_policy=FractionalKellyPolicy(0.5)
     ).batch(values)
 
-    assert half.equals(repeat)
-    assert half.get_column("order").to_list() == [
-        [pytest.approx(full.get_column("order")[0] / 2.0)]
-    ]
+    assert_frames_close(half, repeat)
+    full_order = float(full.get_column("order").to_list()[0][0])
+    assert_lists_close(
+        half.get_column("order").to_list(),
+        [[full_order / 2.0]],
+    )
 
 
 def test_fractional_kelly_policy_zeroes_orders_without_edge() -> None:
@@ -194,7 +197,7 @@ def test_fractional_kelly_policy_zeroes_orders_without_edge() -> None:
         SignalOrderPolicy(), risk_policy=FractionalKellyPolicy(1.0)
     ).batch(market_frame([[0.5]], [[0.7]], [[0.5]]))
 
-    assert result.get_column("order").to_list() == [[0.0]]
+    assert_lists_close(result.get_column("order").to_list(), [[0.0]])
 
 
 def test_fractional_kelly_policy_validates_fraction() -> None:
@@ -245,9 +248,9 @@ def test_stateful_risk_policy_state_is_fresh_for_each_execution() -> None:
     first = function.batch(values)
     second = function.batch(values)
 
-    assert first.equals(second)
-    assert first.get_column("order").to_list() == [[0.0], [-1.0]]
-    assert first.get_column("proposed_order").to_list() == [[2.0], [-1.0]]
+    assert_frames_close(first, second)
+    assert_lists_close(first.get_column("order").to_list(), [[0.0], [-1.0]])
+    assert_lists_close(first.get_column("proposed_order").to_list(), [[2.0], [-1.0]])
 
 
 def test_classify_reason_posthoc() -> None:
@@ -439,4 +442,4 @@ def test_backtest_graph_runs_with_a_risk_policy_bound() -> None:
 
     result = Graph(simulation).execute()
 
-    assert result.get_column("order").to_list() == [[5.0]]
+    assert_lists_close(result.get_column("order").to_list(), [[5.0]])

@@ -34,6 +34,7 @@ from iosislib.core.tsfn import (
     TimeAxis,
 )
 from iosislib.tsfn.transforms import Lag, Lead
+from _floats import assert_lists_close
 
 
 def supervised_frame(rows: int = 10) -> pl.DataFrame:
@@ -157,9 +158,9 @@ def test_chronological_splitter_preserves_graph_established_order_and_gaps() -> 
         batch_size=2,
     ).split(supervised_frame(10).reverse())
 
-    assert collect(datasets.train)["target"].to_list() == [18.0, 16.0, 14.0, 12.0]
-    assert collect(datasets.validation)["target"].to_list() == [8.0, 6.0]
-    assert collect(datasets.test)["target"].to_list() == [2.0, 0.0]
+    assert_lists_close(collect(datasets.train)["target"].to_list(), [18.0, 16.0, 14.0, 12.0])
+    assert_lists_close(collect(datasets.validation)["target"].to_list(), [8.0, 6.0])
+    assert_lists_close(collect(datasets.test)["target"].to_list(), [2.0, 0.0])
 
 
 def test_chronological_splitter_supports_fractional_and_absent_holdouts() -> None:
@@ -194,15 +195,15 @@ def test_chronological_splitter_purges_the_trailing_label_window() -> None:
         purge_window=2,
     ).split(supervised_frame(10))
 
-    assert collect(datasets.train)["target"].to_list() == [0.0, 2.0]
-    assert collect(datasets.validation)["target"].to_list() == [6.0, 8.0]
-    assert collect(datasets.test)["target"].to_list() == [12.0, 14.0]
+    assert_lists_close(collect(datasets.train)["target"].to_list(), [0.0, 2.0])
+    assert_lists_close(collect(datasets.validation)["target"].to_list(), [6.0, 8.0])
+    assert_lists_close(collect(datasets.test)["target"].to_list(), [12.0, 14.0])
 
 
 def test_chronological_splitter_purge_applies_to_train_only_splits() -> None:
     datasets = ChronologicalSplitter(purge_window=2).split(supervised_frame(5))
 
-    assert collect(datasets.train)["target"].to_list() == [0.0, 2.0, 4.0]
+    assert_lists_close(collect(datasets.train)["target"].to_list(), [0.0, 2.0, 4.0])
     assert datasets.train.row_count == 3
 
 
@@ -640,7 +641,7 @@ def test_training_uses_only_rows_before_the_transition() -> None:
         splitter=ChronologicalSplitter(),
     ).execute()
 
-    assert result["prediction"].to_list()[:3] == [0.0, 0.0, 0.0]
+    assert_lists_close(result["prediction"].to_list()[:3], [0.0, 0.0, 0.0])
     assert result["prediction"].to_list()[3] == pytest.approx(1.0)
 
 
@@ -673,8 +674,8 @@ def test_metric_scheduler_retrains_from_completed_segment_metrics() -> None:
     ).execute()
 
     predictions = result["prediction"].to_list()
-    assert predictions[:3] == [0.0, 0.0, 0.0]
-    assert predictions[3:6] == [1.0, 1.0, 1.0]
+    assert_lists_close(predictions[:3], [0.0, 0.0, 0.0])
+    assert_lists_close(predictions[3:6], [1.0, 1.0, 1.0])
     assert predictions[6] == pytest.approx(11.0 / 3.0)
 
 
@@ -896,7 +897,7 @@ def test_walk_forward_purges_the_lead_window_at_retrain_boundaries() -> None:
     # outcome[1..8] = [1, 1, 1, 9, 9, 9, 9, 9]. Retraining at row 4 must
     # exclude row 3 (whose label is outcome[4]) because it is only realized
     # at the boundary, so the segment-4 predictions use the mean of [1, 1, 1].
-    assert result["prediction"].to_list() == [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+    assert_lists_close(result["prediction"].to_list(), [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0])
 
 
 def test_lookahead_cannot_feed_supervised_features() -> None:

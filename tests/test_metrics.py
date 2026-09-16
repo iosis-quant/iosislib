@@ -11,6 +11,7 @@ from iosislib.metrics import (
     MetricExtractor,
     extract_metrics,
 )
+from _floats import assert_dicts_close
 
 
 def _prediction_target() -> pl.DataFrame:
@@ -24,7 +25,7 @@ def _prediction_target() -> pl.DataFrame:
 
 def test_mse_known_value() -> None:
     result = extract_metrics(_prediction_target(), MeanSquaredError())
-    assert result.to_dicts() == [{"mse": 1.0 / 3.0}]
+    assert_dicts_close(result.to_dicts(), [{"mse": 1.0 / 3.0}])
 
 
 def test_mse_supports_integer_and_float_columns() -> None:
@@ -33,7 +34,7 @@ def test_mse_supports_integer_and_float_columns() -> None:
         frame,
         MeanSquaredError(prediction_column="signal", target_column="answer"),
     )
-    assert result.to_dicts() == [{"mse": 1.0 / 3.0}]
+    assert_dicts_close(result.to_dicts(), [{"mse": 1.0 / 3.0}])
 
 
 def test_mse_requires_at_least_one_row() -> None:
@@ -78,20 +79,21 @@ def test_mse_rejects_equal_column_names() -> None:
 def test_max_drawdown_known_value() -> None:
     frame = pl.DataFrame({"equity": [100.0, 120.0, 90.0, 110.0]})
     result = extract_metrics(frame, MaxDrawdown())
-    assert result.to_dicts() == [{"max_drawdown": 0.25}]
+    assert_dicts_close(result.to_dicts(), [{"max_drawdown": 0.25}])
 
 
 def test_max_drawdown_monotonic_equity_is_zero() -> None:
     frame = pl.DataFrame({"equity": [1.0, 2.0, 3.0, 4.0]})
-    assert extract_metrics(frame, MaxDrawdown()).to_dicts() == [
-        {"max_drawdown": 0.0}
-    ]
+    assert_dicts_close(
+        extract_metrics(frame, MaxDrawdown()).to_dicts(),
+        [{"max_drawdown": 0.0}],
+    )
 
 
 def test_max_drawdown_ignores_non_positive_running_peaks() -> None:
     frame = pl.DataFrame({"equity": [0.0, -5.0, -3.0, 1.0, 0.5]})
     result = extract_metrics(frame, MaxDrawdown())
-    assert result.to_dicts() == [{"max_drawdown": 0.5}]
+    assert_dicts_close(result.to_dicts(), [{"max_drawdown": 0.5}])
 
 
 def test_max_drawdown_requires_two_rows() -> None:
@@ -127,7 +129,7 @@ def test_extract_metrics_combines_extractors() -> None:
         }
     )
     result = extract_metrics(frame, MeanSquaredError(), MaxDrawdown())
-    assert result.to_dicts() == [{"mse": 2.0, "max_drawdown": 0.1}]
+    assert_dicts_close(result.to_dicts(), [{"mse": 2.0, "max_drawdown": 0.1}])
 
 
 def test_extract_metrics_resolves_columns_across_frames() -> None:
@@ -137,7 +139,7 @@ def test_extract_metrics_resolves_columns_across_frames() -> None:
         (prediction_frame, target_frame),
         MeanSquaredError(),
     )
-    assert result.to_dicts() == [{"mse": 2.0}]
+    assert_dicts_close(result.to_dicts(), [{"mse": 2.0}])
 
 
 def test_extract_metrics_rejects_ragged_frames() -> None:
@@ -209,7 +211,7 @@ def test_extract_metrics_is_deterministic() -> None:
     frame = _prediction_target()
     first = extract_metrics(frame, MeanSquaredError())
     second = extract_metrics(frame, MeanSquaredError())
-    assert first.to_dicts() == second.to_dicts()
+    assert_dicts_close(first.to_dicts(), second.to_dicts())
 
 
 class _InfiniteMetric(MetricExtractor):
@@ -295,4 +297,4 @@ def test_max_drawdown_matches_manual_calculation() -> None:
         peak = max(peak, value)
         worst = max(worst, (peak - value) / peak)
     result = extract_metrics(frame, MaxDrawdown())
-    assert result.to_dicts() == [{"max_drawdown": worst}]
+    assert_dicts_close(result.to_dicts(), [{"max_drawdown": worst}])

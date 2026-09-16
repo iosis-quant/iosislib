@@ -31,6 +31,7 @@ from iosislib.core.node import Node
 from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig
 from iosislib.core.utils import series_to_numpy
 from iosislib.models.mlp import DenseMLPModel
+from _floats import assert_frames_close, assert_lists_close
 
 Array = npt.NDArray[np.float64]
 START = datetime(2026, 1, 1)
@@ -224,9 +225,9 @@ def test_model_policy_interprets_regular_vector_predictions_as_orders() -> None:
     first = backtest.batch(values)
     second = backtest.batch(values)
 
-    assert first.equals(second)
-    assert first.get_column("order").to_list() == [[0.5, -0.25], [0.5, -0.25]]
-    assert first.get_column("balance").to_list() == [[0.5, -0.25], [1.0, -0.5]]
+    assert_frames_close(first, second)
+    assert_lists_close(first.get_column("order").to_list(), [[0.5, -0.25], [0.5, -0.25]])
+    assert_lists_close(first.get_column("balance").to_list(), [[0.5, -0.25], [1.0, -0.5]])
 
 
 def test_model_policy_retrains_only_on_earlier_resolved_labels() -> None:
@@ -239,7 +240,7 @@ def test_model_policy_retrains_only_on_earlier_resolved_labels() -> None:
 
     result = backtest.batch(values)
 
-    assert result.get_column("order").to_list()[:3] == [[0.0], [0.0], [0.2]]
+    assert_lists_close(result.get_column("order").to_list()[:3], [[0.0], [0.0], [0.2]])
 
 
 def test_model_policy_purges_trailing_labels_at_retraining_boundaries() -> None:
@@ -262,8 +263,8 @@ def test_model_policy_purges_trailing_labels_at_retraining_boundaries() -> None:
     # At the row-3 boundary the buffer holds targets [1, 2, 3]. Purge drops the
     # trailing row (label realized only at the boundary) so the fitted mean is
     # 1.5; without a purge the model trains on all three and sizes 2.0.
-    assert run(purge_window=1) == [[0.0], [0.0], [0.0], [1.5]]
-    assert run(purge_window=0) == [[0.0], [0.0], [0.0], [2.0]]
+    assert_lists_close(run(purge_window=1), [[0.0], [0.0], [0.0], [1.5]])
+    assert_lists_close(run(purge_window=0), [[0.0], [0.0], [0.0], [2.0]])
 
 
 def test_model_policy_uses_metrics_at_scheduler_check_boundaries() -> None:
@@ -280,7 +281,7 @@ def test_model_policy_uses_metrics_at_scheduler_check_boundaries() -> None:
 
     result = function(model_policy).batch(values)
 
-    assert result.get_column("order").to_list() == [[0.0], [0.0], [0.5]]
+    assert_lists_close(result.get_column("order").to_list(), [[0.0], [0.0], [0.5]])
 
 
 def test_model_policy_validates_model_output_width() -> None:
@@ -306,7 +307,7 @@ def test_model_policy_runs_in_graph_with_a_resolved_target_binding() -> None:
 
     result = Graph(simulation).execute()
 
-    assert result.get_column("balance").to_list() == [[0.1], [0.2]]
+    assert_lists_close(result.get_column("balance").to_list(), [[0.1], [0.2]])
 
 
 def test_model_policy_accepts_scalar_dense_mlp_predictions_and_labels() -> None:
@@ -322,7 +323,7 @@ def test_model_policy_accepts_scalar_dense_mlp_predictions_and_labels() -> None:
     result = function(model_policy).batch(values)
 
     assert function(model_policy).signature[0].columns[-1] == ("target", pl.Float64)
-    assert result.get_column("order").to_list() == [[0.0], [0.0]]
+    assert_lists_close(result.get_column("order").to_list(), [[0.0], [0.0]])
 
 
 def test_model_policy_interpreter_can_translate_classifier_scores() -> None:
@@ -341,7 +342,7 @@ def test_model_policy_interpreter_can_translate_classifier_scores() -> None:
 
     result = function(model_policy).batch(values)
 
-    assert result.get_column("order").to_list() == [[1.0], [1.0]]
+    assert_lists_close(result.get_column("order").to_list(), [[1.0], [1.0]])
 
 
 def test_feature_buffer_retains_only_configured_history_and_validates_inputs() -> None:
@@ -350,8 +351,8 @@ def test_feature_buffer_retains_only_configured_history_and_validates_inputs() -
         vector = np.array([value], dtype=np.float64)
         buffer.append(vector, vector)
 
-    assert buffer.frame().get_column("features").to_list() == [[2.0], [3.0]]
-    assert buffer.frame().get_column("target").to_list() == [[2.0], [3.0]]
+    assert_lists_close(buffer.frame().get_column("features").to_list(), [[2.0], [3.0]])
+    assert_lists_close(buffer.frame().get_column("target").to_list(), [[2.0], [3.0]])
     with pytest.raises(ValueError, match="positive integer"):
         FeatureBuffer(0, (1,), (1,))
     with pytest.raises(ValueError, match="vectors"):

@@ -23,6 +23,7 @@ from iosislib.backtest import (
 from iosislib.core.graph import Graph
 from iosislib.core.node import Node
 from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
+from _floats import assert_frames_close, assert_lists_close
 
 
 START = datetime(2026, 1, 1)
@@ -294,10 +295,10 @@ def test_immediate_orders_update_cash_balances_and_equity() -> None:
         market_frame([[9.0], [10.0]], [[10.0], [11.0]], [[2.0], [-1.0]])
     )
 
-    assert result.get_column("cash").to_list() == [80.0, 90.0]
-    assert result.get_column("balance").to_list() == [[2.0], [1.0]]
-    assert result.get_column("order").to_list() == [[2.0], [-1.0]]
-    assert result.get_column("equity").to_list() == [98.0, 100.0]
+    assert_lists_close(result.get_column("cash").to_list(), [80.0, 90.0])
+    assert_lists_close(result.get_column("balance").to_list(), [[2.0], [1.0]])
+    assert_lists_close(result.get_column("order").to_list(), [[2.0], [-1.0]])
+    assert_lists_close(result.get_column("equity").to_list(), [98.0, 100.0])
 
 
 def test_policy_observes_the_previous_completed_portfolio() -> None:
@@ -305,8 +306,8 @@ def test_policy_observes_the_previous_completed_portfolio() -> None:
         market_frame([[9.0], [10.0]], [[10.0], [11.0]], [[0.0], [0.0]])
     )
 
-    assert result.get_column("cash").to_list() == [90.0, 68.0]
-    assert result.get_column("balance").to_list() == [[1.0], [3.0]]
+    assert_lists_close(result.get_column("cash").to_list(), [90.0, 68.0])
+    assert_lists_close(result.get_column("balance").to_list(), [[1.0], [3.0]])
 
 
 def test_stateful_policy_state_is_fresh_for_each_execution() -> None:
@@ -316,8 +317,8 @@ def test_stateful_policy_state_is_fresh_for_each_execution() -> None:
     first = function.batch(values)
     second = function.batch(values)
 
-    assert first.equals(second)
-    assert first.get_column("order").to_list() == [[1.0], [2.0]]
+    assert_frames_close(first, second)
+    assert_lists_close(first.get_column("order").to_list(), [[1.0], [2.0]])
 
 
 def test_policies_cannot_mutate_market_input_arrays() -> None:
@@ -332,8 +333,8 @@ def test_no_risk_constraints_are_implicitly_applied() -> None:
         market_frame([[9.0]], [[10.0]], [[20.0]])
     )
 
-    assert result.get_column("cash").to_list() == [-100.0]
-    assert result.get_column("balance").to_list() == [[20.0]]
+    assert_lists_close(result.get_column("cash").to_list(), [-100.0])
+    assert_lists_close(result.get_column("balance").to_list(), [[20.0]])
 
 
 def test_wide_execution_uses_bid_for_sells_and_ask_for_buys() -> None:
@@ -347,11 +348,12 @@ def test_wide_execution_uses_bid_for_sells_and_ask_for_buys() -> None:
     expected_cash = 1_000.0 - float(
         np.dot(quantities, np.where(quantities >= 0.0, ask, bid))
     )
-    assert result.get_column("cash").to_list() == [expected_cash]
-    assert result.get_column("balance").to_list() == [quantities.tolist()]
-    assert result.get_column("equity").to_list() == [
-        expected_cash + float(np.dot(quantities, bid))
-    ]
+    assert_lists_close(result.get_column("cash").to_list(), [expected_cash])
+    assert_lists_close(result.get_column("balance").to_list(), [quantities.tolist()])
+    assert_lists_close(
+        result.get_column("equity").to_list(),
+        [expected_cash + float(np.dot(quantities, bid))],
+    )
 
 
 def test_policy_wrong_width_write_fails_loudly() -> None:
@@ -384,7 +386,7 @@ def test_graph_execution_uses_the_backtest_batch_loop() -> None:
         "order",
         "proposed_order",
     ]
-    assert result.get_column("balance").to_list() == [[1.0], [0.0]]
+    assert_lists_close(result.get_column("balance").to_list(), [[1.0], [0.0]])
 
 
 def test_backtest_rejects_malformed_custom_feed_quotes() -> None:

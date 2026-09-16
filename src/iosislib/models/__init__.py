@@ -1,6 +1,13 @@
 """Regression model TSFNs and their immutable checkpoints."""
 
-from iosislib.models._native import hydrate_checkpoint, native_payload_for
+from iosislib.models._native import (
+    WEIGHTS_KEY,
+    envelope_for,
+    envelope_info,
+    export_from_store_files,
+    materialize_envelope,
+    model_id_for_envelope,
+)
 from iosislib.models.cnn1d import CNN1D, CNN1DConfig, CNN1DModel
 from iosislib.models.lightgbm import LightGBM, LightGBMConfig, LightGBMModel
 from iosislib.models.mlp import DenseMLP, DenseMLPConfig, DenseMLPModel
@@ -15,6 +22,10 @@ __all__ = [
     "LightGBM",
     "LightGBMConfig",
     "LightGBMModel",
-    "hydrate_checkpoint",
-    "native_payload_for",
+    "WEIGHTS_KEY",
+    "envelope_for",
+    "envelope_info",
+    "export_from_store_files",
+    "materialize_envelope",
+    "model_id_for_envelope",
 ]
