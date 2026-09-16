@@ -11,6 +11,13 @@ from typing import Any, ClassVar, cast
 import numpy as np
 
 from iosislib.backtest.policy import Array, MarketState, Order, PolicyState
+from iosislib.backtest._tolerances import (
+    PRICE_ABS_EPS,
+    is_ruined,
+    is_zero_qty,
+    notional_exceeds,
+    qty_side,
+)
 from iosislib.core.utils import _canonical_json, _serialize_value
 
 _SCALAR_WIDTH_THRESHOLD = 16
@@ -51,9 +58,9 @@ def classify_reason(proposed: Array, effective: Array) -> RiskReason:
 
     Not used in the hot loop. Provided for post-batch analytics and tracing.
     """
-    if np.array_equal(proposed, effective):
+    if np.allclose(proposed, effective, rtol=1e-12, atol=1e-12):
         return RiskReason.NO_CHANGE
-    if not np.any(effective):
+    if not np.any(np.abs(np.asarray(effective, dtype=np.float64)) > 1e-12):
         return RiskReason.ZEROED
     return RiskReason.CLAMPED
 
@@ -178,7 +185,7 @@ class FractionalLimitPolicy(RiskPolicy):
         for i in range(width):
             equity += balances[i] * bid_row[i]
         max_notional = self.fraction * equity
-        if max_notional <= 0.0:
+        if max_notional <= PRICE_ABS_EPS:
             for i in range(width):
                 target[i] = 0.0
             return None
@@ -187,20 +194,22 @@ class FractionalLimitPolicy(RiskPolicy):
                 target[i] = proposed_row[i]
             for i in range(width):
                 qty = target[i]
-                if qty != 0.0:
-                    price = ask_row[i] if qty > 0.0 else bid_row[i]
+                if not is_zero_qty(qty):
+                    price = ask_row[i] if qty_side(qty) > 0 else bid_row[i]
                     projected = balances[i] + qty
                     notional = abs(projected) * price
-                    if notional > max_notional:
+                    if notional_exceeds(notional, max_notional):
                         target[i] = (
                             copysign(max_notional / price, projected) - balances[i]
                         )
         else:
             target[:] = proposed_row
-            prices = np.where(target > 0.0, ask_row, bid_row)
+            dust = np.abs(target) <= 1e-12
+            prices = np.where(target >= 0.0, ask_row, bid_row)
             projected = balances + target
             notional = np.abs(projected) * prices
-            exceeds = (target != 0.0) & (notional > max_notional)
+            cap_eps = max(1e-9, 1e-9 * max(1.0, abs(float(max_notional))))
+            exceeds = (~dust) & (notional > float(max_notional) + cap_eps)
             if exceeds.any():
                 target[exceeds] = (
                     np.copysign(max_notional / prices[exceeds], projected[exceeds])
@@ -241,26 +250,28 @@ class FractionalKellyPolicy(RiskPolicy):
         equity = cash
         for i in range(width):
             equity += balances[i] * bid_row[i]
-        if equity <= 0.0:
+        if is_ruined(equity, cash):
             for i in range(width):
                 target[i] = 0.0
         elif width <= _SCALAR_WIDTH_THRESHOLD:
             fraction = self.custom_fraction * equity
             for i in range(width):
                 denom = 1.0 - ask_row[i]
-                if denom > 0.0:
+                if denom > PRICE_ABS_EPS:
                     k = (
                         probabilities[i]
                         - (1.0 - probabilities[i]) * ask_row[i] / denom
                     )
-                    if k > 0.0:
+                    if k > PRICE_ABS_EPS:
                         target[i] = k * fraction / ask_row[i]
                         continue
                 target[i] = 0.0
         else:
             denominator = 1.0 - ask_row
-            kelly = probabilities - (1.0 - probabilities) * ask_row / denominator
-            kelly = np.where((denominator > 0.0) & (kelly > 0.0), kelly, 0.0)
+            kelly = probabilities - (1.0 - probabilities) * ask_row / np.where(
+                denominator > PRICE_ABS_EPS, denominator, 1.0
+            )
+            kelly = np.where((denominator > PRICE_ABS_EPS) & (kelly > PRICE_ABS_EPS), kelly, 0.0)
             stake_cash = kelly * self.custom_fraction * equity
             np.divide(stake_cash, ask_row, out=target)
         return None

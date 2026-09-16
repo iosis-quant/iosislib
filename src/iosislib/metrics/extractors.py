@@ -93,7 +93,7 @@ class MaxDrawdown(MetricExtractor):
             raise ValueError("MaxDrawdown requires at least two rows")
         peak = np.maximum.accumulate(equity)
         with np.errstate(divide="ignore", invalid="ignore"):
-            drawdown = np.where(peak > 0.0, (peak - equity) / peak, 0.0)
+            drawdown = np.where(peak > 1e-12, (peak - equity) / peak, 0.0)
         return {"max_drawdown": float(np.max(drawdown))}
 
 

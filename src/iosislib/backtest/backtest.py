@@ -12,6 +12,14 @@ import numpy.typing as npt
 import polars as pl
 
 from iosislib.backtest.feeds import Feed, L1Feed, L2Feed
+from iosislib.backtest._tolerances import (
+    FILL_ABS_EPS,
+    cost_eps,
+    has_fill,
+    is_ruined,
+    is_zero_fill,
+    is_zero_qty,
+)
 from iosislib.backtest.policy import (
     Array,
     MarketState,
@@ -493,7 +501,7 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         bid_row = bid[row]
         width = order_row.shape[0]
         equity = cash + float(np.dot(balances, bid_row))
-        if equity <= 0.0:
+        if is_ruined(equity, cash):
             if width < 8:
                 for asset in range(width):
                     position = float(balances[asset])
@@ -515,11 +523,12 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         if width < 8:
             for asset in range(width):
                 quantity = float(order_row[asset])
-                if quantity == 0.0:
+                if is_zero_qty(quantity):
+                    order_row[asset] = 0.0
                     continue
                 if quantity > 0.0:
                     spread = float(ask_row[asset]) - float(bid_row[asset])
-                    if equity - quantity * spread < 0.0:
+                    if equity - quantity * spread < -cost_eps(equity):
                         order_row[asset] = 0.0
                         continue
                     equity -= quantity * spread
@@ -529,12 +538,13 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
                 balances[asset] += quantity
             return cash, False
         executed = np.array(order_row, dtype=np.float64, copy=True)
+        executed[np.abs(executed) <= 1e-12] = 0.0
         run = equity
         for asset in range(width):
             quantity = float(executed[asset])
             if quantity > 0.0:
                 spread = float(ask_row[asset]) - float(bid_row[asset])
-                if run - quantity * spread < 0.0:
+                if run - quantity * spread < -cost_eps(run):
                     executed[asset] = 0.0
                 else:
                     run -= quantity * spread
@@ -604,13 +614,13 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         width = requested.shape[0]
         mark_row = marks[row]
         equity = cash + float(np.dot(balances, mark_row))
-        if equity <= 0.0 and not force:
+        if is_ruined(equity, cash) and not force:
             requested[:] = -balances
             limits = None
             force = True
         for asset in range(width):
             quantity = float(requested[asset])
-            if quantity == 0.0:
+            if is_zero_qty(quantity):
                 fill_price[row, asset] = 0.0
                 unfilled[row, asset] = 0.0
                 requested[asset] = 0.0
@@ -665,13 +675,13 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
                         )[::-1]
                         filled = float(take.sum())
                         cost = float(np.dot(take, grid[bottom:]))
-            if filled > 0.0:
+            if has_fill(filled):
                 average = cost / filled
                 signed_fill = filled if buying else -filled
                 if (
                     not force
                     and equity + signed_fill * (float(mark_row[asset]) - average)
-                    < 0.0
+                    < -cost_eps(equity)
                 ):
                     requested[asset] = 0.0
                     fill_price[row, asset] = 0.0
@@ -715,7 +725,7 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
             )
         mark_row = marks[row]
         equity = cash + float(np.dot(balances, mark_row))
-        if equity <= 0.0:
+        if is_ruined(equity, cash):
             requested[:] = -balances
             cash, _ = BacktestTSFN._execute_l2_narrow(
                 cash, balances, orders, bid_depth, ask_depth, row, None,
@@ -723,7 +733,8 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
             )
             return cash, True
         quantity = requested.copy()
-        if not quantity.any():
+        quantity[np.abs(quantity) <= 1e-12] = 0.0
+        if not np.any(np.abs(quantity) > 1e-12):
             fill_price[row] = 0.0
             unfilled[row] = 0.0
             requested[:] = 0.0
@@ -766,16 +777,18 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         run = equity
         for asset in range(width):
             fill = float(filled[asset])
-            if fill == 0.0:
+            if is_zero_fill(fill):
+                filled[asset] = 0.0
+                cost[asset] = 0.0
                 continue
             avg = float(cost[asset]) / fill
             signed = fill if float(quantity[asset]) > 0.0 else -fill
-            if run + signed * (float(mark_row[asset]) - avg) < 0.0:
+            if run + signed * (float(mark_row[asset]) - avg) < -cost_eps(run):
                 filled[asset] = 0.0
                 cost[asset] = 0.0
             else:
                 run += signed * (float(mark_row[asset]) - avg)
-        has_fill = filled > 0.0
+        has_fill = filled > FILL_ABS_EPS
         average = np.zeros(width, dtype=np.float64)
         average[has_fill] = cost[has_fill] / filled[has_fill]
         signed_fill = np.where(quantity > 0.0, filled, -filled)

@@ -590,6 +590,7 @@ class MetricThresholdScheduler(Scheduler):
     metric_name: str
     threshold: float
     check_every: int
+    tolerance: float = 0.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.metric_name, str) or not self.metric_name:
@@ -606,11 +607,20 @@ class MetricThresholdScheduler(Scheduler):
             or self.check_every < 1
         ):
             raise ValueError("check_every must be a positive integer")
+        if isinstance(self.tolerance, bool) or not isinstance(
+            self.tolerance, (int, float)
+        ):
+            raise TypeError("tolerance must be numeric")
+        if not isfinite(float(self.tolerance)) or float(self.tolerance) < 0.0:
+            raise ValueError("tolerance must be a non-negative finite number")
 
     def _decide(self, context: ScheduleContext) -> ScheduleDecision:
         observed = context.metric(self.metric_name)
         return ScheduleDecision(
-            retrain=(observed is not None and observed > self.threshold),
+            retrain=(
+                observed is not None
+                and observed > float(self.threshold) + float(self.tolerance)
+            ),
             predict_until=min(
                 context.rows_seen + self.check_every,
                 context.total_rows,
@@ -696,7 +706,7 @@ def metric_threshold_scheduler_from_declaration(
 ) -> MetricThresholdScheduler:
     if not isinstance(value, Mapping):
         raise TypeError("scheduler.metric must be a mapping")
-    allowed = {"name", "metric_name", "threshold", "check_every"}
+    allowed = {"name", "metric_name", "threshold", "check_every", "tolerance"}
     _reject_keys(value, allowed, "scheduler.metric")
     if "metric_name" in value and "name" in value:
         raise ValueError(
@@ -707,6 +717,7 @@ def metric_threshold_scheduler_from_declaration(
         metric_name=metric_name,
         threshold=cast(Any, value.get("threshold")),
         check_every=cast(Any, value.get("check_every")),
+        tolerance=cast(Any, value.get("tolerance", 0.0)),
     )
 
 

@@ -158,8 +158,8 @@ class L2Feed(Feed):
         )
         levels = self.depth_levels
         grid = np.arange(levels, dtype=np.float64) * self.tick
-        bid_mask = bid > 0.0
-        ask_mask = ask > 0.0
+        bid_mask = bid > 1e-12
+        ask_mask = ask > 1e-12
         bid_idx = levels - 1 - bid_mask[:, :, ::-1].argmax(axis=-1)
         ask_idx = ask_mask.argmax(axis=-1)
         best_bid_mat = np.where(

@@ -18,6 +18,7 @@ from iosislib.core.model import (
     Scheduler,
     SupervisedModel,
 )
+from iosislib.backtest._tolerances import SIGNAL_ABS_EPS
 from iosislib.core.utils import (
     _canonical_json,
     _serialize_value,
@@ -547,18 +548,18 @@ class ThresholdPolicy(Policy):
             neg_short = -self.short_qty
             for i in range(width):
                 s = signal[i]
-                if s > threshold:
+                if s > threshold + SIGNAL_ABS_EPS:
                     target[i] = long_qty
-                elif s < -threshold:
+                elif s < -threshold - SIGNAL_ABS_EPS:
                     target[i] = neg_short
                 else:
                     target[i] = 0.0
         else:
             neg_short = -self.short_qty
             orders[row] = np.where(
-                signal > self.threshold,
+                signal > self.threshold + SIGNAL_ABS_EPS,
                 self.long_qty,
-                np.where(signal < -self.threshold, neg_short, 0.0),
+                np.where(signal < -self.threshold - SIGNAL_ABS_EPS, neg_short, 0.0),
             )
         return None
 
