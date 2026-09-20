@@ -365,6 +365,18 @@ inputs and produce one output:
 Feature and target widths are derived from the bound columns; they can be
 declared explicitly, in which case they must match the bindings.
 
+> **Null policy warning.** Model inputs default to loud null failure: a single
+> null in `features` or `target` aborts execution instead of training. Upstream
+> transforms almost always produce warm-up nulls (e.g. the first `pct_change`
+> row, which then propagates through `rolling_*`), so always declare per-input
+> handling on model inputs — `nulls: drop`, or `nulls: fill` with an explicit
+> `fill` value. Omitting it is the most common reason a first model run fails.
+
+> **Warmup predictions are NaN.** Walk-forward models only predict rows after a
+> retraining boundary. With the default `{ every: 100 }` scheduler the first 100
+> predictions are NaN; exclude warm-up rows before computing metrics over the
+> full series.
+
 A model regresses the target on the features in walk-forward segments. The
 `params` for `model.light_gbm` are:
 

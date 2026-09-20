@@ -577,7 +577,7 @@ class LocalExecutor(Executor):
 
     def _write_cache_s3(self, node_id: str, df: pl.DataFrame) -> None:
         try:
-            from pyarrow.fs import FileType
+            from pyarrow.fs import FileSelector, FileType
 
             key_prefix = self._cache_entry_key(node_id)
             bare = key_prefix.removeprefix("s3://")
@@ -588,11 +588,17 @@ class LocalExecutor(Executor):
             manifest_key = f"{bare}/manifest.json"
             self._delete_legacy_shards(filesystem, bare, manifest_key)
 
-            # Remove stale part-*.parquet from previous writes
-            for shard_info in filesystem.get_file_info(
-                f"{bare}/part-*.parquet"
-            ):
-                if shard_info.type == FileType.File:
+            # Remove stale part-*.parquet from previous writes. Note:
+            # get_file_info() with a plain string returns a single FileInfo
+            # (it does not glob), so list via a selector instead.
+            selector = FileSelector(bare, recursive=False)
+            for shard_info in filesystem.get_file_info(selector):
+                if shard_info.type != FileType.File:
+                    continue
+                shard_name = shard_info.path.rsplit("/", 1)[-1]
+                if shard_name.startswith("part-") and shard_name.endswith(
+                    ".parquet"
+                ):
                     filesystem.delete_file(shard_info.path)
 
             import io

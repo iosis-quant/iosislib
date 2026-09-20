@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from datetime import datetime
 from pathlib import Path
@@ -608,6 +609,172 @@ class TestS3Cache:
         with _s3_credentials_scope(None):
             opts = executor._s3_storage_options()
         assert opts == {}
+
+
+class _FakeS3FileSystem:
+    """In-memory stand-in for pyarrow.fs.S3FileSystem.
+
+    Implements just enough of the surface used by the node cache
+    (create_dir / get_file_info for paths and selectors / input and output
+    streams / delete_file) so S3 cache tests run without moto or network.
+    """
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+
+    def create_dir(self, path: str, recursive: bool = False) -> None:
+        del recursive
+        self.objects.setdefault(path.rstrip("/") + "/", b"")
+
+    def get_file_info(self, target: object) -> object:
+        from pyarrow.fs import FileInfo, FileSelector, FileType
+
+        if isinstance(target, FileSelector):
+            base = target.base_dir.rstrip("/")
+            entries = []
+            for key in sorted(self.objects):
+                if key.endswith("/"):
+                    continue
+                if not (key == base or key.startswith(base + "/")):
+                    continue
+                if not target.recursive and "/" in key[len(base) + 1 :]:
+                    continue
+                entries.append(
+                    FileInfo(key, FileType.File, size=len(self.objects[key]))
+                )
+            return entries
+        key = str(target)
+        data = self.objects.get(key)
+        if data is not None and not key.endswith("/"):
+            return FileInfo(key, FileType.File, size=len(data))
+        if key.endswith("/") or any(
+            stored.startswith(key.rstrip("/") + "/")
+            for stored in self.objects
+        ):
+            return FileInfo(key, FileType.Directory)
+        return FileInfo(key, FileType.NotFound)
+
+    def open_input_stream(self, key: str) -> io.BytesIO:
+        return io.BytesIO(self.objects[key])
+
+    def open_output_stream(self, key: str) -> io.BytesIO:
+        store = self.objects
+
+        class _CommittingStream(io.BytesIO):
+            def close(w) -> None:  # noqa: ANN202 - BytesIO.close signature
+                if not w.closed:
+                    store[key] = w.getvalue()
+                super().close()
+
+        return _CommittingStream()
+
+    def delete_file(self, key: str) -> None:
+        del self.objects[key]
+
+
+def _wire_fake_s3(
+    monkeypatch, executor: LocalExecutor, fake: _FakeS3FileSystem, tmp_path: Path
+) -> None:
+    """Route an executor's S3 filesystem and parquet scans at the fake store."""
+    monkeypatch.setattr(executor, "_open_s3_filesystem", lambda: fake)
+
+    real_scan = pl.scan_parquet
+
+    def _fake_scan(source, **kwargs):
+        if isinstance(source, list):
+            return real_scan(source, **kwargs)
+        assert str(source).startswith("s3://fake-bucket/"), source
+        base = str(source).removesuffix("/*.parquet").removeprefix("s3://")
+        paths = []
+        for key in sorted(fake.objects):
+            if key.startswith(base + "/") and key.endswith(".parquet"):
+                local = tmp_path / ("dl_" + key.replace("/", "_"))
+                local.write_bytes(fake.objects[key])
+                paths.append(str(local))
+        assert paths, f"nothing stored under {base}"
+        return real_scan(paths, **kwargs)
+
+    monkeypatch.setattr(pl, "scan_parquet", _fake_scan)
+
+
+class TestS3CacheRoundTrip:
+    NODE_ID = "ab" * 32
+
+    def test_write_then_read_roundtrip(self, tmp_path, monkeypatch) -> None:
+        from polars.testing import assert_frame_equal
+
+        fake = _FakeS3FileSystem()
+        executor = LocalExecutor(cache_dir="s3://fake-bucket/cache")
+        _wire_fake_s3(monkeypatch, executor, fake, tmp_path)
+
+        df = pl.DataFrame(
+            {
+                "timestamp": [datetime(2026, 1, 1), datetime(2026, 1, 2)],
+                "value": [1.0, 2.0],
+            }
+        )
+        executor._write_cache_s3(self.NODE_ID, df)
+
+        bare = f"fake-bucket/cache/{self.NODE_ID[:2]}/{self.NODE_ID[2:4]}"
+        bare += f"/{self.NODE_ID[4:6]}/{self.NODE_ID[6:]}"
+        manifest = json.loads(fake.objects[f"{bare}/manifest.json"])
+        assert manifest["success"] is True
+        assert manifest["row_count"] == 2
+        assert f"{bare}/part-00000.parquet" in fake.objects
+
+        lazy = executor._read_cache_s3(self.NODE_ID)
+        assert lazy is not None
+        assert_frame_equal(lazy.collect(), df)
+
+    def test_write_removes_stale_shards(self, tmp_path, monkeypatch) -> None:
+        fake = _FakeS3FileSystem()
+        executor = LocalExecutor(cache_dir="s3://fake-bucket/cache")
+        _wire_fake_s3(monkeypatch, executor, fake, tmp_path)
+
+        bare = f"fake-bucket/cache/{self.NODE_ID[:2]}/{self.NODE_ID[2:4]}"
+        bare += f"/{self.NODE_ID[4:6]}/{self.NODE_ID[6:]}"
+        # Simulate a previous 3-shard write.
+        for idx in range(3):
+            fake.objects[f"{bare}/part-{idx:05d}.parquet"] = b"stale"
+        fake.objects[f"{bare}/manifest.json"] = b'{"success": true}'
+
+        df = pl.DataFrame(
+            {
+                "timestamp": [datetime(2026, 1, 1)],
+                "value": [1.0],
+            }
+        )
+        executor._write_cache_s3(self.NODE_ID, df)
+
+        remaining = sorted(
+            key
+            for key in fake.objects
+            if key.startswith(bare + "/") and not key.endswith("/")
+        )
+        assert remaining == [f"{bare}/manifest.json", f"{bare}/part-00000.parquet"]
+
+    def test_second_executor_hits_s3_cache(self, tmp_path, monkeypatch) -> None:
+        from polars.testing import assert_frame_equal
+
+        fake = _FakeS3FileSystem()
+        first = LocalExecutor(cache_dir="s3://fake-bucket/cache")
+        _wire_fake_s3(monkeypatch, first, fake, tmp_path)
+        graph = _make_transform_graph()
+        expected = graph.execute(executor=first)
+
+        second = LocalExecutor(cache_dir="s3://fake-bucket/cache")
+        _wire_fake_s3(monkeypatch, second, fake, tmp_path)
+        required, hits = second._resolve_cache_frontier(graph)
+        assert graph.root_node.ID in hits
+
+        actual = graph.execute(executor=second)
+        assert_frame_equal(actual, expected)
+
+    def test_s3_miss_when_prefix_empty(self, tmp_path, monkeypatch) -> None:
+        fake = _FakeS3FileSystem()
+        executor = LocalExecutor(cache_dir="s3://fake-bucket/cache")
+        _wire_fake_s3(monkeypatch, executor, fake, tmp_path)
+        assert executor._read_cache_s3(self.NODE_ID) is None
 
 
 # ---------------------------------------------------------------------------

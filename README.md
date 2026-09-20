@@ -74,6 +74,23 @@ materialization declaration, so previously-computed frames are reused across
 runs and strategies sharing the same node identity. Only nodes declared with
 `materialize: true` are collected and written back to the cache.
 
+## Walk-forward models: warmup and null policy
+
+Supervised model TSFNs (`iosislib.models`: LightGBM, DenseMLP, CNN) consume
+exactly `features` and `target` and emit `prediction`. Two behaviors surprise
+first-time users:
+
+- **Warmup predictions are NaN.** Models train in walk-forward segments and only
+  predict rows after a retraining boundary. With the default `{ every: 100 }`
+  scheduler the first 100 predictions are NaN. Exclude warm-up rows before
+  computing metrics over the full series.
+- **Models fail loudly on nulls.** A single null in `features` or `target`
+  raises instead of training (`NullPolicy.ERROR` is the default). Upstream
+  transforms almost always produce warm-up nulls (e.g. the first `pct_change`
+  row, which then propagates through `rolling_*`), so declare per-input handling
+  on every model input — `nulls: drop`, or `nulls: fill` with an explicit `fill`
+  value. Omitting it is the most common reason a first model run fails.
+
 ## Parquet data sources
 
 `ParquetSource` accepts a local file, a local directory, an S3 object, or an S3
