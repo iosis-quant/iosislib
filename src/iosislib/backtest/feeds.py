@@ -102,75 +102,102 @@ class L1Feed(Feed):
 
 @dataclass(frozen=True)
 class L2Feed(Feed):
-    VERSION = "1.0.0"
-    bid_depth_column: str = "bid_depth"
-    ask_depth_column: str = "ask_depth"
-    depth_levels: int = 101
-    tick: float = 0.01
+    """Level-2 book with N price+volume levels per side of the midpoint.
+
+    Each side is stored best-first as a fixed-size ladder: ``bid_price``
+    descends from the best bid toward the price floor, ``ask_price``
+    ascends from the best ask toward the price cap.  Prices are always
+    populated (a linear ladder by convention, see :func:`l2_ladder_prices`);
+    empty outer levels simply carry zero volume, so no price padding or
+    null sentinel is needed.
+    """
+
+    VERSION = "2.0.0"
+    bid_price_column: str = "bid_price"
+    bid_volume_column: str = "bid_volume"
+    ask_price_column: str = "ask_price"
+    ask_volume_column: str = "ask_volume"
+    depth_levels: int = 25
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if not self.bid_depth_column or not self.ask_depth_column:
-            raise ValueError("depth column names cannot be empty")
-        if self.bid_depth_column == self.ask_depth_column:
-            raise ValueError("bid and ask depth columns must differ")
+        names = (
+            self.bid_price_column,
+            self.bid_volume_column,
+            self.ask_price_column,
+            self.ask_volume_column,
+        )
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("L2 column names cannot be empty")
+        if len(set(names)) != 4:
+            raise ValueError("L2 column names must be distinct")
         if (
             isinstance(self.depth_levels, bool)
             or not isinstance(self.depth_levels, int)
             or self.depth_levels < 1
         ):
             raise ValueError("depth_levels must be a positive integer")
-        if isinstance(self.tick, bool) or not isinstance(
-            self.tick, (int, float)
-        ):
-            raise TypeError("tick must be a number")
-        if not np.isfinite(self.tick):
-            raise ValueError("tick must be finite")
-        if self.tick <= 0.0 or self.tick > 1.0:
-            raise ValueError("tick must be in (0, 1]")
 
     @property
     def columns(self) -> tuple[ColumnEntry, ...]:
         shape = (self.width, self.depth_levels)
         return (
-            (self.bid_depth_column, pl.Float64, shape),
-            (self.ask_depth_column, pl.Float64, shape),
+            (self.bid_price_column, pl.Float64, shape),
+            (self.bid_volume_column, pl.Float64, shape),
+            (self.ask_price_column, pl.Float64, shape),
+            (self.ask_volume_column, pl.Float64, shape),
         )
 
-    def depth(self, frame: pl.DataFrame) -> tuple[pl.Series, pl.Series]:
+    def depth(
+        self, frame: pl.DataFrame
+    ) -> tuple[pl.Series, pl.Series, pl.Series, pl.Series]:
         return (
-            frame.get_column(self.bid_depth_column),
-            frame.get_column(self.ask_depth_column),
+            frame.get_column(self.bid_price_column),
+            frame.get_column(self.bid_volume_column),
+            frame.get_column(self.ask_price_column),
+            frame.get_column(self.ask_volume_column),
         )
 
     def quotes(self, frame: pl.DataFrame) -> tuple[pl.Series, pl.Series]:
         from iosislib.core.utils import numpy_to_series
 
-        bid_series, ask_series = self.depth(frame)
+        bid_price, bid_volume, ask_price, ask_volume = self.depth(frame)
         shape = (self.width, self.depth_levels)
-        bid = np.asarray(
-            series_to_numpy(bid_series, shape=shape, allow_copy=True),
+        bid_px = np.asarray(
+            series_to_numpy(bid_price, shape=shape, allow_copy=True),
             dtype=np.float64,
         )
-        ask = np.asarray(
-            series_to_numpy(ask_series, shape=shape, allow_copy=True),
+        bid_vol = np.asarray(
+            series_to_numpy(bid_volume, shape=shape, allow_copy=True),
             dtype=np.float64,
         )
-        levels = self.depth_levels
-        grid = np.arange(levels, dtype=np.float64) * self.tick
-        bid_mask = bid > 1e-12
-        ask_mask = ask > 1e-12
-        bid_idx = levels - 1 - bid_mask[:, :, ::-1].argmax(axis=-1)
-        ask_idx = ask_mask.argmax(axis=-1)
+        ask_px = np.asarray(
+            series_to_numpy(ask_price, shape=shape, allow_copy=True),
+            dtype=np.float64,
+        )
+        ask_vol = np.asarray(
+            series_to_numpy(ask_volume, shape=shape, allow_copy=True),
+            dtype=np.float64,
+        )
+        # Best-first ladders: first level with resting volume is executable.
+        # A fully empty side falls back to the ladder head so marks stay defined.
+        bid_hit = bid_vol > 1e-12
+        ask_hit = ask_vol > 1e-12
+        bid_idx = np.where(
+            bid_hit.any(axis=-1), bid_hit.argmax(axis=-1), 0
+        )
+        ask_idx = np.where(
+            ask_hit.any(axis=-1), ask_hit.argmax(axis=-1), 0
+        )
         best_bid_mat = np.where(
-            bid_mask.any(axis=-1),
-            np.clip(grid[bid_idx], self.tick, 1.0),
-            self.tick,
+            bid_hit.any(axis=-1),
+            np.take_along_axis(bid_px, bid_idx[:, :, None], axis=-1)[:, :, 0],
+            bid_px[:, :, 0],
         )
         best_ask_mat = np.where(
-            ask_mask.any(axis=-1),
-            np.clip(grid[ask_idx], self.tick, 1.0),
-            1.0,
+            ask_hit.any(axis=-1),
+            np.take_along_axis(ask_px, ask_idx[:, :, None], axis=-1)[:, :, 0],
+            ask_px[:, :, 0],
         )
         return (
             numpy_to_series("bid", best_bid_mat, shape=(self.width,), allow_copy=True),
@@ -180,11 +207,73 @@ class L2Feed(Feed):
     def to_dict(self) -> dict[str, Any]:
         return {
             **super().to_dict(),
-            "bid_depth_column": self.bid_depth_column,
-            "ask_depth_column": self.ask_depth_column,
+            "bid_price_column": self.bid_price_column,
+            "ask_price_column": self.ask_price_column,
+            "bid_volume_column": self.bid_volume_column,
+            "ask_volume_column": self.ask_volume_column,
             "depth_levels": self.depth_levels,
-            "tick": self.tick,
         }
 
 
-__all__ = ["Feed", "L1Feed", "L2Feed"]
+def l2_ladder_prices(best: float, bound: float, levels: int) -> np.ndarray:
+    """Return a fixed-size linear price ladder from ``best`` to ``bound``.
+
+    Both endpoints are included, so an empty outer level still carries a
+    valid price with zero volume.  Bids typically use ``bound=0.0`` and
+    asks ``bound=1.0`` for Polymarket-style binary books.
+    """
+    if not np.isfinite(best) or not np.isfinite(bound):
+        raise ValueError("best and bound must be finite")
+    if isinstance(levels, bool) or not isinstance(levels, int) or levels < 1:
+        raise ValueError("levels must be a positive integer")
+    if levels == 1:
+        return np.array([float(best)], dtype=np.float64)
+    return np.linspace(float(best), float(bound), levels, dtype=np.float64)
+
+
+def l2_interpolate_volumes(
+    ladder: np.ndarray,
+    known_prices: np.ndarray,
+    known_volumes: np.ndarray,
+) -> np.ndarray:
+    """Linearly interpolate sparse ``known`` volumes onto a fixed ladder.
+
+    Volumes outside the observed price range map to zero.  ``ladder`` may
+    ascend or descend; interpolation is performed in ascending price order.
+    """
+    ladder_arr = np.asarray(ladder, dtype=np.float64)
+    xp = np.asarray(known_prices, dtype=np.float64)
+    fp = np.asarray(known_volumes, dtype=np.float64)
+    if ladder_arr.ndim != 1 or xp.ndim != 1 or fp.ndim != 1:
+        raise ValueError("ladder, known_prices and known_volumes must be 1-D")
+    if xp.shape != fp.shape:
+        raise ValueError("known_prices and known_volumes must have equal length")
+    if xp.size == 0:
+        return np.zeros_like(ladder_arr)
+    if not np.isfinite(ladder_arr).all():
+        raise ValueError("ladder prices must be finite")
+    order = np.argsort(xp, kind="stable")
+    return np.interp(ladder_arr, xp[order], np.maximum(fp[order], 0.0), left=0.0, right=0.0)
+
+
+def dense_l2_side_from_sparse(
+    best: float,
+    bound: float,
+    levels: int,
+    known_prices: np.ndarray,
+    known_volumes: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build a (prices, volumes) ladder from a sparse side of a book."""
+    prices = l2_ladder_prices(best, bound, levels)
+    volumes = l2_interpolate_volumes(prices, known_prices, known_volumes)
+    return prices, volumes
+
+
+__all__ = [
+    "Feed",
+    "L1Feed",
+    "L2Feed",
+    "dense_l2_side_from_sparse",
+    "l2_interpolate_volumes",
+    "l2_ladder_prices",
+]

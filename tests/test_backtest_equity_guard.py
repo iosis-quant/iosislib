@@ -17,7 +17,7 @@ from _floats import assert_float_close, assert_lists_close
 
 
 START = datetime(2026, 1, 1)
-LEVELS = 101
+LEVELS = 4
 
 
 def l1_frame(
@@ -42,12 +42,17 @@ def l1_frame(
 
 
 def l2_frame(
-    bid_depth: np.ndarray,
-    ask_depth: np.ndarray,
+    bid_price: np.ndarray,
+    bid_volume: np.ndarray,
+    ask_price: np.ndarray,
+    ask_volume: np.ndarray,
     signal: list[list[float]],
 ) -> pl.DataFrame:
-    rows, width, levels = bid_depth.shape
+    rows, width, levels = bid_price.shape
     assert levels == LEVELS
+    assert bid_volume.shape == (rows, width, levels)
+    assert ask_price.shape == (rows, width, levels)
+    assert ask_volume.shape == (rows, width, levels)
     return pl.DataFrame(
         [
             pl.Series(
@@ -56,17 +61,45 @@ def l2_frame(
                 dtype=pl.Datetime,
             ),
             pl.Series(
-                "bid_depth",
-                bid_depth.reshape(rows, -1).tolist(),
+                "bid_price",
+                bid_price.reshape(rows, -1).tolist(),
                 dtype=pl.Array(pl.Float64, width * levels),
             ),
             pl.Series(
-                "ask_depth",
-                ask_depth.reshape(rows, -1).tolist(),
+                "bid_volume",
+                bid_volume.reshape(rows, -1).tolist(),
+                dtype=pl.Array(pl.Float64, width * levels),
+            ),
+            pl.Series(
+                "ask_price",
+                ask_price.reshape(rows, -1).tolist(),
+                dtype=pl.Array(pl.Float64, width * levels),
+            ),
+            pl.Series(
+                "ask_volume",
+                ask_volume.reshape(rows, -1).tolist(),
                 dtype=pl.Array(pl.Float64, width * levels),
             ),
             pl.Series("signal", signal, dtype=pl.Array(pl.Float64, width)),
         ]
+    )
+
+
+def l2_book(
+    rows: int,
+    width: int,
+    *,
+    bid_head: float = 0.40,
+    ask_head: float = 0.50,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return empty best-first ladders with valid prices and zero volumes."""
+    bid_price = np.zeros((rows, width, LEVELS))
+    ask_price = np.zeros((rows, width, LEVELS))
+    for i in range(LEVELS):
+        bid_price[:, :, i] = max(bid_head - 0.10 * i, 0.01)
+        ask_price[:, :, i] = min(ask_head + 0.10 * i, 1.0)
+    return bid_price, np.zeros((rows, width, LEVELS)), ask_price, np.zeros(
+        (rows, width, LEVELS)
     )
 
 
@@ -83,7 +116,10 @@ def run_l1(
 def run_l2(
     frame: pl.DataFrame, width: int, initial_cash: float
 ) -> pl.DataFrame:
-    feed = L2Feed(Venue("test", tuple(f"A{i}" for i in range(width))))
+    feed = L2Feed(
+        Venue("test", tuple(f"A{i}" for i in range(width))),
+        depth_levels=LEVELS,
+    )
     node = BacktestTSFN(
         BacktestConfig(feed=feed, policy=SignalPolicy(), initial_cash=initial_cash)
     )
@@ -168,12 +204,11 @@ def test_l1_wide_gates_assets_in_order() -> None:
 
 
 def test_l2_blocks_fill_on_slippage_breach() -> None:
-    bid = np.zeros((1, 1, LEVELS))
-    ask = np.zeros((1, 1, LEVELS))
-    bid[0, 0, 40] = 10.0
-    ask[0, 0, 50] = 5.0
-    ask[0, 0, 60] = 5.0
-    frame = l2_frame(bid, ask, [[10.0]])
+    bid_price, bid_volume, ask_price, ask_volume = l2_book(1, 1)
+    bid_volume[0, 0, 0] = 10.0
+    ask_volume[0, 0, 0] = 5.0
+    ask_volume[0, 0, 1] = 5.0
+    frame = l2_frame(bid_price, bid_volume, ask_price, ask_volume, [[10.0]])
     result = run_l2(frame, 1, 1.0)
     assert_lists_close(result.get_column("order").to_list(), [[0.0]])
     assert_lists_close(result.get_column("unfilled").to_list(), [[10.0]])
@@ -181,15 +216,18 @@ def test_l2_blocks_fill_on_slippage_breach() -> None:
 
 
 def test_l2_liquidates_on_ruin_then_freezes() -> None:
-    bid = np.zeros((3, 1, LEVELS))
-    ask = np.zeros((3, 1, LEVELS))
-    bid[0, 0, 40] = 10.0
-    ask[0, 0, 50] = 10.0
-    bid[1, 0, 1] = 10.0
-    ask[1, 0, 50] = 10.0
-    bid[2, 0, 1] = 10.0
-    ask[2, 0, 50] = 10.0
-    frame = l2_frame(bid, ask, [[10.0], [3.0], [3.0]])
+    bid_price, bid_volume, ask_price, ask_volume = l2_book(3, 1)
+    bid_volume[0, 0, 0] = 10.0
+    ask_volume[0, 0, 0] = 10.0
+    bid_price[1, 0] = np.array([0.01, 0.01, 0.01, 0.01])
+    bid_volume[1, 0, 0] = 10.0
+    ask_volume[1, 0, 0] = 10.0
+    bid_price[2, 0] = np.array([0.01, 0.01, 0.01, 0.01])
+    bid_volume[2, 0, 0] = 10.0
+    ask_volume[2, 0, 0] = 10.0
+    frame = l2_frame(
+        bid_price, bid_volume, ask_price, ask_volume, [[10.0], [3.0], [3.0]]
+    )
     result = run_l2(frame, 1, 1.0)
     assert_lists_close(result.get_column("order").to_list(), [[10.0], [-10.0], [0.0]])
     assert_lists_close(result.get_column("proposed_order").to_list(), [[10.0], [3.0], [0.0]])
@@ -201,16 +239,17 @@ def test_l2_liquidates_on_ruin_then_freezes() -> None:
 
 def test_l2_wide_liquidates_through_dispatcher() -> None:
     width = 8
-    bid = np.zeros((3, width, LEVELS))
-    ask = np.zeros((3, width, LEVELS))
-    bid[0, 0, 40] = 10.0
-    ask[0, 0, 50] = 10.0
-    bid[1, 0, 1] = 10.0
-    ask[1, 0, 50] = 10.0
-    bid[2, 0, 1] = 10.0
-    ask[2, 0, 50] = 10.0
+    bid_price, bid_volume, ask_price, ask_volume = l2_book(3, width)
+    bid_volume[0, 0, 0] = 10.0
+    ask_volume[0, 0, 0] = 10.0
+    bid_price[1, 0] = np.array([0.01, 0.01, 0.01, 0.01])
+    bid_volume[1, 0, 0] = 10.0
+    ask_volume[1, 0, 0] = 10.0
+    bid_price[2, 0] = np.array([0.01, 0.01, 0.01, 0.01])
+    bid_volume[2, 0, 0] = 10.0
+    ask_volume[2, 0, 0] = 10.0
     signal = [[10.0] + [0.0] * 7, [3.0] + [0.0] * 7, [3.0] + [0.0] * 7]
-    frame = l2_frame(bid, ask, signal)
+    frame = l2_frame(bid_price, bid_volume, ask_price, ask_volume, signal)
     result = run_l2(frame, width, 1.0)
     assert_float_close(result.get_column("order").to_list()[1][0], -10.0)
     assert_lists_close(result.get_column("order").to_list()[2], [0.0] * width)
@@ -221,14 +260,15 @@ def test_l2_wide_liquidates_through_dispatcher() -> None:
 
 def test_l2_wide_voids_breaching_asset_only() -> None:
     width = 8
-    bid = np.zeros((1, width, LEVELS))
-    ask = np.zeros((1, width, LEVELS))
-    bid[:, :, 40] = 10.0
-    bid[0, 1, 49] = 10.0
-    ask[0, 0, 90] = 50.0
-    ask[0, 1, 50] = 10.0
+    bid_price, bid_volume, ask_price, ask_volume = l2_book(1, width)
+    bid_volume[0, :, 0] = 10.0
+    bid_price[0, 1, 0] = 0.49
+    bid_volume[0, 1, 0] = 10.0
+    ask_price[0, 0] = np.array([0.90, 0.95, 1.00, 1.00])
+    ask_volume[0, 0, 0] = 50.0
+    ask_volume[0, 1, 0] = 10.0
     signal = [[100.0, 1.0] + [0.0] * 6]
-    frame = l2_frame(bid, ask, signal)
+    frame = l2_frame(bid_price, bid_volume, ask_price, ask_volume, signal)
     result = run_l2(frame, width, 5.0)
     assert_lists_close(result.get_column("order").to_list(), [[0.0, 1.0] + [0.0] * 6])
     assert_float_close(result.get_column("unfilled").to_list()[0][0], 100.0)

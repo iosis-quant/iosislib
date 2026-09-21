@@ -126,7 +126,7 @@ def generate_l2_market_data(
     width: int,
     rng: np.random.Generator,
     *,
-    levels: int = 101,
+    levels: int = 25,
     tick: float = 0.01,
     with_limit: bool = False,
 ) -> pl.DataFrame:
@@ -135,28 +135,30 @@ def generate_l2_market_data(
     for row in range(1, rows):
         mid[row] = mid[row - 1] + rng.normal(0, 0.02, width) + (0.5 - mid[row - 1]) * 0.01
     mid = np.clip(mid, 0.03, 0.97)
-    spread_ticks = 1 + rng.geometric(0.4, (rows, width)).astype(int)
+    spread = (1 + rng.geometric(0.4, (rows, width)).astype(float)) * tick
     thin = rng.random((rows, width)) < 0.08
-    spread_ticks = np.where(thin, spread_ticks + rng.integers(4, 20, (rows, width)), spread_ticks)
-    best_bid_idx = np.clip(np.round((mid - spread_ticks * tick / 2) / tick).astype(int), 1, levels - 2)
-    best_ask_idx = np.clip(best_bid_idx + spread_ticks, 1, levels - 1)
-    grid = np.arange(levels, dtype=np.float64)
-    bid_dist = best_bid_idx[:, :, None] - grid[None, None, :]
-    ask_dist = grid[None, None, :] - best_ask_idx[:, :, None]
+    spread = np.where(thin, spread + rng.integers(4, 20, (rows, width)) * tick, spread)
+    best_bid = np.clip(mid - spread / 2, tick, 1.0 - tick)
+    best_ask = np.clip(mid + spread / 2, tick, 1.0)
+    step = np.arange(levels, dtype=np.float64)[None, None, :]
+    bid_price = best_bid[:, :, None] + (0.0 - best_bid)[:, :, None] * (step / max(levels - 1, 1))
+    ask_price = best_ask[:, :, None] + (1.0 - best_ask)[:, :, None] * (step / max(levels - 1, 1))
     base = rng.lognormal(3.0, 1.0, (rows, width, 1))
     decay = rng.uniform(2.0, 6.0, (rows, width, 1))
     noise = rng.lognormal(0.0, 0.5, (rows, width, levels))
-    bid_depth = np.where(bid_dist >= 0, base * np.exp(-bid_dist / decay) * noise, 0.0)
-    ask_depth = np.where(ask_dist >= 0, base * np.exp(-ask_dist / decay) * noise, 0.0)
+    bid_volume = np.round(base * np.exp(-step / decay) * noise, 2)
+    ask_volume = np.round(base * np.exp(-step / decay) * rng.lognormal(0.0, 0.5, (rows, width, levels)), 2)
     empty_bid = rng.random((rows, width, 1)) < 0.03
     empty_ask = rng.random((rows, width, 1)) < 0.03
-    bid_depth = np.where(empty_bid, 0.0, bid_depth)
-    ask_depth = np.where(empty_ask, 0.0, ask_depth)
+    bid_volume = np.where(empty_bid, 0.0, bid_volume)
+    ask_volume = np.where(empty_ask, 0.0, ask_volume)
     signal = np.round(rng.normal(0, 8, (rows, width)), 2)
     columns: dict[str, Any] = {
         "timestamp": _timestamp_column(rows),
-        "bid_depth": numpy_to_series("bid_depth", np.round(bid_depth, 2), allow_copy=True, shape=(width, levels)),
-        "ask_depth": numpy_to_series("ask_depth", np.round(ask_depth, 2), allow_copy=True, shape=(width, levels)),
+        "bid_price": numpy_to_series("bid_price", np.round(bid_price, 4), allow_copy=True, shape=(width, levels)),
+        "bid_volume": numpy_to_series("bid_volume", bid_volume, allow_copy=True, shape=(width, levels)),
+        "ask_price": numpy_to_series("ask_price", np.round(ask_price, 4), allow_copy=True, shape=(width, levels)),
+        "ask_volume": numpy_to_series("ask_volume", ask_volume, allow_copy=True, shape=(width, levels)),
         "signal": numpy_to_series("signal", signal, allow_copy=True, shape=(width,)),
     }
     if with_limit:
@@ -318,7 +320,7 @@ class DatasetSpec:
     format: str = "csv"
     stream: bool = False
     chunk_rows: int = 50_000
-    levels: int = 101
+    levels: int = 25
     with_limit: bool = False
 
 

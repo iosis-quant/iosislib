@@ -1,4 +1,4 @@
-# L2 backtester scenarios: aggregated CLOB depth (101 ticks) execution
+# L2 backtester scenarios: price+volume ladders (50 levels/side) execution
 # Tests L2 depth-walk performance across row counts and asset widths
 #
 # Run: python performance/test_perf.py --scenario backtest_l2_scale
@@ -11,6 +11,7 @@ scenarios:
       rows: 10_000
       width: 1
       domain: l2_market_data
+      levels: 50
       format: parquet
     strategy:
       format: iosis.strategy
@@ -19,28 +20,36 @@ scenarios:
       nodes:
         market_data:
           op: source.parquet_source
-          version: "0.3.0"
+          version: "0.4.0"
           params:
             path: ../data/perf_backtest_l2_10k_1a.parquet
             content_sha256: FILL_HASH
             schema:
               time: timestamp
               columns:
-                bid_depth:
+                bid_price:
                   dtype: float64
-                  shape: [1, 101]
-                ask_depth:
+                  shape: [1, 50]
+                bid_volume:
                   dtype: float64
-                  shape: [1, 101]
+                  shape: [1, 50]
+                ask_price:
+                  dtype: float64
+                  shape: [1, 50]
+                ask_volume:
+                  dtype: float64
+                  shape: [1, 50]
                 signal:
                   dtype: float64
                   shape: [1]
         simulation:
           op: backtest.backtest
-          version: "1.5.0"
+          version: "2.0.0"
           inputs:
-            bid_depth: market_data.bid_depth
-            ask_depth: market_data.ask_depth
+            bid_price: market_data.bid_price
+            bid_volume: market_data.bid_volume
+            ask_price: market_data.ask_price
+            ask_volume: market_data.ask_volume
             signal: market_data.signal
           params:
             initial_cash: 1000000
@@ -49,8 +58,7 @@ scenarios:
               venue:
                 name: bench
                 universe: [A0]
-              depth_levels: 101
-              tick: 0.01
+              depth_levels: 50
             policy:
               kind: signal
               signal_column: signal
@@ -68,6 +76,7 @@ scenarios:
       rows: 5_000
       width: 8
       domain: l2_market_data
+      levels: 50
       format: parquet
     strategy:
       format: iosis.strategy
@@ -76,28 +85,36 @@ scenarios:
       nodes:
         market_data:
           op: source.parquet_source
-          version: "0.3.0"
+          version: "0.4.0"
           params:
             path: ../data/perf_backtest_l2_5k_8a.parquet
             content_sha256: FILL_HASH
             schema:
               time: timestamp
               columns:
-                bid_depth:
+                bid_price:
                   dtype: float64
-                  shape: [8, 101]
-                ask_depth:
+                  shape: [8, 50]
+                bid_volume:
                   dtype: float64
-                  shape: [8, 101]
+                  shape: [8, 50]
+                ask_price:
+                  dtype: float64
+                  shape: [8, 50]
+                ask_volume:
+                  dtype: float64
+                  shape: [8, 50]
                 signal:
                   dtype: float64
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "1.5.0"
+          version: "2.0.0"
           inputs:
-            bid_depth: market_data.bid_depth
-            ask_depth: market_data.ask_depth
+            bid_price: market_data.bid_price
+            bid_volume: market_data.bid_volume
+            ask_price: market_data.ask_price
+            ask_volume: market_data.ask_volume
             signal: market_data.signal
           params:
             initial_cash: 1000000
@@ -106,8 +123,7 @@ scenarios:
               venue:
                 name: bench
                 universe: [A0, A1, A2, A3, A4, A5, A6, A7]
-              depth_levels: 101
-              tick: 0.01
+              depth_levels: 50
             policy:
               kind: signal
               signal_column: signal
@@ -125,6 +141,7 @@ scenarios:
       rows: 5_000
       width: 8
       domain: l2_market_data
+      levels: 50
       with_limit: true
       format: parquet
     strategy:
@@ -134,19 +151,25 @@ scenarios:
       nodes:
         market_data:
           op: source.parquet_source
-          version: "0.3.0"
+          version: "0.4.0"
           params:
             path: ../data/perf_backtest_l2_5k_8a_limit.parquet
             content_sha256: FILL_HASH
             schema:
               time: timestamp
               columns:
-                bid_depth:
+                bid_price:
                   dtype: float64
-                  shape: [8, 101]
-                ask_depth:
+                  shape: [8, 50]
+                bid_volume:
                   dtype: float64
-                  shape: [8, 101]
+                  shape: [8, 50]
+                ask_price:
+                  dtype: float64
+                  shape: [8, 50]
+                ask_volume:
+                  dtype: float64
+                  shape: [8, 50]
                 signal:
                   dtype: float64
                   shape: [8]
@@ -155,10 +178,12 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "1.5.0"
+          version: "2.0.0"
           inputs:
-            bid_depth: market_data.bid_depth
-            ask_depth: market_data.ask_depth
+            bid_price: market_data.bid_price
+            bid_volume: market_data.bid_volume
+            ask_price: market_data.ask_price
+            ask_volume: market_data.ask_volume
             signal: market_data.signal
             limit: market_data.limit
           params:
@@ -169,8 +194,7 @@ scenarios:
               venue:
                 name: bench
                 universe: [A0, A1, A2, A3, A4, A5, A6, A7]
-              depth_levels: 101
-              tick: 0.01
+              depth_levels: 50
             policy:
               kind: signal
               signal_column: signal

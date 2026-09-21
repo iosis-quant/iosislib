@@ -88,7 +88,7 @@ class ScenarioData:
     format: str = "csv"
     stream: bool = False
     chunk_rows: int = 50_000
-    levels: int = 101
+    levels: int = 25
     with_limit: bool = False
 
 
@@ -115,7 +115,7 @@ class Scenario:
                 format=data_raw.get("format", "csv"),
                 stream=data_raw.get("stream", False),
                 chunk_rows=data_raw.get("chunk_rows", 50_000),
-                levels=data_raw.get("levels", 101),
+                levels=data_raw.get("levels", 25),
                 with_limit=data_raw.get("with_limit", False),
             ),
             strategy=d["strategy"],

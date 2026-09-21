@@ -119,12 +119,20 @@ def _feed_from_declaration(value: Mapping[str, Any]) -> Feed:
             ask_column=value.get("ask_column", "ask"),
         )
     if kind == "l2":
+        legacy = {"bid_depth_column", "ask_depth_column", "tick"} & set(value)
+        if legacy:
+            raise ValueError(
+                f"legacy L2 keys {sorted(legacy)} were removed in L2Feed 2.0.0; "
+                "use bid_price_column/bid_volume_column/ask_price_column/"
+                "ask_volume_column with depth_levels"
+            )
         return L2Feed(
             venue=venue,
-            bid_depth_column=value.get("bid_depth_column", "bid_depth"),
-            ask_depth_column=value.get("ask_depth_column", "ask_depth"),
-            depth_levels=int(value.get("depth_levels", 101)),
-            tick=float(value.get("tick", 0.01)),
+            bid_price_column=value.get("bid_price_column", "bid_price"),
+            bid_volume_column=value.get("bid_volume_column", "bid_volume"),
+            ask_price_column=value.get("ask_price_column", "ask_price"),
+            ask_volume_column=value.get("ask_volume_column", "ask_volume"),
+            depth_levels=int(value.get("depth_levels", 25)),
         )
     raise ValueError(f"Unsupported feed kind: {kind!r}; expected 'l1' or 'l2'")
 
@@ -229,7 +237,7 @@ class BacktestConfig(TSFNConfig):
 class BacktestTSFN(BatchTSFN[BacktestConfig]):
     """Simulate policy orders against a feed's executable quotes, row by row."""
 
-    VERSION = "1.5.0"
+    VERSION = "2.0.0"
     CONFIG_CLS = BacktestConfig
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
@@ -287,20 +295,14 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         rows = frame.height
         bid, ask = self._quotes(frame)
         is_l2 = isinstance(config.feed, L2Feed)
-        bid_depth: Array | None = None
-        ask_depth: Array | None = None
+        bid_price: Array | None = None
+        bid_volume: Array | None = None
+        ask_price: Array | None = None
+        ask_volume: Array | None = None
         limits: Array | None = None
-        depth_levels = 0
-        tick = 0.0
-        grid: Array = np.empty(0, dtype=np.float64)
-        integers: npt.NDArray[np.signedinteger[Any]] = np.empty(0, dtype=np.int64)
         if is_l2:
             feed = cast(L2Feed, config.feed)
-            bid_depth, ask_depth = self._depth(frame, feed)
-            depth_levels = feed.depth_levels
-            tick = float(feed.tick)
-            grid = np.arange(depth_levels, dtype=np.float64) * tick
-            integers = np.arange(depth_levels)
+            bid_price, bid_volume, ask_price, ask_volume = self._depth(frame, feed)
             limits = self._limits(frame, width, rows)
         feature_shape = (
             config.policy.feature_shape
@@ -363,12 +365,17 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
             )
 
             if is_l2:
-                assert bid_depth is not None and ask_depth is not None
+                assert (
+                    bid_price is not None
+                    and bid_volume is not None
+                    and ask_price is not None
+                    and ask_volume is not None
+                )
                 assert fill_price is not None and unfilled is not None
                 running_cash, ruined = _execute_l2(
-                    running_cash, running_balances, order, bid_depth,
-                    ask_depth, row, limits, depth_levels, tick, grid,
-                    integers, bid, fill_price, unfilled,
+                    running_cash, running_balances, order, bid_price,
+                    bid_volume, ask_price, ask_volume, row, limits,
+                    bid, fill_price, unfilled,
                 )
             else:
                 running_cash, ruined = _execute(
@@ -556,23 +563,44 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         order_row[:] = executed
         return cash, False
 
-    def _depth(self, frame: pl.DataFrame, feed: L2Feed) -> tuple[Array, Array]:
+    def _depth(
+        self, frame: pl.DataFrame, feed: L2Feed
+    ) -> tuple[Array, Array, Array, Array]:
         depth_series = feed.depth(frame)
         if (
             not isinstance(depth_series, tuple)
-            or len(depth_series) != 2
+            or len(depth_series) != 4
             or not all(isinstance(series, pl.Series) for series in depth_series)
         ):
             raise TypeError(
-                "Feed.depth must return a (bid_depth, ask_depth) pair of Polars Series"
+                "Feed.depth must return a (bid_price, bid_volume, "
+                "ask_price, ask_volume) tuple of Polars Series"
             )
-        bid_series, ask_series = depth_series
+        bid_price_series, bid_volume_series, ask_price_series, ask_volume_series = (
+            depth_series
+        )
         shape = (feed.width, feed.depth_levels)
-        bid_depth = self._value_column(bid_series, shape, "bid_depth")
-        ask_depth = self._value_column(ask_series, shape, "ask_depth")
-        if (bid_depth < 0.0).any() or (ask_depth < 0.0).any():
+        bid_price = self._value_column(
+            bid_price_series, shape, feed.bid_price_column
+        )
+        bid_volume = self._value_column(
+            bid_volume_series, shape, feed.bid_volume_column
+        )
+        ask_price = self._value_column(
+            ask_price_series, shape, feed.ask_price_column
+        )
+        ask_volume = self._value_column(
+            ask_volume_series, shape, feed.ask_volume_column
+        )
+        if (bid_volume < 0.0).any() or (ask_volume < 0.0).any():
             raise ValueError("depth volumes must be non-negative")
-        return bid_depth, ask_depth
+        if (bid_price < 0.0).any() or (ask_price < 0.0).any():
+            raise ValueError("depth prices must be non-negative")
+        if (np.diff(bid_price, axis=-1) > 0.0).any():
+            raise ValueError("bid_price ladder must be best-first (non-increasing)")
+        if (np.diff(ask_price, axis=-1) < 0.0).any():
+            raise ValueError("ask_price ladder must be best-first (non-decreasing)")
+        return bid_price, bid_volume, ask_price, ask_volume
 
     def _limits(self, frame: pl.DataFrame, width: int, rows: int) -> Array | None:
         column = self.parameters.limit_price_column
@@ -598,13 +626,12 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         cash: float,
         balances: Array,
         orders: Array,
-        bid_depth: Array,
-        ask_depth: Array,
+        bid_price: Array,
+        bid_volume: Array,
+        ask_price: Array,
+        ask_volume: Array,
         row: int,
         limits: Array | None,
-        depth_levels: int,
-        tick: float,
-        grid: Array,
         marks: Array,
         fill_price: Array,
         unfilled: Array,
@@ -631,50 +658,33 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
             filled = 0.0
             cost = 0.0
             if buying:
-                book = ask_depth[row, asset]
+                prices = ask_price[row, asset]
+                volumes = ask_volume[row, asset]
                 if limit != limit:
-                    top = depth_levels
+                    eligible = volumes
+                    eligible_px = prices
                 else:
-                    top = int(np.floor(limit / tick)) + 1
-                    if top < 0:
-                        top = 0
-                    elif top > depth_levels:
-                        top = depth_levels
-                if top > 0:
-                    if float(book[0]) >= need:
-                        filled = need
-                        cost = need * float(grid[0])
-                    else:
-                        vol = book[:top]
-                        cum = np.cumsum(vol)
-                        take = np.minimum(
-                            vol, np.maximum(need - cum + vol, 0.0)
-                        )
-                        filled = float(take.sum())
-                        cost = float(np.dot(take, grid[:top]))
+                    mask = prices <= limit
+                    eligible = volumes * mask
+                    eligible_px = prices
+                cum = np.cumsum(eligible)
+                take = np.minimum(eligible, np.maximum(need - cum + eligible, 0.0))
+                filled = float(take.sum())
+                cost = float(np.dot(take, eligible_px))
             else:
-                book = bid_depth[row, asset]
+                prices = bid_price[row, asset]
+                volumes = bid_volume[row, asset]
                 if limit != limit:
-                    bottom = 0
+                    eligible = volumes
+                    eligible_px = prices
                 else:
-                    bottom = int(np.ceil(limit / tick))
-                    if bottom < 0:
-                        bottom = 0
-                    elif bottom > depth_levels:
-                        bottom = depth_levels
-                if bottom < depth_levels:
-                    if float(book[depth_levels - 1]) >= need:
-                        filled = need
-                        cost = need * float(grid[depth_levels - 1])
-                    else:
-                        seg = book[bottom:]
-                        rev = seg[::-1]
-                        cum = np.cumsum(rev)
-                        take = np.minimum(
-                            rev, np.maximum(need - cum + rev, 0.0)
-                        )[::-1]
-                        filled = float(take.sum())
-                        cost = float(np.dot(take, grid[bottom:]))
+                    mask = prices >= limit
+                    eligible = volumes * mask
+                    eligible_px = prices
+                cum = np.cumsum(eligible)
+                take = np.minimum(eligible, np.maximum(need - cum + eligible, 0.0))
+                filled = float(take.sum())
+                cost = float(np.dot(take, eligible_px))
             if has_fill(filled):
                 average = cost / filled
                 signed_fill = filled if buying else -filled
@@ -704,14 +714,12 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         cash: float,
         balances: Array,
         orders: Array,
-        bid_depth: Array,
-        ask_depth: Array,
+        bid_price: Array,
+        bid_volume: Array,
+        ask_price: Array,
+        ask_volume: Array,
         row: int,
         limits: Array | None,
-        depth_levels: int,
-        tick: float,
-        grid: Array,
-        integers: npt.NDArray[np.signedinteger[Any]],
         marks: Array,
         fill_price: Array,
         unfilled: Array,
@@ -720,16 +728,18 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         width = requested.shape[0]
         if width < 8:
             return BacktestTSFN._execute_l2_narrow(
-                cash, balances, orders, bid_depth, ask_depth, row, limits,
-                depth_levels, tick, grid, marks, fill_price, unfilled,
+                cash, balances, orders, bid_price, bid_volume,
+                ask_price, ask_volume, row, limits,
+                marks, fill_price, unfilled,
             )
         mark_row = marks[row]
         equity = cash + float(np.dot(balances, mark_row))
         if is_ruined(equity, cash):
             requested[:] = -balances
             cash, _ = BacktestTSFN._execute_l2_narrow(
-                cash, balances, orders, bid_depth, ask_depth, row, None,
-                depth_levels, tick, grid, marks, fill_price, unfilled, True,
+                cash, balances, orders, bid_price, bid_volume,
+                ask_price, ask_volume, row, None,
+                marks, fill_price, unfilled, True,
             )
             return cash, True
         quantity = requested.copy()
@@ -743,37 +753,25 @@ class BacktestTSFN(BatchTSFN[BacktestConfig]):
         filled = np.zeros(width, dtype=np.float64)
         cost = np.zeros(width, dtype=np.float64)
         buy = quantity > 0.0
-        book = ask_depth[row][buy]
-        if limits is None:
-            vol = book
-        else:
-            lim = limits[row][buy]
-            top = np.full(int(buy.sum()), depth_levels)
-            priced = ~np.isnan(lim)
-            top[priced] = np.clip(
-                np.floor(lim[priced] / tick).astype(int) + 1, 0, depth_levels
-            )
-            vol = np.where(integers < top[:, None], book, 0.0)
-        cum = np.cumsum(vol, axis=-1)
-        take = np.minimum(vol, np.maximum(need[buy][:, None] - cum + vol, 0.0))
+        buy_px = ask_price[row][buy]
+        buy_vol = ask_volume[row][buy]
+        if limits is not None:
+            lim = limits[row][buy][:, None]
+            buy_vol = np.where(np.isnan(lim) | (buy_px <= lim), buy_vol, 0.0)
+        cum = np.cumsum(buy_vol, axis=-1)
+        take = np.minimum(buy_vol, np.maximum(need[buy][:, None] - cum + buy_vol, 0.0))
         filled[buy] = take.sum(axis=-1)
-        cost[buy] = (take * grid).sum(axis=-1)
+        cost[buy] = (take * buy_px).sum(axis=-1)
         sell = quantity < 0.0
-        book = bid_depth[row][sell]
-        if limits is None:
-            vol = book[:, ::-1]
-        else:
-            lim = limits[row][sell]
-            bottom = np.zeros(int(sell.sum()), dtype=int)
-            priced = ~np.isnan(lim)
-            bottom[priced] = np.clip(
-                np.ceil(lim[priced] / tick).astype(int), 0, depth_levels
-            )
-            vol = np.where(integers >= bottom[:, None], book, 0.0)[:, ::-1]
-        cum = np.cumsum(vol, axis=-1)
-        take = np.minimum(vol, np.maximum(need[sell][:, None] - cum + vol, 0.0))
+        sell_px = bid_price[row][sell]
+        sell_vol = bid_volume[row][sell]
+        if limits is not None:
+            lim = limits[row][sell][:, None]
+            sell_vol = np.where(np.isnan(lim) | (sell_px >= lim), sell_vol, 0.0)
+        cum = np.cumsum(sell_vol, axis=-1)
+        take = np.minimum(sell_vol, np.maximum(need[sell][:, None] - cum + sell_vol, 0.0))
         filled[sell] = take.sum(axis=-1)
-        cost[sell] = (take[:, ::-1] * grid).sum(axis=-1)
+        cost[sell] = (take * sell_px).sum(axis=-1)
         run = equity
         for asset in range(width):
             fill = float(filled[asset])
