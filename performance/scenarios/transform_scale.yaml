@@ -16,7 +16,7 @@ scenarios:
       nodes:
         source:
           op: source.parquet_source
-          version: "0.3.0"
+          version: "0.4.0"
           params:
             path: ../data/perf_sensors_100k.parquet
             content_sha256: FILL_HASH
@@ -66,7 +66,7 @@ scenarios:
       nodes:
         source:
           op: source.parquet_source
-          version: "0.3.0"
+          version: "0.4.0"
           params:
             path: ../data/perf_sensors_500k.parquet
             content_sha256: FILL_HASH

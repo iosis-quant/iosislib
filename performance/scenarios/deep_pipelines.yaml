@@ -180,7 +180,7 @@ scenarios:
       nodes:
         market_data:
           op: source.parquet_source
-          version: "0.3.0"
+          version: "0.4.0"
           params:
             path: ../data/perf_market_100k_16a.parquet
             content_sha256: FILL_HASH
@@ -198,7 +198,7 @@ scenarios:
                   shape: [16]
         simulation:
           op: backtest.backtest
-          version: "1.5.0"
+          version: "2.0.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -235,7 +235,7 @@ scenarios:
       nodes:
         market_data:
           op: source.parquet_source
-          version: "0.3.0"
+          version: "0.4.0"
           params:
             path: ../data/perf_backtest_100k_8a.parquet
             content_sha256: FILL_HASH
@@ -253,7 +253,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "1.5.0"
+          version: "2.0.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask

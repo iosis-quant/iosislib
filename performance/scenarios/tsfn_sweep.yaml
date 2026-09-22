@@ -1475,7 +1475,7 @@ scenarios:
       nodes:
         source:
           op: source.dataset_source
-          version: "0.1.0"
+          version: "0.2.0"
           params:
             path: ../data/perf_sensors_100k.parquet
             schema:
@@ -1506,7 +1506,7 @@ scenarios:
       nodes:
         source:
           op: source.dataset_source
-          version: "0.1.0"
+          version: "0.2.0"
           params:
             path: ../data/perf_sensors_1m.parquet
             schema:
@@ -1538,7 +1538,7 @@ scenarios:
       nodes:
         source:
           op: source.streaming_parquet_source
-          version: "0.1.0"
+          version: "0.2.0"
           params:
             path: ../data/chunks_perf_stream_100k
             content_sha256: FILL_HASH
