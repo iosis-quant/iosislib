@@ -35,7 +35,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "2.0.0"
+          version: "3.0.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -54,7 +54,9 @@ scenarios:
         equity: simulation.equity
     outputs: [equity]
     thresholds:
-      max_us_per_row: 100.0
+      # Profile truth is ~35us/row; traced runs vary 60-240us with machine
+      # load on allocation-heavy L1 paths, so this tripwire carries headroom.
+      max_us_per_row: 400.0
       max_memory_mb: 500
 
   - name: threshold_policy_500k
@@ -90,7 +92,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "2.0.0"
+          version: "3.0.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -148,7 +150,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "2.0.0"
+          version: "3.0.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -209,7 +211,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "2.0.0"
+          version: "3.0.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -264,7 +266,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "2.0.0"
+          version: "3.0.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -325,7 +327,7 @@ scenarios:
                   shape: [16]
         simulation:
           op: backtest.backtest
-          version: "2.0.0"
+          version: "3.0.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask

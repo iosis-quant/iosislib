@@ -16,6 +16,12 @@ from iosislib.backtest.feeds import (
     l2_interpolate_volumes,
     l2_ladder_prices,
 )
+from iosislib.backtest.fees import (
+    FeeSchedule,
+    FixedFeeSchedule,
+    list_fee_schedules,
+    register_fee_schedule,
+)
 from iosislib.backtest.policy import (
     Array,
     FeatureBuffer,
@@ -49,6 +55,8 @@ __all__ = [
     "BacktestTSFN",
     "FeatureBuffer",
     "Feed",
+    "FeeSchedule",
+    "FixedFeeSchedule",
     "FractionalKellyPolicy",
     "FractionalLimitPolicy",
     "L1Feed",
@@ -74,8 +82,10 @@ __all__ = [
     "ThresholdPolicy",
     "Venue",
     "classify_reason",
+    "list_fee_schedules",
     "list_policies",
     "list_risk_policies",
+    "register_fee_schedule",
     "register_policy",
     "register_risk_policy",
 ]

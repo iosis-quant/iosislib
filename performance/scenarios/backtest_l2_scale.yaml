@@ -1,14 +1,17 @@
-# L2 backtester scenarios: price+volume ladders (50 levels/side) execution
-# Tests L2 depth-walk performance across row counts and asset widths
+# L2 backtester scenarios: price+volume ladders across widths and depths.
+# Widths 1/8/16/32/64 assets, depths 10/25/50 per side. Every simulation
+# carries a fixed fee schedule (2bp taker, -1bp maker) so runs exercise
+# the fee path as well as the depth walks.
 #
 # Run: python performance/test_perf.py --scenario backtest_l2_scale
 
 scenarios:
+
   - name: l2_backtest_10k_1asset_market
     description: "L2 baseline: 10K rows, 1 asset, market orders"
     data:
-      name: perf_backtest_l2_10k_1a
-      rows: 10_000
+      name: perf_backtest_l2_10k_1asset_market
+      rows: 10000
       width: 1
       domain: l2_market_data
       levels: 50
@@ -16,13 +19,13 @@ scenarios:
     strategy:
       format: iosis.strategy
       version: "0.1.0"
-      name: l2-backtest-10k-1a
+      name: l2-backtest-10k-1asset-market
       nodes:
         market_data:
           op: source.parquet_source
           version: "0.4.0"
           params:
-            path: ../data/perf_backtest_l2_10k_1a.parquet
+            path: ../data/perf_backtest_l2_10k_1asset_market.parquet
             content_sha256: FILL_HASH
             schema:
               time: timestamp
@@ -44,7 +47,7 @@ scenarios:
                   shape: [1]
         simulation:
           op: backtest.backtest
-          version: "2.0.0"
+          version: "3.0.0"
           inputs:
             bid_price: market_data.bid_price
             bid_volume: market_data.bid_volume
@@ -53,6 +56,10 @@ scenarios:
             signal: market_data.signal
           params:
             initial_cash: 1000000
+            fee_schedule:
+              kind: fixed
+              taker_rate: 0.0002
+              maker_rate: -0.0001
             feed:
               kind: l2
               venue:
@@ -70,10 +77,10 @@ scenarios:
       max_memory_mb: 300
 
   - name: l2_backtest_5k_8asset_market
-    description: "L2 wide: 5K rows, 8 assets, market orders"
+    description: "L2 wide: 5K rows, 8 assets, market orders, depth 50"
     data:
-      name: perf_backtest_l2_5k_8a
-      rows: 5_000
+      name: perf_backtest_l2_5k_8asset_market
+      rows: 5000
       width: 8
       domain: l2_market_data
       levels: 50
@@ -81,13 +88,13 @@ scenarios:
     strategy:
       format: iosis.strategy
       version: "0.1.0"
-      name: l2-backtest-5k-8a
+      name: l2-backtest-5k-8asset-market
       nodes:
         market_data:
           op: source.parquet_source
           version: "0.4.0"
           params:
-            path: ../data/perf_backtest_l2_5k_8a.parquet
+            path: ../data/perf_backtest_l2_5k_8asset_market.parquet
             content_sha256: FILL_HASH
             schema:
               time: timestamp
@@ -109,7 +116,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "2.0.0"
+          version: "3.0.0"
           inputs:
             bid_price: market_data.bid_price
             bid_volume: market_data.bid_volume
@@ -118,6 +125,10 @@ scenarios:
             signal: market_data.signal
           params:
             initial_cash: 1000000
+            fee_schedule:
+              kind: fixed
+              taker_rate: 0.0002
+              maker_rate: -0.0001
             feed:
               kind: l2
               venue:
@@ -134,11 +145,356 @@ scenarios:
       max_us_per_row: 8000.0
       max_memory_mb: 500
 
+  - name: l2_backtest_5k_8asset_market_d25
+    description: "L2 wide: 5K rows, 8 assets, depth 25"
+    data:
+      name: perf_backtest_l2_5k_8asset_market_d25
+      rows: 5000
+      width: 8
+      domain: l2_market_data
+      levels: 25
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: l2-backtest-5k-8asset-market-d25
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.4.0"
+          params:
+            path: ../data/perf_backtest_l2_5k_8asset_market_d25.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid_price:
+                  dtype: float64
+                  shape: [8, 25]
+                bid_volume:
+                  dtype: float64
+                  shape: [8, 25]
+                ask_price:
+                  dtype: float64
+                  shape: [8, 25]
+                ask_volume:
+                  dtype: float64
+                  shape: [8, 25]
+                signal:
+                  dtype: float64
+                  shape: [8]
+        simulation:
+          op: backtest.backtest
+          version: "3.0.0"
+          inputs:
+            bid_price: market_data.bid_price
+            bid_volume: market_data.bid_volume
+            ask_price: market_data.ask_price
+            ask_volume: market_data.ask_volume
+            signal: market_data.signal
+          params:
+            initial_cash: 1000000
+            fee_schedule:
+              kind: fixed
+              taker_rate: 0.0002
+              maker_rate: -0.0001
+            feed:
+              kind: l2
+              venue:
+                name: bench
+                universe: [A0, A1, A2, A3, A4, A5, A6, A7]
+              depth_levels: 25
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 8000.0
+      max_memory_mb: 500
+
+  - name: l2_backtest_5k_8asset_market_d10
+    description: "L2 wide: 5K rows, 8 assets, depth 10"
+    data:
+      name: perf_backtest_l2_5k_8asset_market_d10
+      rows: 5000
+      width: 8
+      domain: l2_market_data
+      levels: 10
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: l2-backtest-5k-8asset-market-d10
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.4.0"
+          params:
+            path: ../data/perf_backtest_l2_5k_8asset_market_d10.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid_price:
+                  dtype: float64
+                  shape: [8, 10]
+                bid_volume:
+                  dtype: float64
+                  shape: [8, 10]
+                ask_price:
+                  dtype: float64
+                  shape: [8, 10]
+                ask_volume:
+                  dtype: float64
+                  shape: [8, 10]
+                signal:
+                  dtype: float64
+                  shape: [8]
+        simulation:
+          op: backtest.backtest
+          version: "3.0.0"
+          inputs:
+            bid_price: market_data.bid_price
+            bid_volume: market_data.bid_volume
+            ask_price: market_data.ask_price
+            ask_volume: market_data.ask_volume
+            signal: market_data.signal
+          params:
+            initial_cash: 1000000
+            fee_schedule:
+              kind: fixed
+              taker_rate: 0.0002
+              maker_rate: -0.0001
+            feed:
+              kind: l2
+              venue:
+                name: bench
+                universe: [A0, A1, A2, A3, A4, A5, A6, A7]
+              depth_levels: 10
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 8000.0
+      max_memory_mb: 500
+
+  - name: l2_backtest_5k_16asset_market_d25
+    description: "L2 wider: 5K rows, 16 books, depth 25"
+    data:
+      name: perf_backtest_l2_5k_16asset_market_d25
+      rows: 5000
+      width: 16
+      domain: l2_market_data
+      levels: 25
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: l2-backtest-5k-16asset-market-d25
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.4.0"
+          params:
+            path: ../data/perf_backtest_l2_5k_16asset_market_d25.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid_price:
+                  dtype: float64
+                  shape: [16, 25]
+                bid_volume:
+                  dtype: float64
+                  shape: [16, 25]
+                ask_price:
+                  dtype: float64
+                  shape: [16, 25]
+                ask_volume:
+                  dtype: float64
+                  shape: [16, 25]
+                signal:
+                  dtype: float64
+                  shape: [16]
+        simulation:
+          op: backtest.backtest
+          version: "3.0.0"
+          inputs:
+            bid_price: market_data.bid_price
+            bid_volume: market_data.bid_volume
+            ask_price: market_data.ask_price
+            ask_volume: market_data.ask_volume
+            signal: market_data.signal
+          params:
+            initial_cash: 1000000
+            fee_schedule:
+              kind: fixed
+              taker_rate: 0.0002
+              maker_rate: -0.0001
+            feed:
+              kind: l2
+              venue:
+                name: bench
+                universe: [A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15]
+              depth_levels: 25
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 16000.0
+      max_memory_mb: 800
+
+  - name: l2_backtest_2k_32asset_market_d25
+    description: "L2 allocation: 2K rows, 32 books, depth 25"
+    data:
+      name: perf_backtest_l2_2k_32asset_market_d25
+      rows: 2000
+      width: 32
+      domain: l2_market_data
+      levels: 25
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: l2-backtest-2k-32asset-market-d25
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.4.0"
+          params:
+            path: ../data/perf_backtest_l2_2k_32asset_market_d25.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid_price:
+                  dtype: float64
+                  shape: [32, 25]
+                bid_volume:
+                  dtype: float64
+                  shape: [32, 25]
+                ask_price:
+                  dtype: float64
+                  shape: [32, 25]
+                ask_volume:
+                  dtype: float64
+                  shape: [32, 25]
+                signal:
+                  dtype: float64
+                  shape: [32]
+        simulation:
+          op: backtest.backtest
+          version: "3.0.0"
+          inputs:
+            bid_price: market_data.bid_price
+            bid_volume: market_data.bid_volume
+            ask_price: market_data.ask_price
+            ask_volume: market_data.ask_volume
+            signal: market_data.signal
+          params:
+            initial_cash: 1000000
+            fee_schedule:
+              kind: fixed
+              taker_rate: 0.0002
+              maker_rate: -0.0001
+            feed:
+              kind: l2
+              venue:
+                name: bench
+                universe: [A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21, A22, A23, A24, A25, A26, A27, A28, A29, A30, A31]
+              depth_levels: 25
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 16000.0
+      max_memory_mb: 1000
+
+  - name: l2_backtest_2k_64asset_market_d25
+    description: "L2 allocation: 2K rows, 64 books, depth 25"
+    data:
+      name: perf_backtest_l2_2k_64asset_market_d25
+      rows: 2000
+      width: 64
+      domain: l2_market_data
+      levels: 25
+      format: parquet
+    strategy:
+      format: iosis.strategy
+      version: "0.1.0"
+      name: l2-backtest-2k-64asset-market-d25
+      nodes:
+        market_data:
+          op: source.parquet_source
+          version: "0.4.0"
+          params:
+            path: ../data/perf_backtest_l2_2k_64asset_market_d25.parquet
+            content_sha256: FILL_HASH
+            schema:
+              time: timestamp
+              columns:
+                bid_price:
+                  dtype: float64
+                  shape: [64, 25]
+                bid_volume:
+                  dtype: float64
+                  shape: [64, 25]
+                ask_price:
+                  dtype: float64
+                  shape: [64, 25]
+                ask_volume:
+                  dtype: float64
+                  shape: [64, 25]
+                signal:
+                  dtype: float64
+                  shape: [64]
+        simulation:
+          op: backtest.backtest
+          version: "3.0.0"
+          inputs:
+            bid_price: market_data.bid_price
+            bid_volume: market_data.bid_volume
+            ask_price: market_data.ask_price
+            ask_volume: market_data.ask_volume
+            signal: market_data.signal
+          params:
+            initial_cash: 1000000
+            fee_schedule:
+              kind: fixed
+              taker_rate: 0.0002
+              maker_rate: -0.0001
+            feed:
+              kind: l2
+              venue:
+                name: bench
+                universe: [A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21, A22, A23, A24, A25, A26, A27, A28, A29, A30, A31, A32, A33, A34, A35, A36, A37, A38, A39, A40, A41, A42, A43, A44, A45, A46, A47, A48, A49, A50, A51, A52, A53, A54, A55, A56, A57, A58, A59, A60, A61, A62, A63]
+              depth_levels: 25
+            policy:
+              kind: signal
+              signal_column: signal
+      outputs:
+        equity: simulation.equity
+    outputs: [equity]
+    thresholds:
+      max_us_per_row: 32000.0
+      max_memory_mb: 1500
+
   - name: l2_backtest_5k_8asset_limit
     description: "L2 limit orders: 5K rows, 8 assets, mixed market/limit"
     data:
-      name: perf_backtest_l2_5k_8a_limit
-      rows: 5_000
+      name: perf_backtest_l2_5k_8asset_limit
+      rows: 5000
       width: 8
       domain: l2_market_data
       levels: 50
@@ -147,13 +503,13 @@ scenarios:
     strategy:
       format: iosis.strategy
       version: "0.1.0"
-      name: l2-backtest-5k-8a-limit
+      name: l2-backtest-5k-8asset-limit
       nodes:
         market_data:
           op: source.parquet_source
           version: "0.4.0"
           params:
-            path: ../data/perf_backtest_l2_5k_8a_limit.parquet
+            path: ../data/perf_backtest_l2_5k_8asset_limit.parquet
             content_sha256: FILL_HASH
             schema:
               time: timestamp
@@ -178,7 +534,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "2.0.0"
+          version: "3.0.0"
           inputs:
             bid_price: market_data.bid_price
             bid_volume: market_data.bid_volume
@@ -189,6 +545,10 @@ scenarios:
           params:
             initial_cash: 1000000
             limit_price_column: limit
+            fee_schedule:
+              kind: fixed
+              taker_rate: 0.0002
+              maker_rate: -0.0001
             feed:
               kind: l2
               venue:

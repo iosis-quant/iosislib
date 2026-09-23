@@ -385,6 +385,10 @@ def test_graph_execution_uses_the_backtest_batch_loop() -> None:
         "balance",
         "order",
         "proposed_order",
+        "fill_price",
+        "unfilled",
+        "fees",
+        "open_orders",
     ]
     assert_lists_close(result.get_column("balance").to_list(), [[1.0], [0.0]])
 
@@ -449,5 +453,9 @@ def test_backtest_validates_input_schema_and_empty_batches() -> None:
         "balance": pl.Array(pl.Float64, 1),
         "order": pl.Array(pl.Float64, 1),
         "proposed_order": pl.Array(pl.Float64, 1),
+        "fill_price": pl.Array(pl.Float64, 1),
+        "unfilled": pl.Array(pl.Float64, 1),
+        "fees": pl.Float64,
+        "open_orders": pl.Array(pl.Float64, 2),
     }
     assert result.height == 0

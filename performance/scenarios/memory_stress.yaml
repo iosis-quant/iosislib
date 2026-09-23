@@ -35,7 +35,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "2.0.0"
+          version: "3.0.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -54,7 +54,9 @@ scenarios:
         equity: simulation.equity
     outputs: [equity]
     thresholds:
-      max_us_per_row: 100.0
+      # Headroom: traced runs on allocation-heavy L1 paths vary with
+      # machine load (profile truth here is ~20us/row).
+      max_us_per_row: 400.0
       max_memory_mb: 200
     memory_tracking:
       sample_interval: 10_000
@@ -94,7 +96,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "2.0.0"
+          version: "3.0.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -153,7 +155,7 @@ scenarios:
                   shape: [8]
         simulation:
           op: backtest.backtest
-          version: "2.0.0"
+          version: "3.0.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask
@@ -291,7 +293,7 @@ scenarios:
                   shape: [32]
         simulation:
           op: backtest.backtest
-          version: "2.0.0"
+          version: "3.0.0"
           inputs:
             bid: market_data.bid
             ask: market_data.ask

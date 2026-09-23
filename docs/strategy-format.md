@@ -241,6 +241,17 @@ time).
 - `risk_policy`: risk policy declaration (optional)
 - `initial_cash`: starting cash (required, float)
 - `validate`: whether to validate input frame (default `true`)
+- `limit_price_column`: input column with per-asset limit prices; `NaN`
+  means market order (optional). Unfilled limit quantity rests as a
+  good-til-cancelled working order (cancel-replace per side).
+- `cancel_column`: input column; any nonzero, non-`NaN` value cancels all
+  working orders for that asset before matching (optional).
+- `fee_schedule`: fee declaration, `{kind: fixed, taker_rate, maker_rate}`
+  with signed rates (negative = rebate). Market orders and crossing limits
+  pay taker; rested working-order fills pay maker (optional, default no fees).
+- `slippage_spread_fraction`: L1 slippage as a fraction of the spread added
+  against the taker; limit fills are capped at the limit price
+  (optional, default `0.0`).
 
 ### Feed declaration
 
@@ -248,12 +259,15 @@ The `feed` parameter accepts a declarative mapping:
 
 ```yaml
 feed:
-  kind: l1                          # required: only "l1" is supported
+  kind: l1                          # required: "l1" or "l2"
   venue:
     name: my-venue                  # venue identifier
     universe: [AAPL, GOOGL]         # list of asset names
-  bid_column: bid                   # optional, default "bid"
-  ask_column: ask                   # optional, default "ask"
+  bid_column: bid                   # L1 only, optional, default "bid"
+  ask_column: ask                   # L1 only, optional, default "ask"
+  # L2 only: bid_price_column, bid_volume_column, ask_price_column,
+  # ask_volume_column (fixed-size best-first ladders) and depth_levels
+  # (levels per side).
 ```
 
 ### Policy declaration
@@ -345,11 +359,15 @@ The backtest node always produces these output columns:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `cash` | `Float64` | Running cash balance |
+| `cash` | `Float64` | Running cash balance (net of fees) |
 | `equity` | `Float64` | Total equity (cash + position value) |
 | `balance` | `Array[Float64, N]` | Position quantities per asset |
-| `order` | `Array[Float64, N]` | Executed order quantities |
+| `order` | `Array[Float64, N]` | Executed order quantities (working + new fills) |
 | `proposed_order` | `Array[Float64, N]` | Order quantities before risk policy |
+| `fill_price` | `Array[Float64, N]` | Volume-weighted fill price (`0.0` when nothing filled) |
+| `unfilled` | `Array[Float64, N]` | Signal quantity not filled this row |
+| `fees` | `Float64` | Cumulative signed fees (negative = net rebates) |
+| `open_orders` | `Array[Float64, N×2]` | Resting buy/sell quantities per asset |
 
 ## Model operations
 
