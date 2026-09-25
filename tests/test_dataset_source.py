@@ -296,6 +296,77 @@ class TestDatasetSource:
                 )
             ).execute()
 
+    def test_time_range_timestamp_end_is_inclusive(self, tmp_path: Path) -> None:
+        base = tmp_path / "data"
+        write_hive_dataset(base)
+
+        result = Graph(
+            Node(
+                DatasetSource,
+                parameters={
+                    "path": str(base / "**" / "*.parquet"),
+                    "output_signature": FLOAT_SIGNATURE,
+                    "time_range": ("2026-01-01T00:00:00", "2026-01-01T00:01:00"),
+                },
+                name="prices",
+            )
+        ).execute()
+
+        assert result["value"].to_list() == [1.0, 2.0]
+
+    def test_time_range_bare_date_end_covers_whole_day(self, tmp_path: Path) -> None:
+        base = tmp_path / "data"
+        write_hive_dataset(base)
+
+        result = Graph(
+            Node(
+                DatasetSource,
+                parameters={
+                    "path": str(base / "**" / "*.parquet"),
+                    "output_signature": FLOAT_SIGNATURE,
+                    "time_range": ("2026-01-01", "2026-01-01"),
+                },
+                name="prices",
+            )
+        ).execute()
+
+        assert result["value"].to_list() == [1.0, 2.0, 3.0]
+
+    def test_time_range_accepts_utc_suffix_bounds(self, tmp_path: Path) -> None:
+        base = tmp_path / "data"
+        write_hive_dataset(base)
+
+        result = Graph(
+            Node(
+                DatasetSource,
+                parameters={
+                    "path": str(base / "**" / "*.parquet"),
+                    "output_signature": FLOAT_SIGNATURE,
+                    "time_range": ("2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z"),
+                },
+                name="prices",
+            )
+        ).execute()
+
+        assert result["value"].to_list() == [1.0, 2.0]
+
+    def test_time_range_rejects_start_after_end(self, tmp_path: Path) -> None:
+        base = tmp_path / "data"
+        write_hive_dataset(base)
+
+        with pytest.raises(RuntimeError, match="time_range"):
+            Graph(
+                Node(
+                    DatasetSource,
+                    parameters={
+                        "path": str(base / "**" / "*.parquet"),
+                        "output_signature": FLOAT_SIGNATURE,
+                        "time_range": ("2026-01-02", "2026-01-01"),
+                    },
+                    name="prices",
+                )
+            ).execute()
+
     def test_coerces_list_to_array(self, tmp_path: Path) -> None:
         flat = tmp_path / "features"
         flat.mkdir()
@@ -327,4 +398,4 @@ class TestDatasetSource:
         assert result["feature"].to_list() == [[0.2, None]]
 
     def test_source_version(self) -> None:
-        assert DatasetSource.VERSION == "0.2.0"
+        assert DatasetSource.VERSION == "0.3.0"

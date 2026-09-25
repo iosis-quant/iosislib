@@ -11,16 +11,18 @@ Just pass a glob path and Polars does the rest:
 - ``s3://bucket/data/year=*/month=*/*.parquet`` - hive-partitioned
 - ``/local/path/**/*.parquet`` - works locally too
 
-Optional time-range filtering pushes predicates down to the Parquet reader
-so entire partition directories and row groups are skipped.
+Optional time-range filtering (inclusive on both bounds) pushes predicates
+down to the Parquet reader so entire partition directories and row groups
+are skipped.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,7 @@ import polars as pl
 
 from iosislib.core.tsfn import (
     FrameSignature,
+    TimeAxis,
     TSFN,
     TSFNConfig,
     _time_axis_physical_dtype,
@@ -41,6 +44,7 @@ from iosislib.tsfn.adapters.local_sources import (
 )
 
 _MANIFEST_FORMAT = "iosis.cloud-dataset-v1"
+_BARE_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _normalize_path(path: str) -> str:
@@ -97,13 +101,50 @@ def _validate_time_range(value: object) -> tuple[str, str] | None:
 
 
 def _parse_time_bound(value: str, *, label: str) -> datetime:
-    """Parse a time_range bound, accepting bare dates ("2021-08-01")."""
+    """Parse an inclusive time_range bound, accepting bare dates ("2021-08-01").
+
+    Timezone-aware bounds are normalized to naive UTC so they compare by
+    instant against time columns in any timezone.
+    """
     try:
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(
             f"time_range {label} must be ISO-8601 ({value!r} is not parseable)"
         ) from exc
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _time_range_predicates(
+    time_col: TimeAxis,
+    start_dt: datetime,
+    end_dt: datetime,
+    end: str,
+) -> tuple[pl.Expr, pl.Expr]:
+    """Build inclusive ``start``/``end`` predicates for one time axis.
+
+    Both bounds are inclusive: a bare-date end (``"2026-01-03"``) covers that
+    whole day, a timestamp end includes rows exactly at the bound. Bounds are
+    naive UTC after parsing; timezone-aware columns are compared in naive UTC.
+    """
+    time_dtype = _time_axis_physical_dtype(time_col)
+    compare_dtype = time_dtype
+    column = pl.col(time_col.column)
+    if isinstance(time_dtype, pl.Datetime) and time_dtype.time_zone:
+        compare_dtype = pl.Datetime(time_dtype.time_unit)
+        column = column.dt.convert_time_zone("UTC").dt.replace_time_zone(None)
+    column = column.cast(compare_dtype)
+    start_expr = column >= pl.lit(start_dt).cast(compare_dtype)
+    if _BARE_DATE.fullmatch(end):
+        day_end = end_dt + timedelta(days=1)
+        if start_dt >= day_end:
+            raise ValueError("time_range start must not be after end")
+        return start_expr, column < pl.lit(day_end).cast(compare_dtype)
+    if start_dt > end_dt:
+        raise ValueError("time_range start must not be after end")
+    return start_expr, column <= pl.lit(end_dt).cast(compare_dtype)
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,8 +237,12 @@ class DatasetSourceConfig(TSFNConfig):
     - ``s3://bucket/data/year=*/month=*/*.parquet`` - hive-partitioned
     - ``/local/path/year=*/month=*/*.parquet`` - works locally too
 
-    ``time_range`` is an optional ``(start, end)`` pair of ISO-8601 timestamp
-    strings.  When provided the adapter pushes a filter down to the Parquet
+    ``time_range`` is an optional ``(start, end)`` pair of ISO-8601 strings —
+    bare dates (``"2021-08-01"``) or timestamps (``"2021-08-01T12:00:00"``,
+    ``"2021-08-01T12:00:00Z"``). Both bounds are inclusive: a bare-date end
+    covers that whole day, a timestamp end includes rows exactly at the bound.
+    Timezone-aware bounds are compared as instants against timezone-aware
+    columns. When provided, the adapter pushes a filter down to the Parquet
     reader so that irrelevant row groups and partition directories are skipped.
     """
 
@@ -229,10 +274,11 @@ class DatasetSource(TSFN):
     Declared columns use the shared source coercions: ``Datetime`` unit casts
     (timezones must still match), ``String`` timestamp parsing, and fixed-width
     ``List`` to ``Array`` conversion. All other mismatches fail loudly.
-    ``time_range`` bounds accept bare dates (``"2021-08-01"``).
+    ``time_range`` bounds are inclusive on both ends and accept bare dates
+    (``"2021-08-01"``) and ISO-8601 timestamps.
     """
 
-    VERSION = "0.2.0"
+    VERSION = "0.3.0"
     CONFIG_CLS = DatasetSourceConfig
 
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
@@ -253,15 +299,13 @@ class DatasetSource(TSFN):
         if params.time_range is not None:
             time_col = params.output_signature.time
             if time_col is not None:
-                col_name = time_col.column
                 start, end = params.time_range
-                time_dtype = _time_axis_physical_dtype(time_col)
                 start_dt = _parse_time_bound(start, label="start")
                 end_dt = _parse_time_bound(end, label="end")
-                lazy_table = lazy_table.filter(
-                    (pl.col(col_name).cast(time_dtype) >= pl.lit(start_dt).cast(time_dtype))
-                    & (pl.col(col_name).cast(time_dtype) < pl.lit(end_dt).cast(time_dtype))
+                start_expr, end_expr = _time_range_predicates(
+                    time_col, start_dt, end_dt, end
                 )
+                lazy_table = lazy_table.filter(start_expr & end_expr)
 
         return _project_declared_columns(lazy_table, params.output_signature)
 
