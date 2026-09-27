@@ -20,7 +20,7 @@ class _StrategyLoader(yaml.SafeLoader):
     }
 
     def compose_node(self, parent: yaml.Node | None, index: int) -> yaml.Node:
-        event = self.peek_event()  # type: ignore[no-untyped-call]
+        event = self.peek_event()  # type: ignore[no-untyped-call, unused-ignore]
         if isinstance(event, AliasEvent) or getattr(event, "anchor", None) is not None:
             raise ConstructorError(
                 None,
@@ -67,7 +67,7 @@ for first_character, resolvers in tuple(_StrategyLoader.yaml_implicit_resolvers.
         not in {"tag:yaml.org,2002:bool", "tag:yaml.org,2002:timestamp"}
     ]
 
-_StrategyLoader.add_implicit_resolver(  # type: ignore[no-untyped-call]
+_StrategyLoader.add_implicit_resolver(  # type: ignore[no-untyped-call, unused-ignore]
     "tag:yaml.org,2002:bool",
     re.compile(r"^(?:true|false)$", re.IGNORECASE),
     list("tTfF"),
