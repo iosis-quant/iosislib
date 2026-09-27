@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import inspect
 import re
 from types import MappingProxyType, ModuleType
 from typing import Any, TypeAlias, cast
@@ -118,6 +119,8 @@ def registry_from_exports(
                 ) from error
             if not isinstance(candidate, type) or not issubclass(candidate, TSFN):
                 continue
+            if inspect.isabstract(candidate):
+                continue
             operation = f"{namespace}.{_operation_name(export_name)}"
             key = (operation, candidate.VERSION)
             existing = operations.get(key)
@@ -130,8 +133,9 @@ def registry_from_exports(
 
 
 def builtin_registry() -> OperationRegistry:
-    """Return entries for public built-in transforms, sources, models, and backtests."""
+    """Return entries for public built-in transforms, sources, models, backtests, and metrics."""
     import iosislib.backtest as backtest
+    import iosislib.metrics as metrics
     import iosislib.models as models
     import iosislib.tsfn.adapters as adapters
     import iosislib.tsfn.transforms as transforms
@@ -139,6 +143,7 @@ def builtin_registry() -> OperationRegistry:
     return registry_from_exports(
         {
             "backtest": backtest,
+            "metrics": metrics,
             "model": models,
             "source": adapters,
             "transform": transforms,

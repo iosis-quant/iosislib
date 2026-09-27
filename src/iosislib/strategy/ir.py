@@ -348,6 +348,12 @@ class Strategy:
         metadata = _freeze_value(self.metadata, "metadata")
         if not isinstance(metadata, Mapping):
             raise TypeError("Strategy.metadata must be a mapping")
+        if "metrics" in metadata:
+            raise ValueError(
+                "Strategy.metadata.metrics is no longer supported: declare "
+                "metrics as strategy outputs using metric TSFN nodes "
+                "(e.g. op: metrics.mse); see docs/strategy-format.md"
+            )
         object.__setattr__(self, "metadata", metadata)
         self._validate_graph()
 

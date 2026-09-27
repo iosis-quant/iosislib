@@ -1,22 +1,13 @@
-"""Post-hoc metric extraction over materialized frames and cached nodes."""
-
-from iosislib.metrics.extract import extract_metrics
-from iosislib.metrics.extractor import MetricExtractor
-from iosislib.metrics.extractors import MaxDrawdown, MeanSquaredError
-from iosislib.metrics.strategy import (
-    MetricSpec,
-    ResolvedMetricSpec,
-    parse_metric_specs,
-    resolve_metric_specs,
-)
+from iosislib.metrics.base import MetricConfig, MetricTSFN
+from iosislib.metrics.regression import Mae, Mse
+from iosislib.metrics.trading import MaxDrawdown, Sharpe, TotalReturn
 
 __all__ = [
+    "Mae",
     "MaxDrawdown",
-    "MeanSquaredError",
-    "MetricExtractor",
-    "MetricSpec",
-    "ResolvedMetricSpec",
-    "extract_metrics",
-    "parse_metric_specs",
-    "resolve_metric_specs",
+    "MetricConfig",
+    "MetricTSFN",
+    "Mse",
+    "Sharpe",
+    "TotalReturn",
 ]

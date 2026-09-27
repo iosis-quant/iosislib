@@ -55,6 +55,16 @@ _DESCRIPTIONS: dict[str, str] = {
     "backtest.backtest": "Simulate policy orders against a feed. Materialized operation.",
     "model.light_gbm": "Walk-forward LightGBM regression model.",
     "model.dense_mlp": "Walk-forward dense MLP regression model.",
+    "metrics.mse": "Mean squared error between prediction and target. Emits one row.",
+    "metrics.mae": "Mean absolute error between prediction and target. Emits one row.",
+    "metrics.max_drawdown": "Largest peak-to-trough relative decline of an equity curve. Emits one row.",
+    "metrics.sharpe": "Mean over sample standard deviation of a returns column, not annualized. Emits one row.",
+    "metrics.total_return": "Relative change from the first to the last equity value. Emits one row.",
+}
+
+_METRIC_PARAMS: dict[str, str] = {
+    "timestamp_column": "Time column name (default 'timestamp')",
+    "drop_nonfinite": "Drop rows whose inputs are non-finite instead of raising (default false)",
 }
 
 _PARAM_DESCRIPTIONS: dict[str, dict[str, str]] = {
@@ -87,6 +97,11 @@ _PARAM_DESCRIPTIONS: dict[str, dict[str, str]] = {
         "risk_policy": "Mapping with 'kind: fractional_limit' or 'kind: fractional_kelly' and params",
         "initial_cash": "Starting cash (float)",
     },
+    "metrics.mse": _METRIC_PARAMS,
+    "metrics.mae": _METRIC_PARAMS,
+    "metrics.max_drawdown": _METRIC_PARAMS,
+    "metrics.sharpe": _METRIC_PARAMS,
+    "metrics.total_return": _METRIC_PARAMS,
 }
 
 

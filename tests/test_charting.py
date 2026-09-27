@@ -1,6 +1,7 @@
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, time, timezone, timedelta
 
 import matplotlib
+import matplotlib.collections
 import polars as pl
 import pytest
 
@@ -8,12 +9,23 @@ from iosislib.charting import (
     ChartTheme,
     DARK_THEME,
     LIGHT_THEME,
+    plot_bars,
+    plot_equity,
     plot_frame,
     plot_graph,
+    plot_scatter,
 )
 
 
 matplotlib.use("Agg")
+
+
+@pytest.fixture(autouse=True)
+def _close_figures():
+    yield
+    import matplotlib.pyplot as plt
+
+    plt.close("all")
 
 
 def _frame() -> pl.DataFrame:
@@ -200,4 +212,164 @@ def test_infinite_values_render_as_gaps() -> None:
     assert ydata[1] != ydata[1]
     assert ydata[0] == 1.0
     assert ydata[2] == 3.0
+    figure.clear()
+
+
+def _equity_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "timestamp": [datetime(2026, 1, 1) + timedelta(days=i) for i in range(4)],
+            "equity": [100.0, 110.0, 95.0, 105.0],
+            "cash": [50.0, 55.0, 45.0, 60.0],
+        }
+    )
+
+
+def test_plot_equity_draws_lines_and_fills_to_the_start_value() -> None:
+    figure, axes = plot_equity(_equity_frame(), columns=["equity"])
+
+    assert [line.get_label() for line in axes.lines] == ["equity"]
+    assert len(axes.collections) == 1
+    assert isinstance(axes.collections[0], matplotlib.collections.PolyCollection)
+    figure.clear()
+
+
+def test_plot_equity_fills_each_series_separately() -> None:
+    figure, axes = plot_equity(_equity_frame(), columns=["equity", "cash"])
+
+    assert len(axes.lines) == 2
+    assert len(axes.collections) == 2
+    figure.clear()
+
+
+def test_plot_equity_requires_numeric_value_columns() -> None:
+    frame = pl.DataFrame(
+        {
+            "timestamp": [datetime(2026, 1, 1), datetime(2026, 1, 2)],
+            "value": [None, None],
+        }
+    )
+    with pytest.raises(TypeError, match="plot_equity requires at least one numeric"):
+        plot_equity(frame)
+
+
+def _bar_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "day": [date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 3)],
+            "profit": [1.0, -2.0, 3.0],
+            "loss": [-0.5, 1.5, -1.0],
+        }
+    )
+
+
+def test_plot_bars_draws_one_grouped_container_per_column() -> None:
+    figure, axes = plot_bars(_bar_frame(), columns=["profit", "loss"])
+
+    assert len(axes.containers) == 2
+    assert [container.get_label() for container in axes.containers] == ["profit", "loss"]
+    assert all(len(container) == 3 for container in axes.containers)
+    figure.clear()
+
+
+def test_plot_bars_rejects_a_time_typed_axis() -> None:
+    frame = pl.DataFrame(
+        {"when": [time(12, 0), time(13, 0)], "value": [1.0, 2.0]}
+    )
+    with pytest.raises(TypeError, match="requires a Date or Datetime time column"):
+        plot_bars(frame, columns=["value"])
+
+
+def test_plot_bars_rejects_a_non_temporal_first_column() -> None:
+    frame = pl.DataFrame({"index": [1, 2], "value": [1.0, 2.0]})
+    with pytest.raises(TypeError, match="date/time values"):
+        plot_bars(frame, columns=["value"])
+
+
+def test_plot_scatter_needs_no_time_axis() -> None:
+    frame = pl.DataFrame(
+        {"prediction": [1.0, 2.0, 3.0], "target": [1.1, 2.2, 2.9]}
+    )
+    figure, axes = plot_scatter(frame, x="prediction", y="target")
+
+    assert len(axes.collections) == 1
+    assert axes.get_xlabel() == "prediction"
+    assert axes.get_ylabel() == "target"
+    figure.clear()
+
+
+def test_plot_scatter_skips_rows_with_non_finite_values() -> None:
+    frame = pl.DataFrame(
+        {
+            "prediction": [1.0, float("nan"), 3.0],
+            "target": [1.1, 2.2, float("inf")],
+        }
+    )
+    figure, axes = plot_scatter(frame, x="prediction", y="target")
+
+    offsets = axes.collections[0].get_offsets()
+    assert len(offsets) == 1
+    figure.clear()
+
+
+def test_plot_scatter_labels_every_y_series() -> None:
+    frame = pl.DataFrame(
+        {"a": [1.0, 2.0], "b": [2.0, 1.0], "x": [1.0, 2.0]}
+    )
+    figure, axes = plot_scatter(frame, x="x", y=["a", "b"])
+
+    assert [collection.get_label() for collection in axes.collections] == ["a", "b"]
+    assert axes.get_legend() is not None
+    figure.clear()
+
+
+def test_plot_scatter_legend_can_be_disabled() -> None:
+    frame = pl.DataFrame({"a": [1.0, 2.0], "x": [1.0, 2.0]})
+    figure, axes = plot_scatter(frame, x="x", y="a", legend=False)
+
+    assert axes.get_legend() is None
+    figure.clear()
+
+
+def test_plot_scatter_rejects_array_valued_columns() -> None:
+    frame = pl.DataFrame(
+        {"a": [[1.0, 2.0], [3.0, 4.0]], "x": [1.0, 2.0]}
+    )
+    with pytest.raises(TypeError, match="contains arrays"):
+        plot_scatter(frame, x="x", y="a")
+
+
+def test_plot_scatter_requires_declared_columns() -> None:
+    frame = pl.DataFrame({"x": [1.0]})
+    with pytest.raises(ValueError, match="Plot columns are not present in the frame"):
+        plot_scatter(frame, x="x", y="missing")
+    with pytest.raises(ValueError, match="x must be a non-empty column name"):
+        plot_scatter(frame, x="", y="x")
+
+
+def test_plot_scatter_requires_at_least_one_finite_pair() -> None:
+    frame = pl.DataFrame(
+        {"x": [float("nan")], "y": [float("nan")]}
+    )
+    with pytest.raises(TypeError, match="at least one row with finite"):
+        plot_scatter(frame, x="x", y="y")
+
+
+def test_plot_scatter_validates_y_max_points_and_bounds() -> None:
+    frame = pl.DataFrame({"x": [1.0], "y": [2.0]})
+    with pytest.raises(TypeError, match="y must be a column name or a sequence"):
+        plot_scatter(frame, x="x", y=3)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="must name at least one non-empty column"):
+        plot_scatter(frame, x="x", y=[])
+    with pytest.raises(ValueError, match="max_points must be"):
+        plot_scatter(frame, x="x", y="y", max_points=1)
+    with pytest.raises(ValueError, match="lower bound must be below"):
+        plot_scatter(frame, x="x", y="y", xlim=(2, 1))
+
+
+def test_plot_scatter_accepts_lazy_frames() -> None:
+    frame = pl.DataFrame({"x": [1.0, 2.0], "y": [2.0, 4.0]}).lazy()
+    figure, axes = plot_scatter(frame, x="x", y="y")
+
+    assert len(axes.collections) == 1
     figure.clear()

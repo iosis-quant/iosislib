@@ -38,8 +38,11 @@ surface for `Graph`, `Node`, and frame signatures.
   policies, risk controls, venue, and feeds.
 - **`iosislib.strategy`** -- portable `iosis.strategy` YAML parsing, lowering,
   and the operation registry.
-- **`iosislib.metrics`** -- post-hoc metric extraction over materialized frames.
-- **`iosislib.charting`** -- Matplotlib helpers for plotting graph results.
+- **`iosislib.metrics`** -- metric TSFNs (`metrics.mse`, `metrics.mae`,
+  `metrics.max_drawdown`, `metrics.sharpe`, `metrics.total_return`) that reduce
+  an output frame to a single metric row.
+- **`iosislib.charting`** -- Matplotlib helpers for plotting graph results,
+  plus declared-chart parsing and SVG rendering.
 
 ## Offline quickstart
 
@@ -82,8 +85,9 @@ first-time users:
 
 - **Warmup predictions are NaN.** Models train in walk-forward segments and only
   predict rows after a retraining boundary. With the default `{ every: 100 }`
-  scheduler the first 100 predictions are NaN. Exclude warm-up rows before
-  computing metrics over the full series.
+  scheduler the first 100 predictions are NaN. Metric nodes reject non-finite
+  inputs by default; set `drop_nonfinite: true` on the metric node to drop those
+  warm-up rows before the reduction instead of failing.
 - **Models fail loudly on nulls.** A single null in `features` or `target`
   raises instead of training (`NullPolicy.ERROR` is the default). Upstream
   transforms almost always produce warm-up nulls (e.g. the first `pct_change`

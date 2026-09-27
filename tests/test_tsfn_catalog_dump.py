@@ -7,7 +7,7 @@ import json
 from iosislib.catalog import dump_tsfn_catalog
 from iosislib.strategy import builtin_registry
 
-_CATEGORIES = {"backtest", "model", "source", "transform"}
+_CATEGORIES = {"backtest", "metrics", "model", "source", "transform"}
 
 
 def test_catalog_covers_registry_operations() -> None:

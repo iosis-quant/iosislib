@@ -71,7 +71,9 @@ inputs:
 - `version` is the SemVer version of the strategy document contract. The
   current supported version is `0.1.0`.
 - `name` is a human-readable strategy name.
-- `description` and `metadata` are optional and have no execution semantics.
+- `description` is optional. `metadata` is optional free-form data; the one
+  recognized key is `charts` (see Chart declarations), and the removed key
+  `metrics` is rejected with a migration error.
 - `nodes` maps stable, local identifiers to node declarations. Declaration
   order has no meaning.
 - `op` is a stable operation contract name such as `transform.logit`.
@@ -392,8 +394,9 @@ declared explicitly, in which case they must match the bindings.
 
 > **Warmup predictions are NaN.** Walk-forward models only predict rows after a
 > retraining boundary. With the default `{ every: 100 }` scheduler the first 100
-> predictions are NaN; exclude warm-up rows before computing metrics over the
-> full series.
+> predictions are NaN; metric nodes reject non-finite inputs by default, so set
+> `drop_nonfinite: true` on a metric node bound to a prediction to drop warm-up
+> rows instead of failing.
 
 A model regresses the target on the features in walk-forward segments. The
 `params` for `model.light_gbm` are:
@@ -456,6 +459,107 @@ on them would leak the future. A value of `0` disables purging.
 
 An omitted `splitter` uses the operation's default
 (`{ validation_size: 0.2 }`).
+
+## Metric operations
+
+Metrics are ordinary graph nodes. A metric node consumes its declared inputs,
+reduces them to a single value, and emits exactly one row stamped with the last
+input timestamp. Declare a metric node like any other node and expose its value
+through `outputs`:
+
+```yaml
+nodes:
+  change:
+    op: transform.delta
+    version: 0.2.0
+    inputs:
+      value: prices.probability
+    params:
+      output_column: change
+
+  sharpe:
+    op: metrics.sharpe
+    version: 1.0.0
+    inputs:
+      returns:
+        from: change.change
+        nulls: drop
+
+outputs:
+  signal: change.change
+  sharpe: sharpe.sharpe
+```
+
+| `op` | Inputs | Value |
+|------|--------|-------|
+| `metrics.mse` | `prediction`, `target` | mean squared error of `prediction - target` |
+| `metrics.mae` | `prediction`, `target` | mean absolute error of `prediction - target` |
+| `metrics.max_drawdown` | `equity` | largest peak-relative drawdown of the equity curve |
+| `metrics.sharpe` | `returns` | `mean / stdev` of returns (`ddof=1`, not annualized) |
+| `metrics.total_return` | `equity` | `last / first - 1` of the equity curve |
+
+Every metric op is version `1.0.0`, emits one `Float64` column named after the
+metric (`mse`, `mae`, `max_drawdown`, `sharpe`, `total_return`), and accepts:
+
+- `timestamp_column` (default `timestamp`): the node's time column name; it
+  must match the parents' time column like any other node;
+- `drop_nonfinite` (default `false`): drop rows where any input is non-finite
+  (NaN, infinity, or a row that survived a permissive null policy) before the
+  reduction.
+
+Behavior notes:
+
+- Inputs are strict. By default any NaN/inf raises with per-column counts;
+  nulls are governed by the per-input null policy and default to a loud
+  failure as well. For warm-up rows (the first `delta`, the first 100
+  walk-forward predictions) either declare `nulls: drop` on the binding or set
+  `drop_nonfinite: true` on the metric node.
+- `metrics.sharpe` requires a non-zero standard deviation of returns and
+  `metrics.total_return` requires a non-zero first value. Nodes require at
+  least their minimum row count after filtering: `mse`/`mae` need 1 row, the
+  other metrics need 2.
+- Metric values are not folded into any run summary; they are ordinary named
+  outputs like every other node output.
+
+## Chart declarations
+
+`metadata.charts` declares which charts a runner should render for a
+strategy's outputs. Nothing is inferred: only declared charts are rendered,
+and each declaration must reference a declared output.
+
+```yaml
+metadata:
+  charts:
+    - kind: equity
+      columns: [equity]
+      title: Equity curve
+    - kind: scatter
+      name: fit
+      output: prediction
+      x: prediction
+      y: [target]
+```
+
+Each entry is a mapping with:
+
+- `kind` (required): one of `line`, `scatter`, `bars`, `equity`.
+- `output` (required when the strategy declares more than one output): the
+  strategy output name whose frame feeds the chart; defaults to the sole
+  output.
+- `name`: artifact name, defaulting to `<output>_<kind>`; must start with a
+  letter and contain only letters, digits, `.`, `_`, or `-`, and must be
+  unique across declarations.
+- `columns`: column names to plot; required for `line`, `bars`, and `equity`.
+  `bars` requires a `Date`/`Datetime` time column.
+- `x`, `y`: required for `scatter`, rejected otherwise. `x` is one column;
+  `y` is a column name or list of column names. Both must be scalar numeric.
+- `title`: optional chart title.
+
+Validation runs at strategy compile time (`parse_chart_decls`); unknown
+fields, unknown outputs, and kind/field mismatches are errors. At render time
+(`render_chart` / `render_chart_decls`) a declaration always produces an SVG:
+if drawing fails (for example a missing column at render time), a
+deterministic placeholder SVG carrying the reason is emitted instead.
 
 ## Stability boundary
 

@@ -15,6 +15,7 @@ Keep the library narrower than a generic workflow orchestrator or backtester. Po
 - `src/iosislib/core/utils.py`: generic dtype, shape, serialization, tolerance, and zero-copy helpers.
 - `src/iosislib/tsfn/transforms/`: concrete transforms such as delta, logit, ratio, and spread.
 - `src/iosislib/tsfn/adapters/`: data-producing TSFNs such as Polymarket and yfinance.
+- `src/iosislib/metrics/`: `MetricTSFN` and the concrete metric operations.
 - `tests/`: the tracked pytest suite. `examples/` contains runnable examples.
 - `temp/`: ignored research and prototypes only. Production code and tracked tests must not depend on it.
 
@@ -84,6 +85,14 @@ A Polars null means missing or invalid data, not zero, NaN, or an empty value. P
 Custom null-handler functions require an explicit behavior version through `NullHandler`, the Node mapping, or `function.__iosis_version__`; changing handler behavior requires changing that version. Models default to loud failure on null input or prediction output. Do not silently edit market/model data to make it look complete. Diagnose feed behavior, alignment, or plotting before changing values.
 
 When crossing out of Polars, use the existing Arrow/NumPy/Torch bridge methods. They attempt zero-copy transfer and validate aliasing when requested, but zero-copy is a conditional invariant, not a slogan: null bitmaps, non-contiguous buffers, unsupported Arrow DLPack paths, or dtype conversion may require an explicit allowed copy. Keep Python orchestration outside the hot elementwise path.
+
+## Metrics And Charts
+
+Metrics are ordinary graph nodes, not a post-hoc extraction pass. `MetricTSFN` (in `src/iosislib/metrics/`) is an abstract `BatchTSFN`; concrete ops (`metrics.mse`, `metrics.mae`, `metrics.max_drawdown`, `metrics.sharpe`, `metrics.total_return`, all version `1.0.0`) declare fixed input names, reduce to a single value, and emit exactly one row stamped with the last input timestamp. They are declared like any other node and exposed through `outputs`; there is no separate metrics channel in a run summary. `Strategy.metadata.metrics` is rejected with a migration error.
+
+Metric inputs are strict: NaN/inf raises with per-column counts unless the node sets `drop_nonfinite: true`, which drops rows where any input is non-finite before the reduction. Nulls remain governed by the per-input null policy (default ERROR) and are not covered by `drop_nonfinite` unless a permissive policy lets them through. A metric result must be a finite Python float or the node raises. Do not reintroduce extractor classes, metric registries keyed by summary names, or silent default filtering.
+
+Charts are declared, never inferred. Free-form `metadata.charts` entries (`kind`: `line`, `scatter`, `bars`, `equity`, plus `output`/`columns`/`x`/`y`/`name`/`title`) are parsed by `charting.parse_chart_decls` against the strategy's declared outputs at compile time. Rendering accepts a plain Polars frame plus one declaration (`charting.render_chart`) or a frame mapping plus declarations (`charting.render_chart_decls`) and always returns an SVG: failures degrade to a deterministic placeholder SVG carrying the reason, never an exception. `charting.plot_*` primitives (`plot_frame`, `plot_scatter`, `plot_bars`, `plot_equity`) are generic frame plotters usable on any frame, with no metric or strategy coupling.
 
 ## Model Lifecycle
 
