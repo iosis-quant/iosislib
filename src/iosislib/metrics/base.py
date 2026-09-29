@@ -42,8 +42,10 @@ class MetricTSFN(BatchTSFN[MetricConfig], abc.ABC):
     Subclasses declare ``METRIC_NAME``, ``INPUT_COLUMNS``, and optionally
     ``MIN_ROWS``, and implement :meth:`metric_value`. Nulls follow each input's
     null policy (default ERROR). NaN/inf inputs raise ``ValueError`` unless
-    ``drop_nonfinite`` drops rows where any input is not finite. The output row
-    is stamped with the last input timestamp.
+    ``drop_nonfinite`` drops rows where any input is not finite. The frame is
+    sorted by time first, keeping input order among equal timestamps, and the
+    output row is stamped with the last input timestamp regardless of how many
+    rows the reduction filters out.
     """
 
     CONFIG_CLS = MetricConfig
@@ -54,18 +56,26 @@ class MetricTSFN(BatchTSFN[MetricConfig], abc.ABC):
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
         metric_name = self.METRIC_NAME
         input_columns = self.INPUT_COLUMNS
-        if not isinstance(metric_name, str) or not metric_name:
-            raise ValueError(
-                f"{type(self).__name__}.METRIC_NAME must be a non-empty string"
+        if not isinstance(metric_name, str):
+            raise TypeError(
+                f"{type(self).__name__}.METRIC_NAME must be a string"
             )
-        if (
-            not isinstance(input_columns, tuple)
-            or not input_columns
-            or not all(isinstance(name, str) and name for name in input_columns)
-        ):
+        if not metric_name:
+            raise ValueError(
+                f"{type(self).__name__}.METRIC_NAME must be non-empty"
+            )
+        if not isinstance(input_columns, tuple):
+            raise TypeError(
+                f"{type(self).__name__}.INPUT_COLUMNS must be a tuple of column names"
+            )
+        if not all(isinstance(name, str) for name in input_columns):
+            raise TypeError(
+                f"{type(self).__name__}.INPUT_COLUMNS must contain only strings"
+            )
+        if not input_columns or not all(input_columns):
             raise ValueError(
                 f"{type(self).__name__}.INPUT_COLUMNS must be a non-empty tuple "
-                "of column names"
+                "of non-empty column names"
             )
         duplicates = sorted(
             {name for name in input_columns if input_columns.count(name) > 1}
@@ -75,7 +85,9 @@ class MetricTSFN(BatchTSFN[MetricConfig], abc.ABC):
                 f"{type(self).__name__}.INPUT_COLUMNS contains duplicates: {duplicates}"
             )
         min_rows = self.MIN_ROWS
-        if isinstance(min_rows, bool) or not isinstance(min_rows, int) or min_rows < 1:
+        if isinstance(min_rows, bool) or not isinstance(min_rows, int):
+            raise TypeError(f"{type(self).__name__}.MIN_ROWS must be an integer")
+        if min_rows < 1:
             raise ValueError(
                 f"{type(self).__name__}.MIN_ROWS must be a positive integer"
             )
@@ -105,13 +117,15 @@ class MetricTSFN(BatchTSFN[MetricConfig], abc.ABC):
         nonfinite = pl.any_horizontal(
             *(_nonfinite(name) for name in self.INPUT_COLUMNS)
         )
-        ordered = frame.sort(time_column)
-        flagged = ordered.filter(nonfinite)
-        if flagged.height:
+        ordered = frame.sort(time_column, maintain_order=True)
+        stamp = ordered.tail(1)
+        nonfinite_rows = ordered.select(nonfinite.alias("__nonfinite")).to_series()
+        if nonfinite_rows.any():
             if not params.drop_nonfinite:
-                counts = flagged.select(
+                counts = ordered.select(
                     tuple(
-                        _nonfinite(name).sum().alias(name) for name in self.INPUT_COLUMNS
+                        _nonfinite(name).sum().alias(name)
+                        for name in self.INPUT_COLUMNS
                     )
                 ).row(0, named=True)
                 detail = ", ".join(
@@ -122,7 +136,7 @@ class MetricTSFN(BatchTSFN[MetricConfig], abc.ABC):
                     f"({detail}); set drop_nonfinite: true to drop rows whose "
                     "inputs are not finite"
                 )
-            ordered = ordered.filter(~nonfinite)
+            ordered = ordered.filter(~nonfinite_rows)
         if ordered.height < self.MIN_ROWS:
             raise ValueError(
                 f"{type(self).__name__} requires at least {self.MIN_ROWS} row(s), "
@@ -139,7 +153,7 @@ class MetricTSFN(BatchTSFN[MetricConfig], abc.ABC):
             raise ValueError(
                 f"{type(self).__name__} produced a non-finite value ({result})"
             )
-        return ordered.tail(1).select(
+        return stamp.select(
             pl.col(time_column),
             pl.lit(result, dtype=pl.Float64).alias(self.METRIC_NAME),
         )

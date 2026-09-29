@@ -90,6 +90,24 @@ def test_max_drawdown_of_rising_curve_is_zero() -> None:
     assert result["max_drawdown"][0] == 0.0
 
 
+def test_max_drawdown_measures_decline_of_dust_scale_equity() -> None:
+    frame = _frame({"equity": [1e-13, 1e-14, 1e-15]})
+    result = _run(MaxDrawdown({}), frame)
+    assert result["max_drawdown"][0] == pytest.approx(0.99)
+
+
+@pytest.mark.parametrize(
+    "equity",
+    ([0.0, -10.0, -20.0], [-100.0, -200.0, -400.0]),
+)
+def test_max_drawdown_rejects_a_curve_that_never_has_a_positive_peak(
+    equity: list[float],
+) -> None:
+    frame = _frame({"equity": equity})
+    with pytest.raises(ValueError, match="positive running peak"):
+        _run(MaxDrawdown({}), frame)
+
+
 def test_sharpe_uses_sample_standard_deviation() -> None:
     returns = [0.01, -0.02, 0.03]
     frame = _frame({"returns": returns})
@@ -105,6 +123,12 @@ def test_sharpe_rejects_zero_variance() -> None:
         _run(Sharpe({}), frame)
 
 
+def test_sharpe_rejects_standard_deviation_that_underflows_to_zero() -> None:
+    frame = _frame({"returns": [1e-200, 2e-200, 3e-200]})
+    with pytest.raises(ValueError, match="non-zero standard deviation"):
+        _run(Sharpe({}), frame)
+
+
 def test_total_return_is_last_over_first_minus_one() -> None:
     frame = _frame({"equity": [100.0, 90.0, 105.0]})
     result = _run(TotalReturn({}), frame)
@@ -114,7 +138,13 @@ def test_total_return_is_last_over_first_minus_one() -> None:
 
 def test_total_return_rejects_zero_first_value() -> None:
     frame = _frame({"equity": [0.0, 10.0]})
-    with pytest.raises(ValueError, match="non-zero first equity value"):
+    with pytest.raises(ValueError, match="positive first equity value"):
+        _run(TotalReturn({}), frame)
+
+
+def test_total_return_rejects_negative_first_value() -> None:
+    frame = _frame({"equity": [-100.0, -200.0]})
+    with pytest.raises(ValueError, match="positive first equity value"):
         _run(TotalReturn({}), frame)
 
 
@@ -123,6 +153,32 @@ def test_output_row_is_stamped_with_the_last_sorted_timestamp() -> None:
     shuffled = frame.reverse()
     result = _run(TotalReturn({}), shuffled)
     assert result["timestamp"].to_list() == [TIMESTAMPS[2]]
+
+
+def test_output_row_keeps_the_last_input_timestamp_when_rows_are_dropped() -> None:
+    frame = _frame(
+        {
+            "prediction": [1.0, 2.0, 3.0, float("nan")],
+            "target": [1.0, 2.0, 3.0, 99.0],
+        }
+    )
+    result = _run(Mse({"drop_nonfinite": True}), frame)
+    assert result["timestamp"].to_list() == [TIMESTAMPS[3]]
+    assert result["mse"][0] == pytest.approx(0.0)
+
+
+def test_equal_timestamps_keep_their_input_order() -> None:
+    frame = pl.DataFrame(
+        {
+            "timestamp": [TIMESTAMPS[0], TIMESTAMPS[1], TIMESTAMPS[1]],
+            "equity": [100.0, 90.0, 120.0],
+        },
+        schema={"timestamp": pl.Datetime, "equity": pl.Float64},
+    )
+    assert _run(TotalReturn({}), frame)["total_return"][0] == pytest.approx(0.2)
+    assert _run(TotalReturn({}), frame.reverse())["total_return"][0] == pytest.approx(
+        -0.1
+    )
 
 
 def test_nonfinite_inputs_raise_with_per_column_counts() -> None:
@@ -203,8 +259,19 @@ def test_invalid_metric_classvar_contracts_are_rejected() -> None:
         def metric_value(self, frame: pl.DataFrame) -> float:
             return 0.0
 
-    with pytest.raises(ValueError, match="METRIC_NAME must be a non-empty string"):
+    with pytest.raises(ValueError, match="METRIC_NAME must be non-empty"):
         EmptyName({})
+
+    class NamedWrong(MetricTSFN):
+        VERSION = "1.0.0"
+        METRIC_NAME = 3  # type: ignore[assignment]
+        INPUT_COLUMNS = ("value",)
+
+        def metric_value(self, frame: pl.DataFrame) -> float:
+            return 0.0
+
+    with pytest.raises(TypeError, match="METRIC_NAME must be a string"):
+        NamedWrong({})
 
     class DuplicateInputs(MetricTSFN):
         VERSION = "1.0.0"
@@ -217,6 +284,17 @@ def test_invalid_metric_classvar_contracts_are_rejected() -> None:
     with pytest.raises(ValueError, match="contains duplicates"):
         DuplicateInputs({})
 
+    class ColumnNamesWrong(MetricTSFN):
+        VERSION = "1.0.0"
+        METRIC_NAME = "cols"
+        INPUT_COLUMNS = "value"  # type: ignore[assignment]
+
+        def metric_value(self, frame: pl.DataFrame) -> float:
+            return 0.0
+
+    with pytest.raises(TypeError, match="INPUT_COLUMNS must be a tuple"):
+        ColumnNamesWrong({})
+
     class BadMinRows(MetricTSFN):
         VERSION = "1.0.0"
         METRIC_NAME = "rows"
@@ -228,6 +306,18 @@ def test_invalid_metric_classvar_contracts_are_rejected() -> None:
 
     with pytest.raises(ValueError, match="MIN_ROWS must be a positive integer"):
         BadMinRows({})
+
+    class MinRowsWrong(MetricTSFN):
+        VERSION = "1.0.0"
+        METRIC_NAME = "rows"
+        INPUT_COLUMNS = ("value",)
+        MIN_ROWS = "2"  # type: ignore[assignment]
+
+        def metric_value(self, frame: pl.DataFrame) -> float:
+            return 0.0
+
+    with pytest.raises(TypeError, match="MIN_ROWS must be an integer"):
+        MinRowsWrong({})
 
 
 def test_metric_value_must_return_a_finite_number() -> None:

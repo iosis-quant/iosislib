@@ -463,9 +463,11 @@ An omitted `splitter` uses the operation's default
 ## Metric operations
 
 Metrics are ordinary graph nodes. A metric node consumes its declared inputs,
-reduces them to a single value, and emits exactly one row stamped with the last
-input timestamp. Declare a metric node like any other node and expose its value
-through `outputs`:
+sorts them by time (keeping input order among equal timestamps), reduces them
+to a single value, and emits exactly one row stamped with the last input
+timestamp (rows the reduction filters out do not move the stamp).
+Declare a metric node like any other node and expose its value through
+`outputs`:
 
 ```yaml
 nodes:
@@ -511,11 +513,15 @@ Behavior notes:
 
 - Inputs are strict. By default any NaN/inf raises with per-column counts;
   nulls are governed by the per-input null policy and default to a loud
-  failure as well. For warm-up rows (the first `delta`, the first 100
-  walk-forward predictions) either declare `nulls: drop` on the binding or set
-  `drop_nonfinite: true` on the metric node.
-- `metrics.sharpe` requires a non-zero standard deviation of returns and
-  `metrics.total_return` requires a non-zero first value. Nodes require at
+  failure as well, and `drop_nonfinite` never rescues them: it only drops
+  NaN/inf rows (plus nulls a permissive policy already let through). For
+  warm-up *null* rows (the first `delta` value, predictions before a
+  walk-forward model exists) declare `nulls: drop` on the binding; use
+  `drop_nonfinite: true` for warm-up rows that arrive as NaN.
+- `metrics.sharpe` requires a non-zero standard deviation of returns,
+  `metrics.total_return` requires a positive first value, and
+  `metrics.max_drawdown` requires a positive running peak (a curve that never
+  exceeds zero has no defined relative drawdown). Nodes require at
   least their minimum row count after filtering: `mse`/`mae` need 1 row, the
   other metrics need 2.
 - Metric values are not folded into any run summary; they are ordinary named

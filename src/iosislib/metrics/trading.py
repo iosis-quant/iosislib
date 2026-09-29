@@ -10,9 +10,10 @@ from iosislib.metrics.base import MetricTSFN
 class MaxDrawdown(MetricTSFN):
     """Largest peak-to-trough relative decline of an equity column.
 
-    Drawdown per row is measured against the running peak; rows whose running
-    peak is not positive contribute no drawdown, so a monotonically
-    non-declining curve yields ``0.0``.
+    Drawdown per row is measured against the running peak, which must be
+    positive: rows before the curve turns positive contribute no drawdown, and
+    a monotonically non-declining curve yields ``0.0``. A curve whose running
+    peak never exceeds zero has no defined relative drawdown and raises.
     """
 
     VERSION = "1.0.0"
@@ -23,7 +24,12 @@ class MaxDrawdown(MetricTSFN):
     def metric_value(self, frame: pl.DataFrame) -> float:
         equity = pl.col("equity")
         peak = equity.cum_max()
-        drawdown = pl.when(peak > 1e-12).then((peak - equity) / peak).otherwise(0.0)
+        if not frame.select((peak > 0).any()).item():
+            raise ValueError(
+                "MaxDrawdown requires a positive running peak: the equity curve "
+                "never exceeded zero, so a relative drawdown is undefined"
+            )
+        drawdown = pl.when(peak > 0).then((peak - equity) / peak).otherwise(0.0)
         return frame.select(drawdown.max()).item()
 
 
@@ -31,7 +37,8 @@ class Sharpe(MetricTSFN):
     """Mean divided by sample standard deviation of a returns column.
 
     Not annualized: multiply externally when a scaling factor is required.
-    Requires a non-zero standard deviation.
+    Requires distinct returns whose standard deviation is non-zero and
+    representable.
     """
 
     VERSION = "1.0.0"
@@ -48,7 +55,7 @@ class Sharpe(MetricTSFN):
             pl.col("returns").mean().alias("mean"),
             pl.col("returns").std(ddof=1).alias("std"),
         ).row(0)
-        if std is None:
+        if std is None or std == 0.0:
             raise ValueError(
                 "Sharpe requires a non-zero standard deviation of returns"
             )
@@ -58,7 +65,8 @@ class Sharpe(MetricTSFN):
 class TotalReturn(MetricTSFN):
     """Relative change from the first to the last value of an equity column.
 
-    ``(last / first) - 1``; the first value must be non-zero.
+    ``(last / first) - 1``; the first value must be positive, since a zero or
+    negative baseline makes the relative change meaningless.
     """
 
     VERSION = "1.0.0"
@@ -71,9 +79,10 @@ class TotalReturn(MetricTSFN):
             pl.col("equity").first().alias("first"),
             pl.col("equity").last().alias("last"),
         ).row(0)
-        if first == 0.0:
+        if first <= 0.0:
             raise ValueError(
-                "TotalReturn requires a non-zero first equity value"
+                "TotalReturn requires a positive first equity value, "
+                f"got {first}"
             )
         return float(last) / float(first) - 1.0
 
