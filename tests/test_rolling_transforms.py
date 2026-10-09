@@ -16,6 +16,10 @@ from iosislib.tsfn.transforms import (
     RollingMeanConfig,
     RollingMedian,
     RollingMin,
+    RollingPercentileRank,
+    RollingPercentileRankConfig,
+    RollingQuantile,
+    RollingQuantileConfig,
     RollingStd,
     RollingSum,
     RollingZScore,
@@ -205,9 +209,169 @@ def test_rolling_transforms_are_discovered_by_the_builtin_registry() -> None:
         "transform.rolling_mean": RollingMean,
         "transform.rolling_median": RollingMedian,
         "transform.rolling_min": RollingMin,
+        "transform.rolling_percentile_rank": RollingPercentileRank,
+        "transform.rolling_quantile": RollingQuantile,
         "transform.rolling_std": RollingStd,
         "transform.rolling_sum": RollingSum,
         "transform.rolling_z_score": RollingZScore,
     }
     for operation, cls in expected.items():
         assert registry.resolve(operation, cls.VERSION) is cls
+
+
+def test_rolling_quantile_computes_window_quantiles() -> None:
+    node = Node(
+        RollingQuantile,
+        bindings={"value": source((1.0, 2.0, 3.0, 4.0, 5.0)).value},
+        parameters={"periods": 3},
+    )
+
+    result = collect(node)
+
+    assert result["rolling_quantile"].to_list() == pytest.approx(
+        [1.0, 1.5, 2.0, 3.0, 4.0]
+    )
+
+
+def test_rolling_quantile_skips_nulls_and_honors_min_samples() -> None:
+    values = (1.0, None, 3.0, 4.0)
+    relaxed = collect(
+        Node(
+            RollingQuantile,
+            bindings={"value": source(values).value},
+            parameters={"periods": 3, "min_samples": 1},
+        )
+    )
+    strict = collect(
+        Node(
+            RollingQuantile,
+            bindings={"value": source(values).value},
+            parameters={"periods": 3, "min_samples": 2},
+        )
+    )
+
+    assert relaxed["rolling_quantile"].to_list() == pytest.approx(
+        [1.0, 1.0, 2.0, 3.5]
+    )
+    assert strict["rolling_quantile"].to_list() == pytest.approx(
+        [None, None, 2.0, 3.5]
+    )
+
+
+def test_rolling_quantile_at_half_matches_rolling_median() -> None:
+    values = (-4.0, 3.0, -2.0, None, 5.0, -1.0)
+    quantile = collect(
+        Node(
+            RollingQuantile,
+            bindings={"value": source(values).value},
+            parameters={"periods": 3},
+        )
+    )
+    median = collect(
+        Node(RollingMedian, bindings={"value": source(values).value})
+    )
+
+    assert quantile["rolling_quantile"].to_list() == pytest.approx(
+        median["rolling_median"].to_list(),
+        rel=1e-12,
+        abs=1e-12,
+    )
+
+
+def test_rolling_quantile_supports_upper_quantiles() -> None:
+    node = Node(
+        RollingQuantile,
+        bindings={"value": source((-4.0, 3.0, -2.0, None, 5.0, -1.0)).value},
+        parameters={"periods": 3, "quantile": 0.9},
+    )
+
+    result = collect(node)
+
+    assert result["rolling_quantile"].to_list() == pytest.approx(
+        [-4.0, 2.3, 2.0, 2.5, 4.3, 4.4]
+    )
+
+
+def test_rolling_quantile_config_rejects_invalid_quantiles() -> None:
+    with pytest.raises(TypeError, match="quantile must be a number"):
+        RollingQuantileConfig(quantile=True)
+    with pytest.raises(ValueError, match="quantile must be between 0 and 1"):
+        RollingQuantileConfig(quantile=1.5)
+    with pytest.raises(ValueError, match="quantile must be between 0 and 1"):
+        RollingQuantileConfig(quantile=-0.1)
+    with pytest.raises(TypeError, match="interpolation must be a string"):
+        RollingQuantileConfig(interpolation=1)
+    with pytest.raises(ValueError, match="interpolation must be one of"):
+        RollingQuantileConfig(interpolation="bogus")
+
+
+def test_rolling_percentile_rank_normalizes_within_window() -> None:
+    node = Node(
+        RollingPercentileRank,
+        bindings={"value": source((1.0, 3.0, 2.0)).value},
+        parameters={"periods": 3},
+    )
+
+    result = collect(node)
+
+    assert result["rolling_percentile_rank"].to_list() == pytest.approx(
+        [0.0, 1.0, 0.5]
+    )
+
+
+def test_rolling_percentile_rank_nulls_missing_values_and_unmet_windows() -> None:
+    with_nulls = collect(
+        Node(
+            RollingPercentileRank,
+            bindings={"value": source((-4.0, 3.0, -2.0, None, 5.0, -1.0)).value},
+            parameters={"periods": 3},
+        )
+    )
+    with_min_samples = collect(
+        Node(
+            RollingPercentileRank,
+            bindings={"value": source((1.0, 2.0, 3.0)).value},
+            parameters={"periods": 3, "min_samples": 3},
+        )
+    )
+
+    assert with_nulls["rolling_percentile_rank"].to_list() == pytest.approx(
+        [0.0, 1.0, 0.5, None, 1.0, 0.0]
+    )
+    assert with_min_samples["rolling_percentile_rank"].to_list() == pytest.approx(
+        [None, None, 1.0]
+    )
+
+
+def test_rolling_percentile_rank_ties_follow_configured_method() -> None:
+    values = (2.0, 2.0, 1.0)
+    average = collect(
+        Node(
+            RollingPercentileRank,
+            bindings={"value": source(values).value},
+            parameters={"periods": 3},
+        )
+    )
+    highest = collect(
+        Node(
+            RollingPercentileRank,
+            bindings={"value": source(values).value},
+            parameters={"periods": 3, "method": "max"},
+        )
+    )
+
+    assert average["rolling_percentile_rank"].to_list() == pytest.approx(
+        [0.0, 0.5, 0.0]
+    )
+    assert highest["rolling_percentile_rank"].to_list() == pytest.approx(
+        [0.0, 1.0, 0.0]
+    )
+
+
+def test_rolling_percentile_rank_config_rejects_invalid_methods() -> None:
+    with pytest.raises(TypeError, match="method must be a string"):
+        RollingPercentileRankConfig(method=1)
+    with pytest.raises(ValueError, match="method must be one of"):
+        RollingPercentileRankConfig(method="bogus")
+    with pytest.raises(ValueError, match="method must be one of"):
+        RollingPercentileRankConfig(method="random")

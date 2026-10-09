@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import cast
+from numbers import Real
+from typing import Literal, cast
 
 import polars as pl
 
@@ -341,6 +342,143 @@ class RollingVar(RollingTransform):
         ddof = cast(RollingVarConfig, self.parameters).ddof
         return value.rolling_var(
             window_size=periods, min_samples=min_samples, ddof=ddof
+        )
+
+
+_QUANTILE_INTERPOLATIONS = frozenset(
+    {"equiprobable", "higher", "linear", "lower", "midpoint", "nearest"}
+)
+
+_RANK_METHODS = frozenset({"average", "dense", "max", "min"})
+
+
+@dataclass(frozen=True)
+class RollingQuantileConfig(RollingConfig):
+    output_column: str = "rolling_quantile"
+    quantile: float = 0.5
+    interpolation: Literal[
+        "equiprobable", "higher", "linear", "lower", "midpoint", "nearest"
+    ] = "linear"
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if isinstance(self.quantile, bool) or not isinstance(self.quantile, Real):
+            raise TypeError("quantile must be a number")
+        if not 0.0 <= float(self.quantile) <= 1.0:
+            raise ValueError("quantile must be between 0 and 1 inclusive")
+        if not isinstance(self.interpolation, str):
+            raise TypeError("interpolation must be a string")
+        if self.interpolation not in _QUANTILE_INTERPOLATIONS:
+            raise ValueError(
+                "interpolation must be one of "
+                f"{sorted(_QUANTILE_INTERPOLATIONS)}"
+            )
+
+
+class RollingQuantile(RollingTransform):
+    """Rolling quantile over a window at an arbitrary quantile level.
+
+    ``quantile=0.5`` with the default linear interpolation matches
+    ``RollingMedian`` up to floating-point noise. ``interpolation`` selects
+    the Polars quantile interpolation method for values that fall between
+    observations.
+    """
+
+    VERSION = "0.1.0"
+    CONFIG_CLS = RollingQuantileConfig
+
+    def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
+        params = self.parameters
+        return (
+            FrameSignature(
+                time=TimeAxis(column=params.timestamp_column),
+                columns=((params.input_column, pl.Float64),),
+            ),
+            FrameSignature(
+                time=TimeAxis(column=params.timestamp_column),
+                columns=((params.output_column, pl.Float64),),
+            ),
+        )
+
+    def rolling_expr(
+        self,
+        value: pl.Expr,
+        *,
+        periods: int,
+        min_samples: int,
+    ) -> pl.Expr:
+        params = cast(RollingQuantileConfig, self.parameters)
+        return value.rolling_quantile(
+            float(params.quantile),
+            params.interpolation,
+            window_size=periods,
+            min_samples=min_samples,
+        )
+
+
+@dataclass(frozen=True)
+class RollingPercentileRankConfig(RollingConfig):
+    output_column: str = "rolling_percentile_rank"
+    method: Literal["average", "dense", "max", "min"] = "average"
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.method, str):
+            raise TypeError("method must be a string")
+        if self.method not in _RANK_METHODS:
+            raise ValueError(f"method must be one of {sorted(_RANK_METHODS)}")
+
+
+class RollingPercentileRank(RollingTransform):
+    """Percentile rank of each value within its trailing window.
+
+    The current value is ranked against the non-null observations in the
+    window ending at its timestamp (native Polars ``rolling_rank``; ties
+    follow ``method``) and normalized to ``[0, 1]`` as
+    ``(rank - 1) / (count - 1)``. A single-observation window ranks 0, and
+    a null value or an unmet ``min_samples`` window stays null. ``random``
+    is excluded from ``method`` because rank output must be deterministic.
+    """
+
+    VERSION = "0.1.0"
+    CONFIG_CLS = RollingPercentileRankConfig
+
+    def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
+        params = self.parameters
+        return (
+            FrameSignature(
+                time=TimeAxis(column=params.timestamp_column),
+                columns=((params.input_column, pl.Float64),),
+            ),
+            FrameSignature(
+                time=TimeAxis(column=params.timestamp_column),
+                columns=((params.output_column, pl.Float64),),
+            ),
+        )
+
+    def rolling_expr(
+        self,
+        value: pl.Expr,
+        *,
+        periods: int,
+        min_samples: int,
+    ) -> pl.Expr:
+        method = cast(RollingPercentileRankConfig, self.parameters).method
+        rank = value.rolling_rank(
+            window_size=periods,
+            min_samples=min_samples,
+            method=method,
+        ).cast(pl.Float64)
+        count = value.is_not_null().cast(pl.Float64).rolling_sum(
+            window_size=periods,
+            min_samples=1,
+        )
+        return (
+            pl.when(rank.is_null())
+            .then(pl.lit(None, dtype=pl.Float64))
+            .when(count <= 1.0)
+            .then(pl.lit(0.0))
+            .otherwise((rank - 1.0) / (count - 1.0))
         )
 
 

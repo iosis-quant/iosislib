@@ -16,6 +16,7 @@ from iosislib.tsfn.transforms.log_return import LogReturn, LogReturnConfig
 from iosislib.tsfn.transforms.logit import Logit, LogitConfig
 from iosislib.tsfn.transforms.negate import Negate, NegateConfig
 from iosislib.tsfn.transforms.pct_change import PctChange, PctChangeConfig
+from iosislib.tsfn.transforms.product import Product, ProductConfig
 from iosislib.tsfn.transforms.ratio import Ratio, RatioConfig
 from iosislib.tsfn.transforms.rolling import (
     RollingCov,
@@ -30,6 +31,10 @@ from iosislib.tsfn.transforms.rolling import (
     RollingMedianConfig,
     RollingMin,
     RollingMinConfig,
+    RollingPercentileRank,
+    RollingPercentileRankConfig,
+    RollingQuantile,
+    RollingQuantileConfig,
     RollingStd,
     RollingStdConfig,
     RollingSum,
@@ -40,8 +45,24 @@ from iosislib.tsfn.transforms.rolling import (
     RollingZScoreConfig,
 )
 from iosislib.tsfn.transforms.spread import Spread, SpreadConfig
+from iosislib.tsfn.transforms.unary import (
+    Abs,
+    AbsConfig,
+    Clip,
+    ClipConfig,
+    Power,
+    PowerConfig,
+    Sign,
+    SignConfig,
+    Sqrt,
+    SqrtConfig,
+)
 
 __all__ = [
+    "Abs",
+    "AbsConfig",
+    "Clip",
+    "ClipConfig",
     "Delta",
     "DeltaConfig",
     "EwmMean",
@@ -70,6 +91,10 @@ __all__ = [
     "NegateConfig",
     "PctChange",
     "PctChangeConfig",
+    "Power",
+    "PowerConfig",
+    "Product",
+    "ProductConfig",
     "Ratio",
     "RatioConfig",
     "RollingCov",
@@ -84,6 +109,10 @@ __all__ = [
     "RollingMedianConfig",
     "RollingMin",
     "RollingMinConfig",
+    "RollingPercentileRank",
+    "RollingPercentileRankConfig",
+    "RollingQuantile",
+    "RollingQuantileConfig",
     "RollingStd",
     "RollingStdConfig",
     "RollingSum",
@@ -92,6 +121,10 @@ __all__ = [
     "RollingVarConfig",
     "RollingZScore",
     "RollingZScoreConfig",
+    "Sign",
+    "SignConfig",
     "Spread",
     "SpreadConfig",
+    "Sqrt",
+    "SqrtConfig",
 ]

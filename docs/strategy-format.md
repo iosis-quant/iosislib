@@ -412,8 +412,26 @@ The `params` for `model.dense_mlp` are:
 - `epochs`, `learning_rate`, `weight_decay`: training hyperparameters;
 - `scheduler` and `splitter`: as above.
 
-Both models emit an `mse` segment metric that later scheduler decisions can
-observe.
+The `params` for `model.linear_regression` are:
+
+- `l2`: ridge penalty applied to the coefficients, not the intercept
+  (default `0`, plain ordinary least squares);
+- `scheduler` and `splitter`: as above.
+
+The `params` for `model.logistic_regression` are:
+
+- `l2`: ridge penalty applied to the coefficients, not the intercept
+  (default `0`);
+- `max_iter`, `tol`: IRLS convergence controls (defaults `100` and `1e-8`);
+- `scheduler` and `splitter`: as above.
+
+`model.linear_regression` and `model.logistic_regression` are dependency-free
+(numpy-only) closed-form models. The logistic variant requires a binary
+`target` of `0` and `1` and emits the sigmoid probability of class 1 as its
+`prediction`, so downstream thresholding stays a graph decision.
+
+All of these models emit an `mse` segment metric that later scheduler decisions
+can observe.
 
 ### Scheduler declarations
 

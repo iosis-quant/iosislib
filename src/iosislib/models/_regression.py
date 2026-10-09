@@ -1,15 +1,39 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 
 import numpy as np
 import numpy.typing as npt
 import polars as pl
 
-from iosislib.core.model import Dataset
+from iosislib.core.model import Dataset, shape_width
+from iosislib.core.tsfn import ColumnSignature
 
 
 FloatMatrix = npt.NDArray[np.float64]
+
+
+def resolve_shape(
+    name: str,
+    bound_input_columns: Mapping[str, ColumnSignature],
+    configured: int | None,
+) -> tuple[int, ...]:
+    """Resolve a bound feature/target shape against its configured width."""
+    bound = bound_input_columns.get(name)
+    if bound is not None:
+        shape = bound.shape
+        width = shape_width(shape)
+        if configured is not None and configured != width:
+            raise ValueError(
+                f"Configured {name} width {configured} does not match the "
+                f"bound width {width}"
+            )
+        return shape
+    if configured is not None:
+        return (configured,)
+    raise ValueError(
+        f"{name} must be connected in the graph or have a configured width"
+    )
 
 
 def feature_matrix(features: pl.Series, *, width: int) -> FloatMatrix:
