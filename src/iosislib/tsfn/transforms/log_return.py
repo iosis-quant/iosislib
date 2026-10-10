@@ -56,6 +56,6 @@ class LogReturn(TSFN[LogReturnConfig]):
         result = pl.when((value > 0.0) & (prior > 0.0)).then(
             value.log() - prior.log()
         ).otherwise(pl.lit(None, dtype=pl.Float64))
-        return lf.sort(params.timestamp_column).select(
+        return lf.sort(params.timestamp_column, maintain_order=True).select(
             params.timestamp_column, result.alias(params.output_column)
         )

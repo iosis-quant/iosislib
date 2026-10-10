@@ -191,6 +191,21 @@ def test_lag_uses_earlier_observations_after_sorting() -> None:
     assert_lists_close(result["lag"].to_list(), [None, None, 1.0])
 
 
+def test_lag_keeps_duplicate_timestamps_in_input_order() -> None:
+    lf = pl.DataFrame(
+        {
+            "timestamp": [dt(1), dt(0), dt(0)],
+            "value": [5.0, 7.0, 8.0],
+        },
+        schema={"timestamp": pl.Datetime, "value": pl.Float64},
+    ).lazy()
+
+    result = Lag({"periods": 1})(lf).collect()
+
+    assert result["timestamp"].to_list() == [dt(0), dt(0), dt(1)]
+    assert_lists_close(result["lag"].to_list(), [None, 7.0, 8.0])
+
+
 def test_delta_inherits_vector_shape_and_diffs_components_across_rows() -> None:
     source = vector_source(
         ((1.0, 10.0), (2.0, 30.0), (3.0, 60.0)),

@@ -682,7 +682,7 @@ class CNN1D(SupervisedModelTSFN):
         ordered = (
             frame
             if frame.get_column(time_column).is_sorted()
-            else frame.sort(time_column)
+            else frame.sort(time_column, maintain_order=True)
         )
         supervised = ordered.select(self.FEATURE_COLUMN, self.TARGET_COLUMN)
 

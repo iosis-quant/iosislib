@@ -914,7 +914,10 @@ class BatchTSFN(TSFN[ConfigT], abc.ABC):
         pass
 
     def execute_batch(self, frame: pl.DataFrame) -> pl.DataFrame:
-        output = self.batch(frame)
+        # Polars may lend multi-chunk buffers to the callback, while bridge
+        # helpers reject them unless copying is explicitly allowed; rechunking
+        # preserves the buffer layout untouched when the frame is already whole.
+        output = self.batch(frame.rechunk())
         if not isinstance(output, pl.DataFrame):
             raise TypeError(
                 f"{self.__class__.__name__}.batch must return a Polars DataFrame, "
@@ -1121,7 +1124,7 @@ class RollingUnaryTSFN(TSFN[ConfigT], abc.ABC):
             periods=self.rolling_periods(),
             min_samples=self.rolling_min_samples(),
         )
-        return lf.sort(input_signature.time.column).select(
+        return lf.sort(input_signature.time.column, maintain_order=True).select(
             input_signature.time.column,
             result.cast(output_column.physical_dtype).alias(output_column.name),
         )
@@ -1187,7 +1190,7 @@ class EwmUnaryTSFN(TSFN[ConfigT], abc.ABC):
             min_samples=self.ewm_min_samples(),
             adjust=self.ewm_adjust(),
         )
-        return lf.sort(input_signature.time.column).select(
+        return lf.sort(input_signature.time.column, maintain_order=True).select(
             input_signature.time.column,
             result.cast(output_column.physical_dtype).alias(output_column.name),
         )

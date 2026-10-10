@@ -59,6 +59,6 @@ class PctChange(TSFN[PctChangeConfig]):
         ).then(
             pl.lit(None, dtype=pl.Float64)
         ).otherwise(pct_change)
-        return lf.sort(params.timestamp_column).select(
+        return lf.sort(params.timestamp_column, maintain_order=True).select(
             params.timestamp_column, result.alias(params.output_column)
         )

@@ -104,7 +104,7 @@ class Lead(TSFN[LeadConfig]):
         output_column = _column_signature_map(output_signature)[params.output_column]
 
         lead = pl.col(params.input_column).shift(-params.periods)
-        return lf.sort(params.timestamp_column).select(
+        return lf.sort(params.timestamp_column, maintain_order=True).select(
             params.timestamp_column,
             lead.cast(output_column.physical_dtype).alias(params.output_column),
         )

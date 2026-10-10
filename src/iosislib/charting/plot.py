@@ -455,7 +455,7 @@ def _prepare_time_frame(
     if not selected:
         raise ValueError(f"{label} requires at least one value column")
 
-    frame = frame.sort(time_name).drop_nulls(time_name)
+    frame = frame.sort(time_name, maintain_order=True).drop_nulls(time_name)
     if max_points is not None and frame.height > max_points:
         indices = [
             round(index * (frame.height - 1) / (max_points - 1))

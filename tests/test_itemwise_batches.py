@@ -377,6 +377,25 @@ def test_batch_tsfn_maps_complete_frames_and_supports_multiple_outputs() -> None
     assert result["difference"].to_list() == pytest.approx([2.0, 6.0])
 
 
+def test_execute_batch_rechunks_multi_chunk_inputs_before_the_udf() -> None:
+    pytest.importorskip("torch")
+    schema = {"timestamp": pl.Datetime, "value": pl.Array(pl.Float64, 2)}
+    chunked = pl.concat(
+        [
+            pl.DataFrame({"timestamp": [dt(0)], "value": [[1.0, 3.0]]}, schema=schema),
+            pl.DataFrame({"timestamp": [dt(1)], "value": [[2.0, 4.0]]}, schema=schema),
+        ],
+        how="vertical",
+        rechunk=False,
+    )
+    assert chunked["value"].n_chunks() == 2
+
+    result = VectorStats({}).execute_batch(chunked)
+
+    assert result["mean"].to_list() == pytest.approx([2.0, 3.0])
+    assert result["difference"].to_list() == pytest.approx([2.0, 2.0])
+
+
 def test_batch_tsfn_requires_a_node_materialization_boundary() -> None:
     source = vector_source(((1.0, 3.0),))
     default_node = Node(VectorMean, bindings={"value": source.value})

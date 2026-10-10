@@ -818,7 +818,7 @@ class SupervisedModelTSFN(BatchTSFN, abc.ABC):
         ordered = (
             frame
             if frame.get_column(time_column).is_sorted()
-            else frame.sort(time_column)
+            else frame.sort(time_column, maintain_order=True)
         )
         supervised = ordered.select(self.FEATURE_COLUMN, self.TARGET_COLUMN)
 
@@ -1694,7 +1694,7 @@ class TrainingTSFN(BatchTSFN, abc.ABC):
         ordered = (
             frame
             if frame.get_column(time_axis.column).is_sorted()
-            else frame.sort(time_axis.column)
+            else frame.sort(time_axis.column, maintain_order=True)
         )
         result = self.train_frame(ordered)
         if not isinstance(result, TrainingResult):
@@ -1793,7 +1793,7 @@ class InferenceTSFN(BatchTSFN, abc.ABC):
         ordered = (
             frame
             if frame.get_column(time_axis.column).is_sorted()
-            else frame.sort(time_axis.column)
+            else frame.sort(time_axis.column, maintain_order=True)
         )
         group = _validate_model_group(self.model_group())
         store = self.model_store()

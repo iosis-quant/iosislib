@@ -128,7 +128,7 @@ class FeatureUnpacker(TSFN[FeatureUnpackerConfig]):
                 expr.cast(pl.Float64).alias(f"{params.base_name}_{index}")
             )
 
-        return lf.sort(input_signature.time.column).select(
+        return lf.sort(input_signature.time.column, maintain_order=True).select(
             input_signature.time.column, *outputs
         )
 

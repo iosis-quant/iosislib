@@ -241,7 +241,11 @@ def _price_history_payload_to_lazyframe(
         timestamp_column: pl.Datetime,
         price_column: pl.Float64,
     }
-    return pl.DataFrame(rows, schema=schema).lazy().sort(timestamp_column)
+    return (
+        pl.DataFrame(rows, schema=schema)
+        .lazy()
+        .sort(timestamp_column, maintain_order=True)
+    )
 
 
 def _event_price_history_to_lazyframe(
@@ -310,7 +314,7 @@ def _asof_join_on_union_timeline(
     )
     for frame in frames:
         output = output.join_asof(
-            frame.sort(timestamp_column),
+            frame.sort(timestamp_column, maintain_order=True),
             on=timestamp_column,
             strategy="backward",
             tolerance=tolerance,

@@ -103,7 +103,7 @@ class Delta(TSFN[DeltaConfig]):
             lag = pl.when(lag.is_null()).then(null_fill).otherwise(lag)
 
         delta = value - lag
-        return lf.sort(params.timestamp_column).select(
+        return lf.sort(params.timestamp_column, maintain_order=True).select(
             params.timestamp_column,
             delta.cast(output_column.physical_dtype).alias(params.output_column),
         )

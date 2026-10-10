@@ -559,7 +559,7 @@ class RollingCov(TSFN[RollingCovConfig]):
                 ddof=params.ddof,
             ).fill_nan(None)
         )
-        return lf.sort(input_signature.time.column).select(
+        return lf.sort(input_signature.time.column, maintain_order=True).select(
             input_signature.time.column,
             cov.cast(output_column.physical_dtype).alias(output_column.name),
         )
@@ -680,7 +680,7 @@ class RollingCovMatrix(TSFN[RollingCovMatrixConfig]):
             .cast(output_column.physical_dtype)
             .alias(output_column.name)
         )
-        return lf.sort(input_signature.time.column).select(
+        return lf.sort(input_signature.time.column, maintain_order=True).select(
             input_signature.time.column,
             matrix,
         )

@@ -187,7 +187,7 @@ def _ohlcv_frame_to_lazyframe(
             pl.col(config.close_column).cast(pl.Float64, strict=False),
             pl.col(config.volume_column).cast(pl.Int64, strict=False),
         )
-        .sort(config.timestamp_column)
+        .sort(config.timestamp_column, maintain_order=True)
     )
 
 

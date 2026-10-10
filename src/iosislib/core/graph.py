@@ -312,7 +312,12 @@ class Executor(abc.ABC):
                 for parent_column, input_name in bindings
             )
             parent_frames.append(
-                (parent_lf.select(select_expressions).sort(time_column), tolerance)
+                (
+                    parent_lf.select(select_expressions).sort(
+                        time_column, maintain_order=True
+                    ),
+                    tolerance,
+                )
             )
 
         node_input_lf = (
@@ -330,7 +335,7 @@ class Executor(abc.ABC):
                 strategy="backward",
                 tolerance=tolerance,
             )
-        return node_input_lf
+        return node_input_lf.sort(time_column)
 
     @abc.abstractmethod
     def materialize(self, node: Node, lf: pl.LazyFrame) -> pl.DataFrame:
