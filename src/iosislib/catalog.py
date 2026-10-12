@@ -28,6 +28,7 @@ _DESCRIPTIONS: dict[str, str] = {
     "source.polymarket_price_history": "Fetch Polymarket CLOB price history.",
     "source.y_finance_ohlcv": "Fetch OHLCV data from Yahoo Finance.",
     "transform.delta": "Compute difference between consecutive values (or N periods back).",
+    "transform.block_permute": "Permute whole-row payload in contiguous blocks over a fixed timeline.",
     "transform.logit": "Apply logit transform: log(x / (1-x)). Input must be in (0, 1).",
     "transform.exp": "Element-wise exponential: e^x.",
     "transform.log": "Element-wise natural logarithm: ln(x).",
@@ -96,6 +97,11 @@ _PARAM_DESCRIPTIONS: dict[str, dict[str, str]] = {
         "output_column": "Output column name (default 'features')",
         "timestamp_column": "Time column name (default 'timestamp')",
         "output_dtype": "Output array element dtype (default Float64)",
+    },
+    "transform.block_permute": {
+        "block_length": "Rows per contiguous block (default 1 = iid shuffle)",
+        "seed": "Deterministic seed for block ordering (default 0)",
+        "timestamp_column": "Time column name, never permuted (default 'timestamp')",
     },
     "transform.negate": {
         "input_column": "Column to negate (default 'value')",

@@ -7,6 +7,7 @@ import yaml
 from yaml.constructor import ConstructorError
 from yaml.events import AliasEvent
 
+from iosislib.strategy.expand import ExpandedStrategy
 from iosislib.strategy.ir import Strategy, StrategyValidationError
 
 
@@ -79,22 +80,38 @@ class _StrategyDumper(yaml.SafeDumper):
         return True
 
 
-def loads(text: str) -> Strategy:
-    """Parse one strategy from a YAML string."""
-    if not isinstance(text, str):
-        raise TypeError("strategy YAML must be a string")
+def _load_yaml(text: str, kind: str) -> object:
     try:
-        data = yaml.load(text, Loader=_StrategyLoader)
+        return yaml.load(text, Loader=_StrategyLoader)
     except yaml.YAMLError as exc:
         mark = getattr(exc, "problem_mark", None)
         location = ""
         if mark is not None:
             location = f" at line {mark.line + 1}, column {mark.column + 1}"
         problem = getattr(exc, "problem", None) or str(exc)
-        raise StrategySyntaxError(f"invalid strategy YAML{location}: {problem}") from exc
+        raise StrategySyntaxError(
+            f"invalid {kind} YAML{location}: {problem}"
+        ) from exc
+
+
+def loads(text: str) -> Strategy:
+    """Parse one strategy from a YAML string."""
+    if not isinstance(text, str):
+        raise TypeError("strategy YAML must be a string")
+    data = _load_yaml(text, "strategy")
     if data is None:
         raise StrategyValidationError("$", "strategy document is empty")
     return Strategy.from_data(data)
+
+
+def loads_expansion(text: str) -> ExpandedStrategy:
+    """Parse one variant expansion from a YAML string."""
+    if not isinstance(text, str):
+        raise TypeError("expansion YAML must be a string")
+    data = _load_yaml(text, "expansion")
+    if data is None:
+        raise StrategyValidationError("$", "expansion document is empty")
+    return ExpandedStrategy.from_data(data)
 
 
 def dumps(strategy: Strategy) -> str:
@@ -118,9 +135,22 @@ def load(path: str | Path) -> Strategy:
     return loads(Path(path).read_text(encoding="utf-8"))
 
 
+def load_expansion(path: str | Path) -> ExpandedStrategy:
+    """Read and parse one UTF-8 expansion file."""
+    return loads_expansion(Path(path).read_text(encoding="utf-8"))
+
+
 def dump(strategy: Strategy, path: str | Path) -> None:
     """Write one strategy file as UTF-8 YAML."""
     Path(path).write_text(dumps(strategy), encoding="utf-8")
 
 
-__all__ = ["StrategySyntaxError", "dump", "dumps", "load", "loads"]
+__all__ = [
+    "StrategySyntaxError",
+    "dump",
+    "dumps",
+    "load",
+    "load_expansion",
+    "loads",
+    "loads_expansion",
+]

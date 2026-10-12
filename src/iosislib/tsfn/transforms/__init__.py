@@ -1,3 +1,4 @@
+from iosislib.tsfn.transforms.block_permute import BlockPermute, BlockPermuteConfig
 from iosislib.tsfn.transforms.delta import Delta, DeltaConfig
 from iosislib.tsfn.transforms.ewm import EwmMean, EwmMeanConfig, EwmStd, EwmStdConfig
 from iosislib.tsfn.transforms.feature_packer import (
@@ -61,6 +62,8 @@ from iosislib.tsfn.transforms.unary import (
 __all__ = [
     "Abs",
     "AbsConfig",
+    "BlockPermute",
+    "BlockPermuteConfig",
     "Clip",
     "ClipConfig",
     "Delta",

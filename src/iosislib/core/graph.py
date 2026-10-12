@@ -7,7 +7,7 @@ import logging
 import math
 import os
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -187,6 +187,42 @@ class GraphValidationError(ValueError):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class NodeProgress:
+    """Snapshot of executor progress through one graph's node order.
+
+    ``completed`` counts nodes already visited and ``total`` is the length
+    of the full topological order. ``node_id``/``node_name`` identify the
+    node about to run, or are None once the order is fully evaluated.
+    """
+
+    completed: int
+    total: int
+    node_id: str | None = None
+    node_name: str | None = None
+
+
+ProgressCallback = Callable[[NodeProgress], None]
+
+
+def _report_progress(
+    callback: ProgressCallback | None,
+    node: Node | None,
+    completed: int,
+    total: int,
+) -> None:
+    if callback is None:
+        return
+    callback(
+        NodeProgress(
+            completed=completed,
+            total=total,
+            node_id=None if node is None else node.ID,
+            node_name=None if node is None else node.name,
+        )
+    )
+
+
 class Executor(abc.ABC):
     """Lower and execute a verified graph with time-aware input alignment."""
 
@@ -199,11 +235,23 @@ class Executor(abc.ABC):
         self._s3_credentials: S3CredentialsProvider | None = s3_credentials
         self._model_dir_raw: str | os.PathLike[str] | None = model_dir
 
-    def execute(self, graph: Graph) -> pl.DataFrame | dict[str, pl.DataFrame]:
-        """Execute every terminal branch; single-terminal graphs return a frame."""
+    def execute(
+        self,
+        graph: Graph,
+        *,
+        on_progress: ProgressCallback | None = None,
+    ) -> pl.DataFrame | dict[str, pl.DataFrame]:
+        """Execute every terminal branch; single-terminal graphs return a frame.
+
+        ``on_progress`` receives one snapshot before each node runs and a
+        final snapshot once the order is exhausted. The callback runs on the
+        execution thread and must not raise.
+        """
         with _s3_credentials_scope(self._s3_credentials):
             with _model_dir_scope(self._model_dir_raw):
-                terminal_frames = self._evaluate_to_terminals(graph)
+                terminal_frames = self._evaluate_to_terminals(
+                    graph, on_progress=on_progress
+                )
                 if len(graph.terminal_nodes) == 1:
                     sole = graph.terminal_nodes[0]
                     return self.materialize(sole, terminal_frames[sole.ID])
@@ -213,7 +261,10 @@ class Executor(abc.ABC):
                 }
 
     def _evaluate_to_terminals(
-        self, graph: Graph
+        self,
+        graph: Graph,
+        *,
+        on_progress: ProgressCallback | None = None,
     ) -> dict[str, pl.LazyFrame]:
         """Evaluate required boundaries and return each terminal lazy value.
 
@@ -231,8 +282,11 @@ class Executor(abc.ABC):
         }
         ordered = [node for node in graph.node_list if node.ID not in deferred_ids]
         ordered.extend(node for node in graph.node_list if node.ID in deferred_ids)
-        for node in ordered:
+        total = len(ordered)
+        for index, node in enumerate(ordered):
+            _report_progress(on_progress, node, index, total)
             self._evaluate_node(node, graph, results, terminal_ids)
+        _report_progress(on_progress, None, total, total)
         return {node.ID: results[node.ID] for node in graph.terminal_nodes}
 
     def _evaluate_node(
@@ -679,12 +733,15 @@ class LocalExecutor(Executor):
         return required_ids, cached_frames
 
     def execute(
-        self, graph: Graph
+        self,
+        graph: Graph,
+        *,
+        on_progress: ProgressCallback | None = None,
     ) -> pl.DataFrame | dict[str, pl.DataFrame]:
         with _s3_credentials_scope(self._s3_credentials):
             with _model_dir_scope(self._model_dir_raw):
                 terminal_frames, cached_ids = self._evaluate_to_terminals_with_hits(
-                    graph
+                    graph, on_progress=on_progress
                 )
                 outputs: dict[str, pl.DataFrame] = {}
                 for node in graph.terminal_nodes:
@@ -702,13 +759,21 @@ class LocalExecutor(Executor):
                 return outputs
 
     def _evaluate_to_terminals(
-        self, graph: Graph
+        self,
+        graph: Graph,
+        *,
+        on_progress: ProgressCallback | None = None,
     ) -> dict[str, pl.LazyFrame]:
-        frames, _ = self._evaluate_to_terminals_with_hits(graph)
+        frames, _ = self._evaluate_to_terminals_with_hits(
+            graph, on_progress=on_progress
+        )
         return frames
 
     def _evaluate_to_terminals_with_hits(
-        self, graph: Graph
+        self,
+        graph: Graph,
+        *,
+        on_progress: ProgressCallback | None = None,
     ) -> tuple[dict[str, pl.LazyFrame], set[str]]:
         required_ids, cached_frames = self._resolve_cache_frontier(graph)
         results: dict[str, pl.LazyFrame] = {}
@@ -722,7 +787,9 @@ class LocalExecutor(Executor):
         ordered = [node for node in graph.node_list if node.ID not in deferred_ids]
         ordered.extend(node for node in graph.node_list if node.ID in deferred_ids)
 
-        for node in ordered:
+        total = len(ordered)
+        for index, node in enumerate(ordered):
+            _report_progress(on_progress, node, index, total)
             if node.ID not in required_ids:
                 continue  # Skip unneeded upstream nodes entirely
 
@@ -764,6 +831,7 @@ class LocalExecutor(Executor):
             else:
                 results[node.ID] = lf
 
+        _report_progress(on_progress, None, total, total)
         frames = {node.ID: results[node.ID] for node in graph.terminal_nodes}
         return frames, set(cached_frames)
 
@@ -1612,17 +1680,21 @@ class Graph:
         return hashlib.sha256(serialized_data.encode("utf-8")).hexdigest()
 
     def execute(
-        self, executor: Executor | None = None
+        self,
+        executor: Executor | None = None,
+        *,
+        on_progress: ProgressCallback | None = None,
     ) -> pl.DataFrame | dict[str, pl.DataFrame]:
         """Execute every terminal branch.
 
         Single-terminal graphs return one frame (legacy behavior);
         multi-terminal graphs return a mapping of terminal node ID to frame.
+        ``on_progress`` is forwarded to the executor; see ``Executor.execute``.
         """
         selected_executor = LocalExecutor() if executor is None else executor
         if not isinstance(selected_executor, Executor):
             raise TypeError("Graph executor must be an Executor")
-        return selected_executor.execute(self)
+        return selected_executor.execute(self, on_progress=on_progress)
 
 
 __all__ = [
@@ -1630,6 +1702,8 @@ __all__ = [
     "Graph",
     "GraphValidationError",
     "LocalExecutor",
+    "NodeProgress",
+    "ProgressCallback",
     "ValidationIssue",
     "ValidationReport",
 ]
