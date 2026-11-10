@@ -13,6 +13,7 @@ from iosislib.core.tsfn import (
     TimeAxis,
     _column_signature_map,
     _replace_column,
+    _select_outputs,
 )
 from iosislib.tsfn.transforms._validation import validate_column_name, validate_distinct_columns
 
@@ -94,6 +95,9 @@ class Lead(TSFN[LeadConfig]):
             ),
         )
 
+    def trailing_rows(self) -> int | None:
+        return 0
+
     def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         if lf is None:
             raise ValueError("Lead requires an input frame")
@@ -104,7 +108,8 @@ class Lead(TSFN[LeadConfig]):
         output_column = _column_signature_map(output_signature)[params.output_column]
 
         lead = pl.col(params.input_column).shift(-params.periods)
-        return lf.sort(params.timestamp_column, maintain_order=True).select(
+        return _select_outputs(
+            lf.sort(params.timestamp_column, maintain_order=True),
             params.timestamp_column,
             lead.cast(output_column.physical_dtype).alias(params.output_column),
         )

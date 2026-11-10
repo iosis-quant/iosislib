@@ -40,6 +40,35 @@ class NullPolicy(str, Enum):
     PASS = "pass"
 
 
+DELTA_T_COLUMN = "delta_t"
+
+
+def delta_t_dtype(time_axis: TimeAxis) -> PolarsDataType:
+    """Physical dtype of the ``delta_t`` system column for a time axis.
+
+    Datetime axes produce an axis-resolution ``Duration``; integer axes diff
+    to the same integer dtype.
+    """
+    dtype = time_axis.dtype
+    if isinstance(dtype, pl.Datetime):
+        return pl.Duration(dtype.time_unit)
+    if dtype is pl.Datetime:
+        return pl.Duration("us")
+    return dtype
+
+
+def _select_outputs(lf: pl.LazyFrame, *exprs: pl.Expr | str) -> pl.LazyFrame:
+    """Project declared outputs, carrying ``delta_t`` through when present.
+
+    Row-preserving applies must use this instead of ``lf.select`` so a
+    parent's (possibly ``BlockPermute``-permuted) system column survives the
+    transform; sort and filter move it along with its row.
+    """
+    if DELTA_T_COLUMN in lf.collect_schema():
+        return lf.select(*exprs, pl.col(DELTA_T_COLUMN))
+    return lf.select(*exprs)
+
+
 @dataclass(frozen=True)
 class NullHandler:
     policy: NullPolicy | None = None
@@ -174,6 +203,17 @@ class FrameSignature:
         ):
             raise ValueError(
                 f"Time column '{self.time.column}' must not be listed as a value column"
+            )
+        if self.time is not None and self.time.column == DELTA_T_COLUMN:
+            raise ValueError(
+                f"'{DELTA_T_COLUMN}' is a read-only system column "
+                "and cannot be used as a time column"
+            )
+        reserved = [column.name for column in columns if column.name == DELTA_T_COLUMN]
+        if reserved:
+            raise ValueError(
+                f"'{DELTA_T_COLUMN}' is a read-only system column "
+                "and cannot be declared as a value column"
             )
 
     def is_empty(self) -> bool:
@@ -586,6 +626,16 @@ class TSFN(abc.ABC, Generic[ConfigT]):
         """Return (input_frame_signature, output_frame_signature)."""
         pass
 
+    def trailing_rows(self) -> int | None:
+        """Leading rows of the input timeline consumed before output starts.
+
+        ``0`` (the default) means the node emits from the first aligned row.
+        An integer N means the first N rows are consumed by the operation's
+        lookback. ``None`` means the operation has no finite trailing window
+        (e.g. ewm, block permute); the live ring size bounds it at runtime.
+        """
+        return 0
+
     def __str__(self) -> str:
         input_sig, output_sig = self.signature
         return (
@@ -660,7 +710,21 @@ class TSFN(abc.ABC, Generic[ConfigT]):
         if schema_name == "output":
             expected_columns = list(_frame_physical_schema(signature))
             actual_columns = list(current_schema)
-            if actual_columns != expected_columns:
+            if (
+                len(actual_columns) == len(expected_columns) + 1
+                and actual_columns[-1] == DELTA_T_COLUMN
+                and actual_columns[:-1] == expected_columns
+            ):
+                # The executor-injected system column may ride physically at the
+                # end of the frame; it is never part of the declared signature.
+                expected_delta = delta_t_dtype(signature.time)
+                actual_delta = current_schema[DELTA_T_COLUMN]
+                if not _dtype_matches(actual_delta, cast(pl.DataType, expected_delta)):
+                    raise TypeError(
+                        f"Column '{DELTA_T_COLUMN}' type mismatch. "
+                        f"Expected {expected_delta}, got {actual_delta}"
+                    )
+            elif actual_columns != expected_columns:
                 raise ValueError(
                     "Output schema columns must exactly match the declared order. "
                     f"Expected {expected_columns}, got {actual_columns}"
@@ -723,6 +787,7 @@ class TSFN(abc.ABC, Generic[ConfigT]):
                 f"{self.__class__.__name__}.apply() must return a Polars LazyFrame, "
                 f"got {type(output_lf).__name__}"
             )
+
         self.validate_output_schema(output_lf)
         return output_lf
 
@@ -891,7 +956,8 @@ class ItemwiseUnaryTSFN(TSFN[ConfigT], abc.ABC):
         else:
             result = self.itemwise_expr(value)
 
-        return lf.select(
+        return _select_outputs(
+            lf,
             input_signature.time.column,
             result.cast(output_column.physical_dtype).alias(output_column.name),
         )
@@ -925,12 +991,52 @@ class BatchTSFN(TSFN[ConfigT], abc.ABC):
             )
         return output
 
-    def prepare_batch_input(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+    def prepare_batch_input(
+        self,
+        lf: pl.LazyFrame,
+        *,
+        include_delta: bool = False,
+    ) -> pl.LazyFrame:
         input_signature = self.signature[0]
         if input_signature.time is None:
             raise ValueError("BatchTSFN input signature must declare a time axis")
         input_schema = _frame_physical_schema(input_signature)
-        return lf.select(*input_schema.keys())
+        keys: list[str] = list(input_schema)
+        if include_delta:
+            keys.append(DELTA_T_COLUMN)
+        return lf.select(*keys)
+
+    def _execute_batch_with_delta(
+        self,
+        frame: pl.DataFrame,
+        output_schema: dict[str, PolarsDataType],
+    ) -> pl.DataFrame:
+        """Run ``batch`` and guarantee the declared output plus ``delta_t``.
+
+        A batch that echoes the system column (e.g. ``BlockPermute``'s gather)
+        keeps it; a row-preserving batch gets its input ``delta_t`` attached; a
+        row-changing batch gets an all-null ``delta_t`` so the executor's
+        presence check leaves recomputation to the frame's own timeline.
+        """
+        output = self.execute_batch(frame)
+        declared = list(output_schema)
+        actual = [name for name in output.columns if name != DELTA_T_COLUMN]
+        if actual != declared:
+            raise ValueError(
+                "Batch output schema must exactly match the declared order. "
+                f"Expected {declared}, got {actual}"
+            )
+        delta_dtype = frame.schema[DELTA_T_COLUMN]
+        if DELTA_T_COLUMN in output.columns:
+            delta = output.select(DELTA_T_COLUMN)
+            return output.select(*declared).with_columns(delta)
+        if output.height == frame.height:
+            return output.select(*declared).with_columns(
+                frame.select(DELTA_T_COLUMN)
+            )
+        return output.select(*declared).with_columns(
+            pl.lit(None, dtype=delta_dtype).alias(DELTA_T_COLUMN)
+        )
 
     def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         if lf is None:
@@ -938,12 +1044,26 @@ class BatchTSFN(TSFN[ConfigT], abc.ABC):
 
         output_signature = self.signature[1]
         output_schema = _frame_physical_schema(output_signature)
-        return self.prepare_batch_input(lf).map_batches(
-            self.execute_batch,
+        input_schema = lf.collect_schema()
+        if DELTA_T_COLUMN not in input_schema:
+            return self.prepare_batch_input(lf).map_batches(
+                self.execute_batch,
+                predicate_pushdown=False,
+                projection_pushdown=False,
+                slice_pushdown=False,
+                schema=output_schema,
+                validate_output_schema=True,
+                streamable=False,
+            )
+
+        map_schema = dict(output_schema)
+        map_schema[DELTA_T_COLUMN] = input_schema[DELTA_T_COLUMN]
+        return self.prepare_batch_input(lf, include_delta=True).map_batches(
+            lambda frame: self._execute_batch_with_delta(frame, output_schema),
             predicate_pushdown=False,
             projection_pushdown=False,
             slice_pushdown=False,
-            schema=output_schema,
+            schema=map_schema,
             validate_output_schema=True,
             streamable=False,
         )
@@ -998,7 +1118,7 @@ class ItemwiseStructTSFN(TSFN[ConfigT], abc.ABC):
             )
             .alias(output_column.name)
         )
-        return lf.select(input_signature.time.column, batch_expr)
+        return _select_outputs(lf, input_signature.time.column, batch_expr)
 
     def resolve_signature(
         self,
@@ -1103,6 +1223,9 @@ class RollingUnaryTSFN(TSFN[ConfigT], abc.ABC):
     ) -> pl.Expr:
         pass
 
+    def trailing_rows(self) -> int | None:
+        return self.rolling_periods()
+
     def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         if lf is None:
             raise ValueError("RollingUnaryTSFN requires an input frame")
@@ -1124,7 +1247,8 @@ class RollingUnaryTSFN(TSFN[ConfigT], abc.ABC):
             periods=self.rolling_periods(),
             min_samples=self.rolling_min_samples(),
         )
-        return lf.sort(input_signature.time.column, maintain_order=True).select(
+        return _select_outputs(
+            lf.sort(input_signature.time.column, maintain_order=True),
             input_signature.time.column,
             result.cast(output_column.physical_dtype).alias(output_column.name),
         )
@@ -1170,6 +1294,9 @@ class EwmUnaryTSFN(TSFN[ConfigT], abc.ABC):
     ) -> pl.Expr:
         pass
 
+    def trailing_rows(self) -> int | None:
+        return None
+
     def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         if lf is None:
             raise ValueError("EwmUnaryTSFN requires an input frame")
@@ -1190,7 +1317,8 @@ class EwmUnaryTSFN(TSFN[ConfigT], abc.ABC):
             min_samples=self.ewm_min_samples(),
             adjust=self.ewm_adjust(),
         )
-        return lf.sort(input_signature.time.column, maintain_order=True).select(
+        return _select_outputs(
+            lf.sort(input_signature.time.column, maintain_order=True),
             input_signature.time.column,
             result.cast(output_column.physical_dtype).alias(output_column.name),
         )
@@ -1199,6 +1327,7 @@ class EwmUnaryTSFN(TSFN[ConfigT], abc.ABC):
 __all__ = [
     "BatchTSFN",
     "ColumnSignature",
+    "DELTA_T_COLUMN",
     "EwmUnaryTSFN",
     "FrameSignature",
     "ItemwiseStructTSFN",
@@ -1210,4 +1339,5 @@ __all__ = [
     "TSFN",
     "TSFNConfig",
     "TimeAxis",
+    "delta_t_dtype",
 ]

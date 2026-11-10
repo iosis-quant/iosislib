@@ -137,6 +137,7 @@ def builtin_registry() -> OperationRegistry:
     import iosislib.backtest as backtest
     import iosislib.metrics as metrics
     import iosislib.models as models
+    import iosislib.perturb as perturb
     import iosislib.tsfn.adapters as adapters
     import iosislib.tsfn.transforms as transforms
 
@@ -145,6 +146,7 @@ def builtin_registry() -> OperationRegistry:
             "backtest": backtest,
             "metrics": metrics,
             "model": models,
+            "perturb": perturb,
             "source": adapters,
             "transform": transforms,
         }

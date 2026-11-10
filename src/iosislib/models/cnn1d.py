@@ -566,6 +566,9 @@ class CNN1D(SupervisedModelTSFN):
     VERSION = "0.2.0"
     CONFIG_CLS = CNN1DConfig
 
+    def trailing_rows(self) -> int | None:
+        return self.parameters.sequence_length - 1
+
     def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
         params = self.parameters
         feature_shape = (params.feature_width,) if params.feature_width else ()

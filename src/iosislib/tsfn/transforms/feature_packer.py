@@ -15,6 +15,7 @@ from iosislib.core.tsfn import (
     TimeAxis,
     _column_entry,
     _column_signature_map,
+    _select_outputs,
 )
 from iosislib.core.utils import _flat_size, _is_dtype_class
 from iosislib.tsfn.transforms._validation import (
@@ -214,4 +215,4 @@ class FeaturePacker(TSFN[FeaturePackerConfig]):
                 packed.append(pl.col(name).cast(output_dtype))
 
         features = pl.concat_arr(*packed).alias(params.output_column)
-        return lf.select(params.timestamp_column, features)
+        return _select_outputs(lf, params.timestamp_column, features)

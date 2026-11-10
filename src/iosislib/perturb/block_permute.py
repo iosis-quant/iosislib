@@ -12,9 +12,15 @@ from iosislib.core.tsfn import (
     TSFNConfig,
     TimeAxis,
 )
-from iosislib.tsfn.transforms._validation import validate_column_name
 
 _MASK64 = (1 << 64) - 1
+
+
+def _validate_column_name(value: str, *, field_name: str) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    if not value:
+        raise ValueError(f"{field_name} must be non-empty")
 
 
 def _splitmix64(state: int) -> tuple[int, int]:
@@ -56,7 +62,7 @@ class BlockPermuteConfig(TSFNConfig):
             raise TypeError("seed must be an integer")
         if self.seed < 0:
             raise ValueError("seed must be non-negative")
-        validate_column_name(self.timestamp_column, field_name="timestamp_column")
+        _validate_column_name(self.timestamp_column, field_name="timestamp_column")
 
 
 class BlockPermute(BatchTSFN[BlockPermuteConfig]):
@@ -86,6 +92,9 @@ class BlockPermute(BatchTSFN[BlockPermuteConfig]):
         )
         signature = FrameSignature(time=time_axis, columns=columns)
         return signature, signature
+
+    def trailing_rows(self) -> int | None:
+        return None
 
     def batch(self, frame: pl.DataFrame) -> pl.DataFrame:
         params = self.parameters

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import polars as pl
 
-from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis
+from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig, TimeAxis, _select_outputs
 from iosislib.tsfn.transforms._validation import (
     validate_column_name,
     validate_distinct_columns,
@@ -47,6 +47,9 @@ class PctChange(TSFN[PctChangeConfig]):
         )
         return input_frame, output_frame
 
+    def trailing_rows(self) -> int | None:
+        return self.parameters.periods
+
     def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         if lf is None:
             raise ValueError("PctChange requires an input frame")
@@ -59,6 +62,8 @@ class PctChange(TSFN[PctChangeConfig]):
         ).then(
             pl.lit(None, dtype=pl.Float64)
         ).otherwise(pct_change)
-        return lf.sort(params.timestamp_column, maintain_order=True).select(
-            params.timestamp_column, result.alias(params.output_column)
+        return _select_outputs(
+            lf.sort(params.timestamp_column, maintain_order=True),
+            params.timestamp_column,
+            result.alias(params.output_column),
         )

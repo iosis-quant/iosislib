@@ -10,7 +10,7 @@ from iosislib.core.graph import Graph
 from iosislib.core.node import Node
 from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig
 from iosislib.strategy import builtin_registry
-from iosislib.tsfn.transforms import BlockPermute, BlockPermuteConfig
+from iosislib.perturb import BlockPermute, BlockPermuteConfig
 
 
 @dataclass(frozen=True)
@@ -193,4 +193,4 @@ def test_block_permute_passes_through_dtypes_and_columns() -> None:
 def test_block_permute_is_discovered_by_the_builtin_registry() -> None:
     registry = builtin_registry()
 
-    assert registry.resolve("transform.block_permute", BlockPermute.VERSION) is BlockPermute
+    assert registry.resolve("perturb.block_permute", BlockPermute.VERSION) is BlockPermute

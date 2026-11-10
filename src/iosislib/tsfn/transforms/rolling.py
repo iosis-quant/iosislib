@@ -14,6 +14,7 @@ from iosislib.core.tsfn import (
     TSFNConfig,
     TimeAxis,
     _column_signature_map,
+    _select_outputs,
 )
 from iosislib.tsfn.transforms._validation import (
     validate_column_name,
@@ -540,6 +541,9 @@ class RollingCov(TSFN[RollingCovConfig]):
             ),
         )
 
+    def trailing_rows(self) -> int | None:
+        return self.parameters.periods
+
     def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         if lf is None:
             raise ValueError("RollingCov requires an input frame")
@@ -559,7 +563,8 @@ class RollingCov(TSFN[RollingCovConfig]):
                 ddof=params.ddof,
             ).fill_nan(None)
         )
-        return lf.sort(input_signature.time.column, maintain_order=True).select(
+        return _select_outputs(
+            lf.sort(input_signature.time.column, maintain_order=True),
             input_signature.time.column,
             cov.cast(output_column.physical_dtype).alias(output_column.name),
         )
@@ -638,6 +643,9 @@ class RollingCovMatrix(TSFN[RollingCovMatrixConfig]):
             ),
         )
 
+    def trailing_rows(self) -> int | None:
+        return self.parameters.periods
+
     def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         if lf is None:
             raise ValueError("RollingCovMatrix requires an input frame")
@@ -680,7 +688,8 @@ class RollingCovMatrix(TSFN[RollingCovMatrixConfig]):
             .cast(output_column.physical_dtype)
             .alias(output_column.name)
         )
-        return lf.sort(input_signature.time.column, maintain_order=True).select(
+        return _select_outputs(
+            lf.sort(input_signature.time.column, maintain_order=True),
             input_signature.time.column,
             matrix,
         )

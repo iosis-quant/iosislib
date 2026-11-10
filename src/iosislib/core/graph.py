@@ -17,6 +17,7 @@ import polars as pl
 
 from iosislib.core.node import Node
 from iosislib.core.tsfn import (
+    DELTA_T_COLUMN,
     NullHandler,
     NullPolicy,
     _column_signature_map,
@@ -302,7 +303,8 @@ class Executor(abc.ABC):
                 if not node.bindings
                 else self.align_inputs(node, results)
             )
-            results[node.ID] = self.lower_node(node, node_input_lf)
+            lowered = self.lower_node(node, node_input_lf)
+            results[node.ID] = self._inject_delta_t(lowered, node)
         except Exception as exc:
             raise RuntimeError(
                 f"Execution failed at node '{node.name or node.ID[:8]}' "
@@ -316,6 +318,22 @@ class Executor(abc.ABC):
             results[node.ID] = self.materialize(node, results[node.ID]).lazy()
         elif node.ID in graph.materialized_node_ids and node.ID not in terminal_ids:
             results[node.ID] = self.materialize(node, results[node.ID]).lazy()
+
+    @staticmethod
+    def _inject_delta_t(lf: pl.LazyFrame, node: Node) -> pl.LazyFrame:
+        """Ensure the executor-owned ``delta_t`` system column is present.
+
+        Sources produce it here; transform outputs get it re-derived unless the
+        transform already carried one (e.g. ``BlockPermute``'s permuted copy).
+        """
+        output_time = node.function.signature[1].time
+        if output_time is None:
+            return lf
+        if DELTA_T_COLUMN in lf.collect_schema():
+            return lf
+        return lf.with_columns(
+            pl.col(output_time.column).diff().alias(DELTA_T_COLUMN)
+        )
 
     def lower_node(
         self,
@@ -350,6 +368,7 @@ class Executor(abc.ABC):
                 f"Bound node '{node.name or node.ID}' must declare an input time axis"
             )
         time_column = input_time.column
+        single_parent = len(parent_to_bindings) == 1
 
         parent_frames: list[tuple[pl.LazyFrame, AsofTolerance]] = []
         for (parent_node, tolerance), bindings in parent_to_bindings.items():
@@ -365,6 +384,13 @@ class Executor(abc.ABC):
                 pl.col(parent_column).alias(input_name)
                 for parent_column, input_name in bindings
             )
+            if (
+                single_parent
+                and DELTA_T_COLUMN in parent_lf.collect_schema()
+            ):
+                # Single-parent chains ride the parent's delta_t through the
+                # asof join untouched (preserving BlockPermute permutations).
+                select_expressions.append(pl.col(DELTA_T_COLUMN))
             parent_frames.append(
                 (
                     parent_lf.select(select_expressions).sort(
@@ -388,6 +414,13 @@ class Executor(abc.ABC):
                 on=time_column,
                 strategy="backward",
                 tolerance=tolerance,
+            )
+        if not single_parent:
+            # A merged timeline cannot reconcile per-branch delta_t; recompute
+            # from the union (a permuted delta_t dies at the next multi-input
+            # node by design).
+            node_input_lf = node_input_lf.with_columns(
+                pl.col(time_column).diff().alias(DELTA_T_COLUMN)
             )
         return node_input_lf.sort(time_column)
 
@@ -746,6 +779,10 @@ class LocalExecutor(Executor):
                 outputs: dict[str, pl.DataFrame] = {}
                 for node in graph.terminal_nodes:
                     result = self.materialize(node, terminal_frames[node.ID])
+                    # Terminal outputs honor the declared signature; delta_t is
+                    # an internal system column with no downstream consumer.
+                    if DELTA_T_COLUMN in result.columns:
+                        result = result.drop(DELTA_T_COLUMN)
                     if (
                         self._cache_enabled
                         and node.ID in graph.materialized_node_ids
@@ -794,7 +831,9 @@ class LocalExecutor(Executor):
                 continue  # Skip unneeded upstream nodes entirely
 
             if node.ID in cached_frames:
-                results[node.ID] = cached_frames[node.ID]
+                results[node.ID] = self._inject_delta_t(
+                    cached_frames[node.ID], node
+                )
                 continue
 
             try:
@@ -803,7 +842,9 @@ class LocalExecutor(Executor):
                     if not node.bindings
                     else self.align_inputs(node, results)
                 )
-                lf = self.lower_node(node, node_input_lf)
+                lf = self._inject_delta_t(
+                    self.lower_node(node, node_input_lf), node
+                )
             except Exception as exc:
                 raise RuntimeError(
                     f"Execution failed at node "

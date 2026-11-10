@@ -32,7 +32,7 @@ def make_strategy() -> Strategy:
 
 def build_variant(label: str) -> Node:
     return Node(
-        op="transform.block_permute",
+        op="perturb.block_permute",
         version="0.1.0",
         inputs={
             "x": Input(source=Reference("data", "x"), nulls="propagate"),
@@ -122,7 +122,7 @@ def test_expand_variants_preserves_node_params_and_materialize() -> None:
         strategy,
         at="data",
         build_variant=lambda label: Node(
-            op="transform.block_permute",
+            op="perturb.block_permute",
             version="0.1.0",
             inputs={"x": Input(source=Reference("data", "x"))},
             params={"seed": 0},

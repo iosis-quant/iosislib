@@ -12,6 +12,7 @@ from iosislib.core.tsfn import (
     TSFNConfig,
     TimeAxis,
     _column_signature_map,
+    _select_outputs,
     _replace_column,
 )
 from iosislib.core.utils import _flat_size
@@ -128,8 +129,10 @@ class FeatureUnpacker(TSFN[FeatureUnpackerConfig]):
                 expr.cast(pl.Float64).alias(f"{params.base_name}_{index}")
             )
 
-        return lf.sort(input_signature.time.column, maintain_order=True).select(
-            input_signature.time.column, *outputs
+        return _select_outputs(
+            lf.sort(input_signature.time.column, maintain_order=True),
+            input_signature.time.column,
+            *outputs,
         )
 
 

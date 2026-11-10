@@ -94,7 +94,7 @@ outputs:
 expand:
   at: data
   template:
-    op: transform.block_permute
+    op: perturb.block_permute
     version: 0.1.0
     inputs:
       x: {from: data.x, nulls: propagate}
@@ -299,8 +299,8 @@ def test_single_multi_terminal_execute_collects_terminal_outputs() -> None:
         ),
         (
             EXPANSION.replace(
-                "op: transform.block_permute\n    version: 0.1.0",
-                "op: transform.block_permute",
+                "op: perturb.block_permute\n    version: 0.1.0",
+                "op: perturb.block_permute",
                 1,
             ),
             "$.expand.template",

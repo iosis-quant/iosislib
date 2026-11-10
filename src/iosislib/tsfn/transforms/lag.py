@@ -13,6 +13,7 @@ from iosislib.core.tsfn import (
     TimeAxis,
     _column_signature_map,
     _replace_column,
+    _select_outputs,
 )
 from iosislib.tsfn.transforms._validation import validate_column_name, validate_distinct_columns
 
@@ -87,6 +88,9 @@ class Lag(TSFN[LagConfig]):
             ),
         )
 
+    def trailing_rows(self) -> int | None:
+        return self.parameters.periods
+
     def apply(self, lf: pl.LazyFrame | None = None) -> pl.LazyFrame:
         if lf is None:
             raise ValueError("Lag requires an input frame")
@@ -102,7 +106,8 @@ class Lag(TSFN[LagConfig]):
             null_fill = pl.lit([None] * output_column.shape[0], dtype=output_column.physical_dtype)
             lag = pl.when(lag.is_null()).then(null_fill).otherwise(lag)
 
-        return lf.sort(params.timestamp_column, maintain_order=True).select(
+        return _select_outputs(
+            lf.sort(params.timestamp_column, maintain_order=True),
             params.timestamp_column,
             lag.cast(output_column.physical_dtype).alias(params.output_column),
         )
