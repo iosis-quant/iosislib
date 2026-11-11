@@ -2,6 +2,7 @@
 
 from iosislib.core.graph import (
     Executor,
+    FusedLocalExecutor,
     Graph,
     GraphValidationError,
     LocalExecutor,
@@ -64,6 +65,7 @@ __all__ = [
     "DatasetSplitter",
     "EveryNTicksScheduler",
     "Executor",
+    "FusedLocalExecutor",
     "FrameDataset",
     "FrameSignature",
     "FrozenScheduler",

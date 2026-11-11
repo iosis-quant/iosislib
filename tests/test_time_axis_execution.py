@@ -6,9 +6,10 @@ from datetime import datetime, timedelta
 import polars as pl
 import pytest
 
-from iosislib.core.graph import Executor, Graph, LocalExecutor
+from iosislib.core.graph import Executor, FusedLocalExecutor, Graph, LocalExecutor
 from iosislib.core.node import Node
 from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig
+from iosislib.tsfn.transforms import Abs, Negate
 
 VALUE_FRAME = FrameSignature(columns=(("value", pl.Int64),))
 COMBINED_FRAME = FrameSignature(columns=(("left", pl.Int64), ("right", pl.Int64)))
@@ -293,6 +294,44 @@ def test_graph_materialization_points_split_lazy_execution_regions() -> None:
     assert graph.materialized_node_ids == frozenset({middle.ID})
     assert executor.materialized_nodes == [middle.ID, root.ID]
     assert graph.ID == Graph(root).ID
+
+
+def test_fused_executor_compiles_a_unary_chain_as_one_lazy_region() -> None:
+    source = Node(FloatSource)
+    current = source
+    output_name = "value"
+    for index in range(20):
+        transform = Negate if index % 2 == 0 else Abs
+        current = Node(
+            transform,
+            bindings={"value": current.output(output_name)},
+            name=f"unary-{index}",
+        )
+        output_name = "negated" if transform is Negate else "abs"
+    graph = Graph(current)
+    executor = FusedLocalExecutor(no_cache=True)
+
+    frames = executor._evaluate_to_terminals(graph)  # noqa: SLF001
+    frame = frames[current.ID]
+    result = executor.materialize(current, frame).drop("delta_t")
+
+    assert result.to_dict(as_series=False) == {
+        "timestamp": [dt(0)],
+        output_name: [1.0],
+    }
+    assert len(frame.explain(optimized=False).splitlines()) < 100
+
+
+def test_fused_executor_preserves_unary_chain_results() -> None:
+    source = Node(FloatSource)
+    negated = Node(Negate, bindings={"value": source.value})
+    absolute = Node(Abs, bindings={"value": negated.negated})
+    graph = Graph(absolute)
+
+    expected = graph.execute(executor=LocalExecutor(no_cache=True))
+    actual = graph.execute(executor=FusedLocalExecutor(no_cache=True))
+
+    assert actual.equals(expected)
 
 
 def test_explicit_root_materialization_is_not_performed_twice() -> None:

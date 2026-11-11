@@ -18,6 +18,7 @@ import polars as pl
 from iosislib.core.node import Node
 from iosislib.core.tsfn import (
     DELTA_T_COLUMN,
+    ItemwiseUnaryTSFN,
     NullHandler,
     NullPolicy,
     _column_signature_map,
@@ -887,6 +888,158 @@ class LocalExecutor(Executor):
             ) from exc
 
 
+class FusedLocalExecutor(LocalExecutor):
+    """Experimental executor that preserves sharing in unary expression regions.
+
+    A complete single-source chain of ``ItemwiseUnaryTSFN`` nodes with
+    propagate/pass null handling is compiled into one Polars LazyFrame. Each
+    node output is an internal column, so downstream nodes reference a column
+    rather than embedding a parent LazyFrame plan. All other graphs use the
+    normal ``LocalExecutor`` lowering unchanged.
+    """
+
+    def _evaluate_to_terminals_with_hits(
+        self,
+        graph: Graph,
+        *,
+        on_progress: ProgressCallback | None = None,
+    ) -> tuple[dict[str, pl.LazyFrame], set[str]]:
+        fused = self._compile_unary_chain(graph, on_progress=on_progress)
+        if fused is not None:
+            terminal = graph.terminal_nodes[0]
+            return {terminal.ID: fused}, set()
+        return super()._evaluate_to_terminals_with_hits(
+            graph, on_progress=on_progress
+        )
+
+    def _compile_unary_chain(
+        self,
+        graph: Graph,
+        *,
+        on_progress: ProgressCallback | None,
+    ) -> pl.LazyFrame | None:
+        if len(graph.terminal_nodes) != 1 or len(graph.node_list) < 2:
+            return None
+        if graph.materialized_node_ids:
+            return None
+
+        source, *transforms = graph.node_list
+        if source.bindings or not transforms:
+            return None
+
+        previous = source
+        previous_output: str | None = None
+        for index, node in enumerate(transforms):
+            function = node.function
+            if not isinstance(function, ItemwiseUnaryTSFN):
+                return None
+            if type(function).apply is not ItemwiseUnaryTSFN.apply:
+                return None
+            input_name = function.itemwise_input_column()
+            output_name = function.itemwise_output_column()
+            binding = node.bindings.get(input_name)
+            if binding is None or binding[0] is not previous:
+                return None
+            if index and binding[1] != previous_output:
+                return None
+            if len(node.bindings) != 1 or output_name not in node.outputs:
+                return None
+            handler = node.null_handlers[input_name]
+            if handler.policy not in (NullPolicy.PROPAGATE, NullPolicy.PASS):
+                return None
+            previous = node
+            previous_output = output_name
+
+        # The loop needs the source output name to check the first binding.
+        # A source may expose several outputs; only the one consumed by the
+        # first fusable transform participates in this region.
+        return self._compile_unary_chain_from_source(
+            source, transforms, on_progress=on_progress
+        )
+
+    def _compile_unary_chain_from_source(
+        self,
+        source: Node,
+        transforms: list[Node],
+        *,
+        on_progress: ProgressCallback | None,
+    ) -> pl.LazyFrame | None:
+        first = transforms[0]
+        first_function = first.function
+        assert isinstance(first_function, ItemwiseUnaryTSFN)
+        first_input = first_function.itemwise_input_column()
+        source_binding = first.bindings.get(first_input)
+        if source_binding is None or source_binding[0] is not source:
+            return None
+        source_output = source_binding[1]
+        if source_output not in source.outputs:
+            return None
+
+        time_axis = source.function.signature[1].time
+        if time_axis is None:
+            return None
+        time_column = time_axis.column
+        total = len(transforms) + 1
+        _report_progress(on_progress, source, 0, total)
+        source_lf = self._inject_delta_t(self.lower_node(source, None), source)
+        internal_columns: dict[tuple[str, str], str] = {
+            (source.ID, source_output): "__iosis_fused_0"
+        }
+        selected = [
+            pl.col(time_column),
+            pl.col(source_output).alias(internal_columns[(source.ID, source_output)]),
+        ]
+        if DELTA_T_COLUMN in source_lf.collect_schema():
+            selected.append(pl.col(DELTA_T_COLUMN))
+        region = (
+            source_lf.select(selected)
+            .sort(time_column, maintain_order=True)
+            .unique(subset=[time_column], keep="last", maintain_order=True)
+            .sort(time_column, maintain_order=True)
+        )
+
+        previous = source
+        previous_output = source_output
+        for index, node in enumerate(transforms, start=1):
+            _report_progress(on_progress, node, index, total)
+            function = node.function
+            assert isinstance(function, ItemwiseUnaryTSFN)
+            input_name = function.itemwise_input_column()
+            output_name = function.itemwise_output_column()
+            binding = node.bindings.get(input_name)
+            if binding != (previous, previous_output):
+                return None
+            input_column = internal_columns[(previous.ID, previous_output)]
+            input_signature = function.input_column_signature(input_name)
+            output_signature = function.output_column_signature(output_name)
+            value = pl.col(input_column)
+            expression = (
+                value.arr.eval(function.itemwise_expr(pl.element()))
+                if input_signature.shape
+                else function.itemwise_expr(value)
+            )
+            internal_output = f"__iosis_fused_{index}"
+            region = region.with_columns(
+                expression.cast(output_signature.physical_dtype).alias(internal_output)
+            )
+            internal_columns[(node.ID, output_name)] = internal_output
+            previous = node
+            previous_output = output_name
+
+        _report_progress(on_progress, None, total, total)
+        terminal = transforms[-1]
+        terminal_output = terminal.function.itemwise_output_column()
+        output = [
+            pl.col(time_column),
+            pl.col(internal_columns[(terminal.ID, terminal_output)]).alias(
+                terminal_output
+            ),
+        ]
+        if DELTA_T_COLUMN in region.collect_schema():
+            output.append(pl.col(DELTA_T_COLUMN))
+        return region.select(output)
+
+
 class Graph:
     __slots__ = (
         "ID",
@@ -1740,6 +1893,7 @@ class Graph:
 
 __all__ = [
     "Executor",
+    "FusedLocalExecutor",
     "Graph",
     "GraphValidationError",
     "LocalExecutor",
