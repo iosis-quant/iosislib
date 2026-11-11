@@ -58,3 +58,14 @@ class Spread(ItemwiseStructTSFN[SpreadConfig]):
         return (fields[params.left_column] - fields[params.right_column]).rename(
             params.output_column
         )
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        params = self.parameters
+        return {
+            params.output_column: (
+                inputs[params.left_column] - inputs[params.right_column]
+            )
+        }

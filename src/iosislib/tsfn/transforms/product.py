@@ -58,5 +58,16 @@ class Product(ItemwiseStructTSFN[ProductConfig]):
         product = fields[params.left_column] * fields[params.right_column]
         return product.rename(params.output_column)
 
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        params = self.parameters
+        return {
+            params.output_column: (
+                inputs[params.left_column] * inputs[params.right_column]
+            )
+        }
+
 
 __all__ = ["Product", "ProductConfig"]

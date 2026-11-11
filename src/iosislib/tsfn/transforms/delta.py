@@ -112,3 +112,21 @@ class Delta(TSFN[DeltaConfig]):
             params.timestamp_column,
             delta.cast(output_column.physical_dtype).alias(params.output_column),
         )
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        params = self.parameters
+        value = inputs[params.input_column]
+        output_column = self.output_column_signature(params.output_column)
+        lag = value.shift(params.periods)
+        if output_column.shape:
+            null_fill = pl.lit(
+                [None] * output_column.shape[0],
+                dtype=output_column.physical_dtype,
+            )
+            lag = pl.when(lag.is_null()).then(null_fill).otherwise(lag)
+        return {
+            params.output_column: (value - lag).cast(output_column.physical_dtype)
+        }

@@ -216,3 +216,23 @@ class FeaturePacker(TSFN[FeaturePackerConfig]):
 
         features = pl.concat_arr(*packed).alias(params.output_column)
         return _select_outputs(lf, params.timestamp_column, features)
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        """Lower packing directly into the executor's shared temporal domain."""
+        params = self.parameters
+        output_dtype = cast(pl.DataType, params.output_dtype)
+        packed: list[pl.Expr] = []
+        for name in params.input_columns:
+            value = inputs.get(name)
+            if value is None:
+                return None
+            column = self.input_column_signature(name)
+            packed.append(
+                value.cast(pl.Array(output_dtype, _flat_size(column.shape)))
+                if column.shape
+                else value.cast(output_dtype)
+            )
+        return {params.output_column: pl.concat_arr(*packed)}

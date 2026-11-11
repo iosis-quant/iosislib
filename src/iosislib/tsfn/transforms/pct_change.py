@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import polars as pl
@@ -67,3 +68,19 @@ class PctChange(TSFN[PctChangeConfig]):
             params.timestamp_column,
             result.alias(params.output_column),
         )
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        params = self.parameters
+        value = inputs[params.input_column]
+        prior = value.shift(params.periods)
+        change = value / prior - 1.0
+        return {
+            params.output_column: pl.when(
+                (prior == 0.0) | change.is_infinite()
+            )
+            .then(pl.lit(None, dtype=pl.Float64))
+            .otherwise(change)
+        }

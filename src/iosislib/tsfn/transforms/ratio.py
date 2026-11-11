@@ -68,3 +68,20 @@ class Ratio(ItemwiseStructTSFN[RatioConfig]):
             ratio = ratio.set(ratio.is_infinite(), None)
 
         return ratio.rename(params.output_column)
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        params = self.parameters
+        ratio = inputs[params.numerator_column] / inputs[params.denominator_column]
+        output_shape = self.output_column_signature(params.output_column).shape
+        if output_shape:
+            ratio = ratio.arr.eval(
+                pl.when(pl.element().is_infinite())
+                .then(None)
+                .otherwise(pl.element())
+            )
+        else:
+            ratio = pl.when(ratio.is_infinite()).then(None).otherwise(ratio)
+        return {params.output_column: ratio}

@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -9,7 +10,13 @@ import pytest
 from iosislib.core.graph import Executor, FusedLocalExecutor, Graph, LocalExecutor
 from iosislib.core.node import Node
 from iosislib.core.tsfn import FrameSignature, TSFN, TSFNConfig
-from iosislib.tsfn.transforms import Abs, Negate
+from iosislib.tsfn.transforms import (
+    Abs,
+    FeaturePacker,
+    FeatureUnpacker,
+    Negate,
+    Ratio,
+)
 
 VALUE_FRAME = FrameSignature(columns=(("value", pl.Int64),))
 COMBINED_FRAME = FrameSignature(columns=(("left", pl.Int64), ("right", pl.Int64)))
@@ -48,6 +55,34 @@ class CombineValues(TSFN):
 
     def apply(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         return lf.select("timestamp", "left", "right")
+
+
+class FusedCombineValues(CombineValues):
+    VERSION = "1.0.1"
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        return {"left": inputs["left"], "right": inputs["right"]}
+
+
+class FusedOnly(TSFN):
+    """A test-only transform that proves Graph selects fused lowering by default."""
+
+    VERSION = "1.0.0"
+
+    def type_signature(self) -> tuple[FrameSignature, FrameSignature]:
+        return VALUE_FRAME, VALUE_FRAME
+
+    def apply(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        raise AssertionError("legacy lowering must not run")
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        return {"value": inputs["value"]}
 
 
 class CombineThreeValues(TSFN):
@@ -250,6 +285,15 @@ def test_graph_execute_uses_the_supplied_runtime_executor() -> None:
     assert executor.materialized_nodes == [transform.ID]
 
 
+def test_graph_execute_uses_fused_lowering_by_default() -> None:
+    source = source_node("source", (0, 1), (10, 20))
+    graph = Graph(Node(FusedOnly, bindings={"value": source.value}))
+
+    result = graph.execute()
+
+    assert result["value"].to_list() == [10, 20]
+
+
 def test_each_execute_can_select_an_independent_runtime_executor() -> None:
     source = source_node("source", (0,), (10,))
     first = RecordingExecutor()
@@ -330,6 +374,106 @@ def test_fused_executor_preserves_unary_chain_results() -> None:
 
     expected = graph.execute(executor=LocalExecutor(no_cache=True))
     actual = graph.execute(executor=FusedLocalExecutor(no_cache=True))
+
+    assert actual.equals(expected)
+
+
+def test_fused_executor_keeps_a_wide_expression_graph_in_one_domain() -> None:
+    source = Node(FloatSource)
+    layer = [
+        Node(Negate, bindings={"value": source.value}, name=f"seed-{index}")
+        for index in range(3)
+    ]
+    for depth in range(12):
+        layer = [
+            Node(
+                Ratio,
+                bindings={
+                    "left": layer[index].negated if depth == 0 else layer[index].ratio,
+                    "right": (
+                        layer[(index + 1) % 3].negated
+                        if depth == 0
+                        else layer[(index + 1) % 3].ratio
+                    ),
+                },
+                name=f"ratio-{depth}-{index}",
+            )
+            for index in range(3)
+        ]
+    graph = Graph(layer[0])
+    executor = FusedLocalExecutor(no_cache=True)
+
+    frames = executor._evaluate_to_terminals(graph)  # noqa: SLF001
+    frame = frames[layer[0].ID]
+
+    assert len(frame.explain(optimized=False).splitlines()) < 150
+    assert executor.materialize(layer[0], frame).drop("delta_t").shape == (1, 2)
+
+
+def test_fused_executor_preserves_wide_expression_graph_results() -> None:
+    source = Node(FloatSource)
+    first = Node(Negate, bindings={"value": source.value})
+    second = Node(Abs, bindings={"value": source.value})
+    ratio = Node(Ratio, bindings={"left": first.negated, "right": second.abs})
+    graph = Graph(ratio)
+
+    expected = graph.execute(executor=LocalExecutor(no_cache=True))
+    actual = graph.execute(executor=FusedLocalExecutor(no_cache=True))
+
+    assert actual.equals(expected)
+
+
+def test_fused_executor_preserves_feature_packing_and_unpacking() -> None:
+    source = Node(FloatSource)
+    packed = Node(
+        FeaturePacker,
+        parameters={"input_columns": ("left", "right")},
+        bindings={"left": source.value, "right": source.value},
+    )
+    unpacked = Node(
+        FeatureUnpacker,
+        parameters={"base_name": "unpacked"},
+        bindings={"features": packed.features},
+    )
+    graph = Graph(unpacked)
+
+    expected = graph.execute(executor=LocalExecutor(no_cache=True))
+    actual = graph.execute(executor=FusedLocalExecutor(no_cache=True))
+
+    assert actual.equals(expected)
+
+
+def test_fused_executor_event_union_matches_asof_alignment() -> None:
+    left = source_node("left", (0, 2), (10, 20))
+    right = source_node("right", (1, 3), (100, 300))
+    expected = Graph(
+        Node(CombineValues, bindings={"left": left.value, "right": right.value})
+    ).execute(executor=LocalExecutor(no_cache=True))
+    actual = Graph(
+        Node(
+            FusedCombineValues,
+            bindings={"left": left.value, "right": right.value},
+        )
+    ).execute(executor=FusedLocalExecutor(no_cache=True))
+
+    assert actual.equals(expected)
+
+
+def test_fused_executor_event_union_honors_tolerance() -> None:
+    left = source_node("left", (0,), (10,))
+    right = source_node("right", (2, 3), (200, 300))
+    bindings = {"left": left.value, "right": right.value}
+    tolerances = {"left": timedelta(minutes=1)}
+    expected = Graph(
+        Node(CombineValues, bindings=bindings, tolerances=tolerances)
+    ).execute(executor=LocalExecutor(no_cache=True))
+    actual = Graph(
+        Node(
+            FusedCombineValues,
+            bindings=bindings,
+            tolerances=tolerances,
+        )
+    ).execute(executor=FusedLocalExecutor(no_cache=True))
 
     assert actual.equals(expected)
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Real
 from typing import Literal, cast
@@ -569,6 +569,28 @@ class RollingCov(TSFN[RollingCovConfig]):
             cov.cast(output_column.physical_dtype).alias(output_column.name),
         )
 
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        params = self.parameters
+        left = inputs.get(params.left_column)
+        right = inputs.get(params.right_column)
+        if left is None or right is None:
+            return None
+        cov = pl.rolling_cov(
+            left,
+            right,
+            window_size=params.periods,
+            min_samples=params.min_samples,
+            ddof=params.ddof,
+        ).fill_nan(None)
+        return {
+            params.output_column: cov.cast(
+                self.output_column_signature(params.output_column).physical_dtype
+            )
+        }
+
 
 @dataclass(frozen=True)
 class RollingCovMatrixConfig(TSFNConfig):
@@ -693,3 +715,43 @@ class RollingCovMatrix(TSFN[RollingCovMatrixConfig]):
             input_signature.time.column,
             matrix,
         )
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        params = self.parameters
+        values = {name: inputs.get(name) for name in params.input_columns}
+        if any(value is None for value in values.values()):
+            return None
+        cells: dict[tuple[int, int], pl.Expr] = {}
+        ordered: list[pl.Expr] = []
+        for i, left_name in enumerate(params.input_columns):
+            for j, right_name in enumerate(params.input_columns):
+                if j < i:
+                    ordered.append(cells[(j, i)])
+                    continue
+                left = values[left_name]
+                right = values[right_name]
+                assert left is not None and right is not None
+                if i == j:
+                    cell = left.rolling_var(
+                        window_size=params.periods,
+                        min_samples=params.min_samples,
+                        ddof=params.ddof,
+                    )
+                else:
+                    cell = pl.rolling_cov(
+                        left,
+                        right,
+                        window_size=params.periods,
+                        min_samples=params.min_samples,
+                        ddof=params.ddof,
+                    ).fill_nan(None)
+                cells[(i, j)] = cell
+                ordered.append(cell)
+        return {
+            params.output_column: pl.concat_arr(*ordered).cast(
+                self.output_column_signature(params.output_column).physical_dtype
+            )
+        }

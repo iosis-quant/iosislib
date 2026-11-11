@@ -113,3 +113,15 @@ class Lead(TSFN[LeadConfig]):
             params.timestamp_column,
             lead.cast(output_column.physical_dtype).alias(params.output_column),
         )
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        params = self.parameters
+        output_column = self.output_column_signature(params.output_column)
+        return {
+            params.output_column: inputs[params.input_column]
+            .shift(-params.periods)
+            .cast(output_column.physical_dtype)
+        }

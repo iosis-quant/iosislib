@@ -135,5 +135,23 @@ class FeatureUnpacker(TSFN[FeatureUnpackerConfig]):
             *outputs,
         )
 
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        """Lower unpacking directly into the executor's shared temporal domain."""
+        params = self.parameters
+        value = inputs.get(params.input_column)
+        if value is None:
+            return None
+        input_column = self.input_column_signature(params.input_column)
+        width = _flat_size(input_column.shape)
+        return {
+            f"{params.base_name}_{index}": (
+                value.arr.get(index) if input_column.shape else value
+            ).cast(pl.Float64)
+            for index in range(width)
+        }
+
 
 __all__ = ["FeatureUnpacker", "FeatureUnpackerConfig"]

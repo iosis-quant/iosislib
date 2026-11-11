@@ -31,7 +31,10 @@ handling. It does not execute. `Graph` rejects invalid bindings, incompatible
 schemas/time axes, and cycles before execution. `Executor` aligns every bound
 input and calls the TSFN. `LocalExecutor` is the current sequential runtime;
 executors are passed to `graph.execute(executor=...)`, never stored in graph
-identity.
+identity. By default, `Graph.execute()` uses `FusedLocalExecutor`: it lowers a
+complete expression-capable graph into shared temporal relations instead of
+nested LazyFrame plans. `LocalExecutor` remains available when a caller needs
+the legacy lowering explicitly.
 
 An inputless source is an ordinary TSFN whose input signature is exactly
 `FrameSignature.empty()`. It has no special node class and is called without a
@@ -124,6 +127,24 @@ boundary, but cannot remove one required by the TSFN. Ordinary transforms
 should stay lazy. `BatchTSFN` requires materialization by design and is the
 right base for a full-frame operation, not a reason to eagerly collect an
 otherwise vectorized transform.
+
+### Fused expression lowering
+
+The default executor can preserve a graph's DAG sharing only when every
+non-source TSFN in the execution region provides a row-preserving expression
+lowering. Implement `fused_expressions(inputs)` to return one `pl.Expr` for
+each declared output, keyed by output name; use the supplied expressions rather
+than `pl.col` names. Return `None` when the TSFN requires a custom LazyFrame
+plan, changes rows, observes graph state, or has a non-expression side effect.
+That graph then uses the ordinary `LocalExecutor` lowering unchanged.
+
+The expressions receive the executor's causally aligned, tolerance-aware input
+domain. They must preserve row count and row order, and they must be equivalent
+to `apply()` under `PROPAGATE` and `PASS` null policies. `FILL`, `DROP`,
+`ERROR`, and custom null handling deliberately stay on the ordinary path.
+Built-in elementwise, rolling, packing, and return transforms already provide
+this lowering. `BatchTSFN`, models, external adapters, and other true execution
+boundaries do not.
 
 ## Choose the narrowest TSFN base class
 

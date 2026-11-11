@@ -111,3 +111,18 @@ class Lag(TSFN[LagConfig]):
             params.timestamp_column,
             lag.cast(output_column.physical_dtype).alias(params.output_column),
         )
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        params = self.parameters
+        output_column = self.output_column_signature(params.output_column)
+        lag = inputs[params.input_column].shift(params.periods)
+        if output_column.shape:
+            null_fill = pl.lit(
+                [None] * output_column.shape[0],
+                dtype=output_column.physical_dtype,
+            )
+            lag = pl.when(lag.is_null()).then(null_fill).otherwise(lag)
+        return {params.output_column: lag.cast(output_column.physical_dtype)}

@@ -79,3 +79,28 @@ class LogRatio(ItemwiseStructTSFN[LogRatioConfig]):
             log_ratio = log_ratio.set(invalid, None)
 
         return log_ratio.rename(params.output_column)
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        params = self.parameters
+        numerator = inputs[params.numerator_column]
+        denominator = inputs[params.denominator_column]
+        log_ratio = (numerator / denominator).log()
+        output_shape = self.output_column_signature(params.output_column).shape
+        if output_shape:
+            log_ratio = log_ratio.arr.eval(
+                pl.when(pl.element().is_infinite() | pl.element().is_nan())
+                .then(None)
+                .otherwise(pl.element())
+            )
+        else:
+            invalid = (
+                (numerator <= 0.0)
+                | (denominator <= 0.0)
+                | log_ratio.is_infinite()
+                | log_ratio.is_nan()
+            ).fill_null(False)
+            log_ratio = pl.when(invalid).then(None).otherwise(log_ratio)
+        return {params.output_column: log_ratio}

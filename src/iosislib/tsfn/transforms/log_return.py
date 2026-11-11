@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import polars as pl
@@ -64,3 +65,16 @@ class LogReturn(TSFN[LogReturnConfig]):
             params.timestamp_column,
             result.alias(params.output_column),
         )
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        params = self.parameters
+        value = inputs[params.input_column]
+        prior = value.shift(params.periods)
+        return {
+            params.output_column: pl.when((value > 0.0) & (prior > 0.0))
+            .then(value.log() - prior.log())
+            .otherwise(pl.lit(None, dtype=pl.Float64))
+        }

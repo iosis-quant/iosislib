@@ -888,14 +888,25 @@ class LocalExecutor(Executor):
             ) from exc
 
 
-class FusedLocalExecutor(LocalExecutor):
-    """Experimental executor that preserves sharing in unary expression regions.
+@dataclass
+class _FusedDomain:
+    """One shared time relation and the node outputs stored as its columns."""
 
-    A complete single-source chain of ``ItemwiseUnaryTSFN`` nodes with
-    propagate/pass null handling is compiled into one Polars LazyFrame. Each
-    node output is an internal column, so downstream nodes reference a column
-    rather than embedding a parent LazyFrame plan. All other graphs use the
-    normal ``LocalExecutor`` lowering unchanged.
+    frame: pl.LazyFrame
+    time_column: str
+    columns: dict[tuple[str, str], str]
+
+
+class FusedLocalExecutor(LocalExecutor):
+    """Compile expression-capable graph regions without expanding their DAG.
+
+    A fusable TSFN supplies ``fused_expressions``. Its outputs become columns
+    on a shared temporal domain, so consumers retain column references instead
+    of nesting the producer's LazyFrame. Separate domains are merged by one
+    event-union relation that is equivalent to the executor's backward-asof
+    alignment. A graph with any unsupported node falls back unchanged. It is
+    the default local executor; callers may still select ``LocalExecutor`` to
+    force the legacy one-LazyFrame-per-node lowering.
     """
 
     def _evaluate_to_terminals_with_hits(
@@ -904,7 +915,7 @@ class FusedLocalExecutor(LocalExecutor):
         *,
         on_progress: ProgressCallback | None = None,
     ) -> tuple[dict[str, pl.LazyFrame], set[str]]:
-        fused = self._compile_unary_chain(graph, on_progress=on_progress)
+        fused = self._compile_fused_graph(graph, on_progress=on_progress)
         if fused is not None:
             terminal = graph.terminal_nodes[0]
             return {terminal.ID: fused}, set()
@@ -912,132 +923,247 @@ class FusedLocalExecutor(LocalExecutor):
             graph, on_progress=on_progress
         )
 
-    def _compile_unary_chain(
+    def _compile_fused_graph(
         self,
         graph: Graph,
         *,
         on_progress: ProgressCallback | None,
     ) -> pl.LazyFrame | None:
-        if len(graph.terminal_nodes) != 1 or len(graph.node_list) < 2:
-            return None
-        if graph.materialized_node_ids:
+        if not self._is_fusable_graph(graph):
             return None
 
-        source, *transforms = graph.node_list
-        if source.bindings or not transforms:
-            return None
-
-        previous = source
-        previous_output: str | None = None
-        for index, node in enumerate(transforms):
-            function = node.function
-            if not isinstance(function, ItemwiseUnaryTSFN):
-                return None
-            if type(function).apply is not ItemwiseUnaryTSFN.apply:
-                return None
-            input_name = function.itemwise_input_column()
-            output_name = function.itemwise_output_column()
-            binding = node.bindings.get(input_name)
-            if binding is None or binding[0] is not previous:
-                return None
-            if index and binding[1] != previous_output:
-                return None
-            if len(node.bindings) != 1 or output_name not in node.outputs:
-                return None
-            handler = node.null_handlers[input_name]
-            if handler.policy not in (NullPolicy.PROPAGATE, NullPolicy.PASS):
-                return None
-            previous = node
-            previous_output = output_name
-
-        # The loop needs the source output name to check the first binding.
-        # A source may expose several outputs; only the one consumed by the
-        # first fusable transform participates in this region.
-        return self._compile_unary_chain_from_source(
-            source, transforms, on_progress=on_progress
-        )
-
-    def _compile_unary_chain_from_source(
-        self,
-        source: Node,
-        transforms: list[Node],
-        *,
-        on_progress: ProgressCallback | None,
-    ) -> pl.LazyFrame | None:
-        first = transforms[0]
-        first_function = first.function
-        assert isinstance(first_function, ItemwiseUnaryTSFN)
-        first_input = first_function.itemwise_input_column()
-        source_binding = first.bindings.get(first_input)
-        if source_binding is None or source_binding[0] is not source:
-            return None
-        source_output = source_binding[1]
-        if source_output not in source.outputs:
-            return None
-
-        time_axis = source.function.signature[1].time
-        if time_axis is None:
-            return None
-        time_column = time_axis.column
-        total = len(transforms) + 1
-        _report_progress(on_progress, source, 0, total)
-        source_lf = self._inject_delta_t(self.lower_node(source, None), source)
-        internal_columns: dict[tuple[str, str], str] = {
-            (source.ID, source_output): "__iosis_fused_0"
-        }
-        selected = [
-            pl.col(time_column),
-            pl.col(source_output).alias(internal_columns[(source.ID, source_output)]),
-        ]
-        if DELTA_T_COLUMN in source_lf.collect_schema():
-            selected.append(pl.col(DELTA_T_COLUMN))
-        region = (
-            source_lf.select(selected)
-            .sort(time_column, maintain_order=True)
-            .unique(subset=[time_column], keep="last", maintain_order=True)
-            .sort(time_column, maintain_order=True)
-        )
-
-        previous = source
-        previous_output = source_output
-        for index, node in enumerate(transforms, start=1):
+        domains: dict[tuple[str, str], _FusedDomain] = {}
+        output_counter = 0
+        total = len(graph.node_list)
+        for index, node in enumerate(graph.node_list):
             _report_progress(on_progress, node, index, total)
-            function = node.function
-            assert isinstance(function, ItemwiseUnaryTSFN)
-            input_name = function.itemwise_input_column()
-            output_name = function.itemwise_output_column()
-            binding = node.bindings.get(input_name)
-            if binding != (previous, previous_output):
-                return None
-            input_column = internal_columns[(previous.ID, previous_output)]
-            input_signature = function.input_column_signature(input_name)
-            output_signature = function.output_column_signature(output_name)
-            value = pl.col(input_column)
-            expression = (
-                value.arr.eval(function.itemwise_expr(pl.element()))
-                if input_signature.shape
-                else function.itemwise_expr(value)
-            )
-            internal_output = f"__iosis_fused_{index}"
-            region = region.with_columns(
-                expression.cast(output_signature.physical_dtype).alias(internal_output)
-            )
-            internal_columns[(node.ID, output_name)] = internal_output
-            previous = node
-            previous_output = output_name
+            if not node.bindings:
+                domain, output_counter = self._source_domain(node, output_counter)
+                for output_name in node.outputs:
+                    domains[(node.ID, output_name)] = domain
+                continue
+
+            inputs = {
+                input_name: (domains[(parent.ID, parent_output)], parent_output)
+                for input_name, (parent, parent_output) in node.bindings.items()
+            }
+            domain, input_exprs = self._input_domain(node, inputs)
+            expressions = node.function.fused_expressions(input_exprs)
+            assert expressions is not None  # guarded by _is_fusable_graph
+            output_exprs: list[pl.Expr] = []
+            for output_name in node.outputs:
+                output_counter += 1
+                internal = f"__iosis_fused_{output_counter}"
+                output_exprs.append(
+                    expressions[output_name]
+                    .cast(node.function.output_column_signature(output_name).physical_dtype)
+                    .alias(internal)
+                )
+                domain.columns[(node.ID, output_name)] = internal
+            domain.frame = domain.frame.with_columns(output_exprs)
+            for output_name in node.outputs:
+                domains[(node.ID, output_name)] = domain
 
         _report_progress(on_progress, None, total, total)
-        terminal = transforms[-1]
-        terminal_output = terminal.function.itemwise_output_column()
-        output = [
-            pl.col(time_column),
-            pl.col(internal_columns[(terminal.ID, terminal_output)]).alias(
-                terminal_output
-            ),
-        ]
-        if DELTA_T_COLUMN in region.collect_schema():
+        terminal = graph.terminal_nodes[0]
+        domain = domains[(terminal.ID, next(iter(terminal.outputs)))]
+        output = [pl.col(domain.time_column)]
+        output.extend(
+            pl.col(domain.columns[(terminal.ID, output_name)]).alias(output_name)
+            for output_name in terminal.outputs
+        )
+        if DELTA_T_COLUMN in domain.frame.collect_schema():
             output.append(pl.col(DELTA_T_COLUMN))
-        return region.select(output)
+        return domain.frame.select(output)
+
+    def _is_fusable_graph(self, graph: Graph) -> bool:
+        if (
+            self._cache_enabled
+            or len(graph.terminal_nodes) != 1
+            or len(graph.node_list) < 2
+            or graph.materialized_node_ids
+        ):
+            return False
+        for node in graph.node_list:
+            if not node.bindings:
+                if node.function.signature[0].is_empty():
+                    continue
+                return False
+            if any(
+                handler.policy not in (NullPolicy.PROPAGATE, NullPolicy.PASS)
+                for handler in node.null_handlers.values()
+            ):
+                return False
+            function = node.function
+            if (
+                isinstance(function, ItemwiseUnaryTSFN)
+                and type(function).apply is not ItemwiseUnaryTSFN.apply
+            ):
+                return False
+            expressions = function.fused_expressions(
+                {input_name: pl.col(input_name) for input_name in node.bindings}
+            )
+            if expressions is None or set(expressions) != set(node.outputs):
+                return False
+        return True
+
+    def _source_domain(
+        self,
+        node: Node,
+        output_counter: int,
+    ) -> tuple[_FusedDomain, int]:
+        time_axis = node.function.signature[1].time
+        assert time_axis is not None
+        source = self._inject_delta_t(self.lower_node(node, None), node)
+        columns: dict[tuple[str, str], str] = {}
+        selected: list[pl.Expr] = [pl.col(time_axis.column)]
+        for output_name in node.outputs:
+            output_counter += 1
+            internal = f"__iosis_fused_{output_counter}"
+            columns[(node.ID, output_name)] = internal
+            selected.append(pl.col(output_name).alias(internal))
+        if DELTA_T_COLUMN in source.collect_schema():
+            selected.append(pl.col(DELTA_T_COLUMN))
+        frame = (
+            source.select(selected)
+            .sort(time_axis.column, maintain_order=True)
+            .unique(
+                subset=[time_axis.column], keep="last", maintain_order=True
+            )
+            .sort(time_axis.column, maintain_order=True)
+        )
+        return _FusedDomain(frame, time_axis.column, columns), output_counter
+
+    def _input_domain(
+        self,
+        node: Node,
+        inputs: Mapping[str, tuple[_FusedDomain, str]],
+    ) -> tuple[_FusedDomain, Mapping[str, pl.Expr]]:
+        domains = {id(domain): domain for domain, _ in inputs.values()}
+        groups = {
+            (parent.ID, node.tolerances.get(input_name))
+            for input_name, (parent, _) in node.bindings.items()
+        }
+        if len(domains) == 1:
+            domain = next(iter(domains.values()))
+            expressions = {
+                input_name: pl.col(domain.columns[(parent.ID, parent_output)])
+                for input_name, (parent, parent_output) in node.bindings.items()
+            }
+            if len(groups) == 1:
+                return domain, expressions
+            domain.frame = domain.frame.with_columns(
+                pl.col(domain.time_column).diff().alias(DELTA_T_COLUMN)
+            )
+            return domain, expressions
+        return self._event_union_domain(node, inputs, list(domains.values()))
+
+    def _event_union_domain(
+        self,
+        node: Node,
+        inputs: Mapping[str, tuple[_FusedDomain, str]],
+        domains: list[_FusedDomain],
+    ) -> tuple[_FusedDomain, Mapping[str, pl.Expr]]:
+        input_time = node.function.signature[0].time
+        assert input_time is not None
+        time_column = input_time.column
+        grouped: dict[int, list[str]] = defaultdict(list)
+        for input_name, (domain, _) in inputs.items():
+            grouped[id(domain)].append(input_name)
+        specs = [
+            (index, domain, tuple(sorted(grouped[id(domain)])))
+            for index, domain in enumerate(domains)
+        ]
+
+        event_frames: list[pl.LazyFrame] = []
+        for current_index, current_domain, _ in specs:
+            columns: list[pl.Expr] = [
+                pl.col(current_domain.time_column).alias(time_column)
+            ]
+            for index, domain, names in specs:
+                present = f"__iosis_present_{index}"
+                observed = f"__iosis_observed_{index}"
+                if index == current_index:
+                    columns.extend(
+                        [
+                            pl.lit(True).alias(present),
+                            pl.col(domain.time_column).alias(observed),
+                        ]
+                    )
+                    columns.extend(
+                        pl.col(domain.columns[(node.bindings[name][0].ID, node.bindings[name][1])]).alias(
+                            f"__iosis_value_{index}_{name}"
+                        )
+                        for name in names
+                    )
+                else:
+                    columns.extend(
+                        [
+                            pl.lit(False).alias(present),
+                            pl.lit(None, dtype=input_time.dtype).alias(observed),
+                        ]
+                    )
+                    columns.extend(
+                        pl.lit(
+                            None,
+                            dtype=node.function.input_column_signature(name).physical_dtype,
+                        ).alias(f"__iosis_value_{index}_{name}")
+                        for name in names
+                    )
+            event_frames.append(
+                current_domain.frame.select(columns).sort(
+                    time_column, maintain_order=True
+                )
+            )
+
+        aggregations: list[pl.Expr] = []
+        for index, _, names in specs:
+            present = pl.col(f"__iosis_present_{index}")
+            observed = f"__iosis_observed_{index}"
+            aggregations.append(
+                pl.col(observed).filter(present).last().alias(observed)
+            )
+            for name in names:
+                values = pl.col(f"__iosis_value_{index}_{name}").filter(present)
+                aggregations.append(
+                    pl.when(present.any())
+                    .then(values.implode())
+                    .otherwise(None)
+                    .alias(f"__iosis_event_{index}_{name}")
+                )
+
+        frame = (
+            pl.concat(event_frames, how="vertical")
+            .sort(time_column, maintain_order=True)
+            .group_by(time_column, maintain_order=True)
+            .agg(aggregations)
+            .sort(time_column, maintain_order=True)
+            .with_columns(
+                pl.col(column).forward_fill().alias(column)
+                for index, _, names in specs
+                for column in [
+                    f"__iosis_observed_{index}",
+                    *(f"__iosis_event_{index}_{name}" for name in names),
+                ]
+            )
+            .with_columns(pl.col(time_column).diff().alias(DELTA_T_COLUMN))
+        )
+        expressions: dict[str, pl.Expr] = {}
+        columns: dict[tuple[str, str], str] = {}
+        for index, _, names in specs:
+            observed = pl.col(f"__iosis_observed_{index}")
+            for name in names:
+                tolerance = node.tolerances.get(name)
+                valid = observed.is_not_null()
+                if tolerance is not None:
+                    if isinstance(tolerance, str):
+                        valid &= pl.col(time_column) <= observed.dt.offset_by(tolerance)
+                    else:
+                        valid &= pl.col(time_column) - observed <= tolerance
+                expressions[name] = pl.when(valid).then(
+                    pl.col(f"__iosis_event_{index}_{name}").list.last()
+                ).otherwise(None)
+        return _FusedDomain(frame, time_column, columns), expressions
 
 
 class Graph:
@@ -1885,7 +2011,7 @@ class Graph:
         multi-terminal graphs return a mapping of terminal node ID to frame.
         ``on_progress`` is forwarded to the executor; see ``Executor.execute``.
         """
-        selected_executor = LocalExecutor() if executor is None else executor
+        selected_executor = FusedLocalExecutor() if executor is None else executor
         if not isinstance(selected_executor, Executor):
             raise TypeError("Graph executor must be an Executor")
         return selected_executor.execute(self, on_progress=on_progress)

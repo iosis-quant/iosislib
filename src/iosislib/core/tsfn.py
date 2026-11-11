@@ -879,6 +879,18 @@ class TSFN(abc.ABC, Generic[ConfigT]):
         """All transformations should be done lazily here."""
         pass
 
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        """Return row-preserving output expressions, or ``None`` to opt out.
+
+        The fused executor uses this optional lowering contract to retain graph
+        sharing inside one temporal relation. Returning ``None`` preserves the
+        normal ``apply`` lowering and its execution boundaries.
+        """
+        return None
+
 
 class ItemwiseUnaryTSFN(TSFN[ConfigT], abc.ABC):
     """Base for one-input transforms that operate independently per value."""
@@ -961,6 +973,24 @@ class ItemwiseUnaryTSFN(TSFN[ConfigT], abc.ABC):
             input_signature.time.column,
             result.cast(output_column.physical_dtype).alias(output_column.name),
         )
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        input_name = self.itemwise_input_column()
+        output_name = self.itemwise_output_column()
+        value = inputs.get(input_name)
+        if value is None:
+            return None
+        input_column = self.input_column_signature(input_name)
+        output_column = self.output_column_signature(output_name)
+        result = (
+            value.arr.eval(self.itemwise_expr(pl.element()))
+            if input_column.shape
+            else self.itemwise_expr(value)
+        )
+        return {output_name: result.cast(output_column.physical_dtype)}
 
 
 class BatchTSFN(TSFN[ConfigT], abc.ABC):
@@ -1253,6 +1283,24 @@ class RollingUnaryTSFN(TSFN[ConfigT], abc.ABC):
             result.cast(output_column.physical_dtype).alias(output_column.name),
         )
 
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        input_name = self.rolling_input_column()
+        output_name = self.rolling_output_column()
+        value = inputs.get(input_name)
+        if value is None:
+            return None
+        output_column = self.output_column_signature(output_name)
+        return {
+            output_name: self.rolling_expr(
+                value,
+                periods=self.rolling_periods(),
+                min_samples=self.rolling_min_samples(),
+            ).cast(output_column.physical_dtype)
+        }
+
 
 class EwmUnaryTSFN(TSFN[ConfigT], abc.ABC):
     """Base for unary exponentially-weighted transforms.
@@ -1322,6 +1370,25 @@ class EwmUnaryTSFN(TSFN[ConfigT], abc.ABC):
             input_signature.time.column,
             result.cast(output_column.physical_dtype).alias(output_column.name),
         )
+
+    def fused_expressions(
+        self,
+        inputs: Mapping[str, pl.Expr],
+    ) -> Mapping[str, pl.Expr] | None:
+        input_name = self.ewm_input_column()
+        output_name = self.ewm_output_column()
+        value = inputs.get(input_name)
+        if value is None:
+            return None
+        output_column = self.output_column_signature(output_name)
+        return {
+            output_name: self.ewm_expr(
+                value,
+                alpha=self.ewm_alpha(),
+                min_samples=self.ewm_min_samples(),
+                adjust=self.ewm_adjust(),
+            ).cast(output_column.physical_dtype)
+        }
 
 
 __all__ = [
