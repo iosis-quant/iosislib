@@ -148,8 +148,8 @@ def source_node(
 
 
 class RecordingExecutor(LocalExecutor):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, *, max_lazy_depth: int | None = None) -> None:
+        super().__init__(no_cache=True, max_lazy_depth=max_lazy_depth)
         self.aligned_nodes: list[str] = []
         self.lowered_nodes: list[str] = []
         self.materialized_nodes: list[str] = []
@@ -293,6 +293,40 @@ def test_graph_materialization_points_split_lazy_execution_regions() -> None:
     assert graph.materialized_node_ids == frozenset({middle.ID})
     assert executor.materialized_nodes == [middle.ID, root.ID]
     assert graph.ID == Graph(root).ID
+
+
+def test_lazy_depth_boundaries_preserve_results_and_bound_lazy_regions() -> None:
+    source = source_node("source", (0, 1, 2), (10, 20, 30))
+    nodes = [source]
+    for index in range(7):
+        nodes.append(
+            Node(
+                NeedsInput,
+                bindings={"value": nodes[-1].value},
+                name=f"stage-{index}",
+            )
+        )
+    graph = Graph(nodes[-1])
+
+    baseline = graph.execute(executor=LocalExecutor(no_cache=True))
+    executor = RecordingExecutor(max_lazy_depth=2)
+    bounded = graph.execute(executor=executor)
+
+    assert bounded.equals(baseline)
+    # Source + every second non-terminal stage are execution-local boundaries;
+    # the terminal is materialized once by execute().
+    assert executor.materialized_nodes == [
+        nodes[1].ID,
+        nodes[3].ID,
+        nodes[5].ID,
+        nodes[-1].ID,
+    ]
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "2"])
+def test_max_lazy_depth_rejects_invalid_values(value: object) -> None:
+    with pytest.raises((TypeError, ValueError), match="max_lazy_depth"):
+        LocalExecutor(max_lazy_depth=value)  # type: ignore[arg-type]
 
 
 def test_explicit_root_materialization_is_not_performed_twice() -> None:

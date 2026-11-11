@@ -232,9 +232,49 @@ class Executor(abc.ABC):
         s3_credentials: S3CredentialsProvider | None = None,
         *,
         model_dir: str | os.PathLike[str] | None = None,
+        max_lazy_depth: int | None = None,
     ) -> None:
+        if max_lazy_depth is not None:
+            if isinstance(max_lazy_depth, bool) or not isinstance(
+                max_lazy_depth, int
+            ):
+                raise TypeError("max_lazy_depth must be an integer or None")
+            if max_lazy_depth < 1:
+                raise ValueError("max_lazy_depth must be at least 1")
         self._s3_credentials: S3CredentialsProvider | None = s3_credentials
         self._model_dir_raw: str | os.PathLike[str] | None = model_dir
+        self._max_lazy_depth = max_lazy_depth
+
+    @staticmethod
+    def _node_parents(node: Node) -> set[Node]:
+        """Return each data dependency once, regardless of input aliases."""
+        return set(node.inputs) | {
+            parent_node for parent_node, _ in node.bindings.values()
+        }
+
+    def _lazy_depth(
+        self,
+        node: Node,
+        lazy_depths: Mapping[str, int],
+    ) -> int:
+        """Count lazy graph stages since the closest materialized output."""
+        return 1 + max(
+            (lazy_depths.get(parent.ID, 0) for parent in self._node_parents(node)),
+            default=0,
+        )
+
+    def _needs_lazy_depth_boundary(
+        self,
+        node: Node,
+        lazy_depth: int,
+        terminal_ids: set[str],
+    ) -> bool:
+        """Whether keeping ``node`` lazy would exceed the configured plan cap."""
+        return (
+            self._max_lazy_depth is not None
+            and lazy_depth >= self._max_lazy_depth
+            and node.ID not in terminal_ids
+        )
 
     def execute(
         self,
@@ -274,6 +314,7 @@ class Executor(abc.ABC):
         manifest entry is visible in the executor-owned model store.
         """
         results: dict[str, pl.LazyFrame] = {}
+        lazy_depths: dict[str, int] = {}
         terminal_ids = {node.ID for node in graph.terminal_nodes}
         trainer_groups = _trainer_groups(graph.node_list)
         deferred_ids = {
@@ -287,6 +328,23 @@ class Executor(abc.ABC):
         for index, node in enumerate(ordered):
             _report_progress(on_progress, node, index, total)
             self._evaluate_node(node, graph, results, terminal_ids)
+            lazy_depth = self._lazy_depth(node, lazy_depths)
+            if (
+                _is_trainer_node(node)
+                or node.ID in graph.materialized_node_ids
+                or self._needs_lazy_depth_boundary(node, lazy_depth, terminal_ids)
+            ):
+                # A DataFrame-backed LazyFrame is a new Polars plan leaf. This
+                # preserves the node output exactly while bounding the size of
+                # the unmaterialized region passed to downstream joins.
+                if (
+                    self._needs_lazy_depth_boundary(node, lazy_depth, terminal_ids)
+                    and not _is_trainer_node(node)
+                    and node.ID not in graph.materialized_node_ids
+                ):
+                    results[node.ID] = self.materialize(node, results[node.ID]).lazy()
+                lazy_depth = 0
+            lazy_depths[node.ID] = lazy_depth
         _report_progress(on_progress, None, total, total)
         return {node.ID: results[node.ID] for node in graph.terminal_nodes}
 
@@ -448,8 +506,13 @@ class LocalExecutor(Executor):
         s3_credentials: S3CredentialsProvider | None = None,
         cache_shard_bytes: int | None = None,
         model_dir: str | os.PathLike[str] | None = None,
+        max_lazy_depth: int | None = None,
     ) -> None:
-        super().__init__(s3_credentials=s3_credentials, model_dir=model_dir)
+        super().__init__(
+            s3_credentials=s3_credentials,
+            model_dir=model_dir,
+            max_lazy_depth=max_lazy_depth,
+        )
         raw: str | None = None
         if cache_dir is not None:
             raw = str(cache_dir)
@@ -814,6 +877,7 @@ class LocalExecutor(Executor):
     ) -> tuple[dict[str, pl.LazyFrame], set[str]]:
         required_ids, cached_frames = self._resolve_cache_frontier(graph)
         results: dict[str, pl.LazyFrame] = {}
+        lazy_depths: dict[str, int] = {}
         terminal_ids = {node.ID for node in graph.terminal_nodes}
         trainer_groups = _trainer_groups(graph.node_list)
         deferred_ids = {
@@ -834,6 +898,8 @@ class LocalExecutor(Executor):
                 results[node.ID] = self._inject_delta_t(
                     cached_frames[node.ID], node
                 )
+                # Cache hits begin a new physical plan at a parquet scan.
+                lazy_depths[node.ID] = 0
                 continue
 
             try:
@@ -855,22 +921,36 @@ class LocalExecutor(Executor):
 
             is_terminal = node.ID in terminal_ids
             is_materialized = node.ID in graph.materialized_node_ids
+            lazy_depth = self._lazy_depth(node, lazy_depths)
+            needs_boundary = self._needs_lazy_depth_boundary(
+                node, lazy_depth, terminal_ids
+            )
 
             if _is_trainer_node(node):
                 # Force the manifest side effect now; the terminal cache
                 # write still happens once in execute().
                 results[node.ID] = self.materialize(node, lf).lazy()
+                lazy_depth = 0
             elif is_materialized and not is_terminal and not _is_source_node(node):
                 df = self.materialize(node, lf)
                 if self._cache_enabled and node.ID not in cached_frames:
                     self._write_cache(node.ID, df)
                 results[node.ID] = df.lazy()
+                lazy_depth = 0
             elif is_materialized and not is_terminal:
                 # Source with materialize:true: collect for run-local reuse
                 # but never persist. `materialize` is ignored for caching.
                 results[node.ID] = self.materialize(node, lf).lazy()
+                lazy_depth = 0
+            elif needs_boundary:
+                # This boundary is execution-local. Unlike an explicit node
+                # materialization, it does not create or write a persistent
+                # cache entry.
+                results[node.ID] = self.materialize(node, lf).lazy()
+                lazy_depth = 0
             else:
                 results[node.ID] = lf
+            lazy_depths[node.ID] = lazy_depth
 
         _report_progress(on_progress, None, total, total)
         frames = {node.ID: results[node.ID] for node in graph.terminal_nodes}
